@@ -123,8 +123,18 @@ uint16_t payload[SAMPLES*2+2];
 #endif
 byte odat00, odat01, odat10, odat11;    // old data buffer for erase
 byte sample=0;                          // index for double buffer
-bool fft_mode = false, pulse_mode = false, dds_mode = false, fcount_mode = false;
+
+// mode definitions
+bool fft_mode = false; 
+bool pulse_mode = false; 
+bool dds_mode = false;
+bool fcount_mode = false;
+bool lcr_mode = false;
 byte info_mode = 3; // Text information display mode
+
+// Function page menu
+byte functionPage = 0;  // This is where we put the bottom menu of functions
+
 int trigger_ad;
 float sys_clk;      // System clock is typically 125MHz, eventually 133MHz
 volatile bool wfft, wdds;
