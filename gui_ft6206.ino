@@ -86,46 +86,46 @@ const FunctionButton functionPages[FUNCTION_PAGES][FUNCTION_BUTTONS] =
 // and how it will display the menu items
 void drawFunctionMenu(byte y)
 {
-    //
-    // Draw page arrows
-    //
-    display.fillTriangle(
-        4,  y + 5,
-        14, y,
-        14, y + 10,
-        TXTCOLOR);
+  //
+  // Draw page arrows
+  //
+  display.fillTriangle(
+    4,  y + 5,
+    14, y,
+    14, y + 10,
+    TXTCOLOR);
 
-    display.fillTriangle(
-        316, y + 5,
-        306, y,
-        306, y + 10,
-        TXTCOLOR);
+  display.fillTriangle(
+    316, y + 5,
+    306, y,
+    306, y + 10,
+    TXTCOLOR);
 
-    //
-    // Draw menu buttons
-    //
-    for (int i = 0; i < FUNCTION_BUTTONS; i++)
+  //
+  // Draw menu buttons
+  //
+  for (int i = 0; i < FUNCTION_BUTTONS; i++)
+  {
+    const FunctionButton &b = functionPages[functionPage][i];
+
+    // Compute the center of this button region
+    int centerX = MENU_LEFT + BUTTON_SPACING * i + BUTTON_SPACING / 2;
+
+    // Convert to a left edge for printing.
+    // Default font is approximately 6 pixels wide.
+    int textWidth = strlen(b.label) * 6;
+    int textX = centerX - textWidth / 2;
+
+    if (b.item >= 0)
+        set_pos_menu(textX, y, b.item);
+    else
     {
-        const FunctionButton &b = functionPages[functionPage][i];
-
-        // Compute the center of this button region
-        int centerX = MENU_LEFT + BUTTON_SPACING * i + BUTTON_SPACING / 2;
-
-        // Convert to a left edge for printing.
-        // Default font is approximately 6 pixels wide.
-        int textWidth = strlen(b.label) * 6;
-        int textX = centerX - textWidth / 2;
-
-        if (b.item >= 0)
-            set_pos_menu(textX, y, b.item);
-        else
-        {
-            display.setCursor(textX, y);
-            display.setTextColor(OFFCOLOR, BGCOLOR);
-        }
-
-        display.print(b.label);
+      display.setCursor(textX, y);
+      display.setTextColor(OFFCOLOR, BGCOLOR);
     }
+
+    display.print(b.label);
+  }
 }
 
 // calculate button region for function selection
