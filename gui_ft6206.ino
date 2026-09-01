@@ -25,10 +25,7 @@
 #define SEL_DISPLRG 24
 #define SEL_DISPSML 25
 #define SEL_DISPOFF 26
-
-
-
-
+#define SEL_LCR     27
 
 #ifndef NOLCD
 #include <Adafruit_FT6206.h>
@@ -40,6 +37,45 @@ extern Adafruit_FT6206 ctp;
 #define TOUCH_SWAP_AXES 1
 #define TOUCH_INVERT_X 0
 #define TOUCH_INVERT_Y 1
+
+// Define dimentions of the bottom menu function display
+constexpr uint8_t FUNCTION_BUTTONS = 5;
+constexpr uint8_t FUNCTION_PAGES   = 2;
+
+// Function menu button pixel location definitions
+const uint16_t functionMenuX[FUNCTION_BUTTONS] = {
+    1,
+    60,
+    132,
+    192,
+    252
+};
+
+struct FunctionButton
+{
+    int8_t item;
+    const char *label;
+};
+
+const FunctionButton functionPages[FUNCTION_PAGES][FUNCTION_BUTTONS] =
+{
+    {
+        {SEL_FFT,  "FFT "},
+        {SEL_PWM,  "PWM "},
+        {SEL_DDS,  "DDS "},
+        {SEL_DISP, "DISP"},
+        {SEL_FCNT, "FCNT"}
+    },
+
+    {
+        {SEL_LCR,  "LCR "},
+        {-1, ""},
+        {-1, ""},
+        {-1, ""},
+        {-1, ""}
+    }
+};
+
 
 static bool readTouch(uint16_t &x, uint16_t &y) {
   if (!ctp.touched()) {
@@ -427,6 +463,28 @@ void TextBG(byte *y, int x, byte chrs) {
 
 #define BOTTOM_LINE 224
 
+
+// Define the Function Menu on the bottom of the screen
+// and how it will display the menu items
+void drawFunctionMenu(byte y)
+{
+    for (int i = 0; i < FUNCTION_BUTTONS; i++)
+    {
+        const FunctionButton &b = functionPages[functionPage][i];
+
+        if (b.item != 0)
+            set_pos_menu(functionMenuX[i], y, b.item);
+        else
+        {
+            display.setCursor(functionMenuX[i], y);
+            display.setTextColor(OFFCOLOR, BGCOLOR);
+        }
+
+        display.print(b.label);
+    }
+}
+
+
 void DrawText_big() {
   char str[5];
   byte y;
@@ -520,16 +578,7 @@ void DrawText_big() {
     set_pos_menu(252, y, SEL_FCNT); // FCNT
     display.print("FCNT ");
   } else if (item >= SEL_FUNC) {
-    set_pos_menu(1, y, SEL_FFT);    // FFT
-    display.print("FFT ");
-    set_pos_menu(60, y, SEL_PWM);   // PWM
-    display.print("PWM   ");
-    set_pos_menu(132, y, SEL_DDS);  // DDS
-    display.print("DDS  ");
-    set_pos_menu(192, y, SEL_DISP); // DISP
-    display.print("DISP ");
-    set_pos_menu(252, y, SEL_FCNT); // FCNT
-    display.print("FCNT ");
+    drawFunctionMenu(y);
   } else {
     disp_ch1(1, y);         // CH2
     display_ac_inv(y, CH1DCSW, ch1_mode);
