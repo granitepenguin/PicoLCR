@@ -56,14 +56,17 @@ constexpr uint8_t FUNCTION_PAGES   = 2;
 constexpr uint16_t MENU_LEFT   = 22;
 constexpr uint16_t MENU_RIGHT  = 298;
 constexpr uint16_t MENU_WIDTH  = MENU_RIGHT - MENU_LEFT;
-constexpr uint16_t BUTTON_SPACING = MENU_WIDTH / FUNCTION_BUTTONS;
 
+
+// Button definition of enumeration and label
 struct FunctionButton
 {
   int8_t item;
   const char *label;
 };
 
+
+// Function menu array definition
 const FunctionButton functionPages[FUNCTION_PAGES][FUNCTION_BUTTONS] =
 {
   {
@@ -82,65 +85,108 @@ const FunctionButton functionPages[FUNCTION_PAGES][FUNCTION_BUTTONS] =
 };
 
 
+// Count how many active buttons are on the current page
+uint8_t activeButtonCount()
+{
+  uint8_t count = 0;
+
+  for (int i = 0; i < FUNCTION_BUTTONS; i++)
+  {
+    if (functionPages[functionPage][i].item >= 0)
+      count++;
+  }
+
+  return count;
+}
+
+// Return the X center of the displayed button
+int getButtonCenterX(uint8_t drawIndex)
+{
+  uint8_t active = activeButtonCount();
+
+  if (active == 0)
+    return MENU_LEFT + MENU_WIDTH / 2;
+
+  int spacing = MENU_WIDTH / active;
+
+  return MENU_LEFT + spacing * drawIndex + spacing / 2;
+}
+
+
+
 // Define the Function Menu on the bottom of the screen
 // and how it will display the menu items
 void drawFunctionMenu(byte y)
 {
-  //
-  // Draw page arrows
-  //
+  // Left arrow
   display.fillTriangle(
-    4,  y + 5,
-    14, y,
-    14, y + 10,
+    LEFT_ARROW_X,
+    y + ARROW_H / 2,
+    LEFT_ARROW_X + ARROW_W,
+    y,
+    LEFT_ARROW_X + ARROW_W,
+    y + ARROW_H,
     TXTCOLOR);
 
+  // Right arrow
   display.fillTriangle(
-    316, y + 5,
-    306, y,
-    306, y + 10,
+    RIGHT_ARROW_X,
+    y + ARROW_H / 2,
+    RIGHT_ARROW_X - ARROW_W,
+    y,
+    RIGHT_ARROW_X - ARROW_W,
+    y + ARROW_H,
     TXTCOLOR);
 
-  //
-  // Draw menu buttons
-  //
+  uint8_t drawIndex = 0;
+
   for (int i = 0; i < FUNCTION_BUTTONS; i++)
   {
     const FunctionButton &b = functionPages[functionPage][i];
 
-    // Compute the center of this button region
-    int centerX = MENU_LEFT + BUTTON_SPACING * i + BUTTON_SPACING / 2;
+    if (b.item < 0)
+      continue;
 
-    // Convert to a left edge for printing.
-    // Default font is approximately 6 pixels wide.
+    int centerX = getButtonCenterX(drawIndex);
+
     int textWidth = strlen(b.label) * 6;
     int textX = centerX - textWidth / 2;
 
-    if (b.item >= 0)
-        set_pos_menu(textX, y, b.item);
-    else
-    {
-      display.setCursor(textX, y);
-      display.setTextColor(OFFCOLOR, BGCOLOR);
-    }
-
+    set_pos_menu(textX, y, b.item);
     display.print(b.label);
+
+    drawIndex++;
   }
 }
 
 // calculate button region for function selection
 int8_t getFunctionButtonFromTouch(uint16_t x)
 {
-  // Outside the button area?
-  if (x < MENU_LEFT || x >= MENU_RIGHT)
+  uint8_t active = activeButtonCount();
+
+  if (active == 0)
     return -1;
 
-  int8_t button = (x - MENU_LEFT) / BUTTON_SPACING;
+  int spacing = MENU_WIDTH / active;
 
-  if (button >= FUNCTION_BUTTONS)
-    return -1;
+  uint8_t drawIndex = 0;
 
-  return button;
+  for (int i = 0; i < FUNCTION_BUTTONS; i++)
+  {
+    const FunctionButton &b = functionPages[functionPage][i];
+
+    if (b.item < 0)
+      continue;
+
+    int center = getButtonCenterX(drawIndex);
+
+    if (abs((int)x - center) < spacing / 2)
+      return i;
+
+    drawIndex++;
+  }
+
+  return -1;
 }
 
 
