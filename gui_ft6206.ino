@@ -27,6 +27,8 @@
 #define SEL_DISPOFF 26
 #define SEL_LCR     27
 
+constexpr int8_t MENU_UNUSED = -1;
+
 #ifndef NOLCD
 #include <Adafruit_FT6206.h>
 extern Adafruit_FT6206 ctp;
@@ -38,43 +40,108 @@ extern Adafruit_FT6206 ctp;
 #define TOUCH_INVERT_X 0
 #define TOUCH_INVERT_Y 1
 
+// menu arrow dimensions
+constexpr uint16_t LEFT_ARROW_X  = 8;
+constexpr uint16_t RIGHT_ARROW_X = 312;
+constexpr uint16_t ARROW_W = 10;
+constexpr uint16_t ARROW_H = 10;
+constexpr uint16_t LEFT_ARROW_LIMIT  = 20;
+constexpr uint16_t RIGHT_ARROW_LIMIT = 300;
+
 // Define dimentions of the bottom menu function display
-constexpr uint8_t FUNCTION_BUTTONS = 5;
+constexpr uint8_t FUNCTION_BUTTONS = 4;
 constexpr uint8_t FUNCTION_PAGES   = 2;
 
-// Function menu button pixel location definitions
-const uint16_t functionMenuX[FUNCTION_BUTTONS] = {
-    1,
-    60,
-    132,
-    192,
-    252
-};
+// Function Menu dynamic width adjustments
+constexpr uint16_t MENU_LEFT   = 22;
+constexpr uint16_t MENU_RIGHT  = 298;
+constexpr uint16_t MENU_WIDTH  = MENU_RIGHT - MENU_LEFT;
+constexpr uint16_t BUTTON_SPACING = MENU_WIDTH / FUNCTION_BUTTONS;
 
 struct FunctionButton
 {
-    int8_t item;
-    const char *label;
+  int8_t item;
+  const char *label;
 };
 
 const FunctionButton functionPages[FUNCTION_PAGES][FUNCTION_BUTTONS] =
 {
-    {
-        {SEL_FFT,  "FFT "},
-        {SEL_PWM,  "PWM "},
-        {SEL_DDS,  "DDS "},
-        {SEL_DISP, "DISP"},
-        {SEL_FCNT, "FCNT"}
-    },
+  {
+    {SEL_FFT,  "FFT "},
+    {SEL_PWM,  "PWM "},
+    {SEL_DDS,  "DDS "},
+    {SEL_DISP, "DISP"}
+  },
 
-    {
-        {SEL_LCR,  "LCR "},
-        {-1, ""},
-        {-1, ""},
-        {-1, ""},
-        {-1, ""}
-    }
+  {
+    {SEL_FCNT, "FCNT"},
+    {SEL_LCR,  "LCR "},
+    {MENU_UNUSED, ""},
+    {MENU_UNUSED, ""}
+  }
 };
+
+
+// Define the Function Menu on the bottom of the screen
+// and how it will display the menu items
+void drawFunctionMenu(byte y)
+{
+    //
+    // Draw page arrows
+    //
+    display.fillTriangle(
+        4,  y + 5,
+        14, y,
+        14, y + 10,
+        TXTCOLOR);
+
+    display.fillTriangle(
+        316, y + 5,
+        306, y,
+        306, y + 10,
+        TXTCOLOR);
+
+    //
+    // Draw menu buttons
+    //
+    for (int i = 0; i < FUNCTION_BUTTONS; i++)
+    {
+        const FunctionButton &b = functionPages[functionPage][i];
+
+        // Compute the center of this button region
+        int centerX = MENU_LEFT + BUTTON_SPACING * i + BUTTON_SPACING / 2;
+
+        // Convert to a left edge for printing.
+        // Default font is approximately 6 pixels wide.
+        int textWidth = strlen(b.label) * 6;
+        int textX = centerX - textWidth / 2;
+
+        if (b.item >= 0)
+            set_pos_menu(textX, y, b.item);
+        else
+        {
+            display.setCursor(textX, y);
+            display.setTextColor(OFFCOLOR, BGCOLOR);
+        }
+
+        display.print(b.label);
+    }
+}
+
+// calculate button region for function selection
+int8_t getFunctionButtonFromTouch(uint16_t x)
+{
+  // Outside the button area?
+  if (x < MENU_LEFT || x >= MENU_RIGHT)
+    return -1;
+
+  int8_t button = (x - MENU_LEFT) / BUTTON_SPACING;
+
+  if (button >= FUNCTION_BUTTONS)
+    return -1;
+
+  return button;
+}
 
 
 static bool readTouch(uint16_t &x, uint16_t &y) {
@@ -308,25 +375,88 @@ void low_touch_base(uint16_t x) {
   }
 }
 
+// menu redraw helper
+void redrawBottomMenu()
+{
+    clear_bottom_text();
+    DrawText();
+}
+
 void low_touch_func(uint16_t x) {
   if (item == SEL_FUNC) {
-    if (x < 60) {             // FFT
-      wfft = true;
-    } else if (x < 120) {     // PWM
-      item = SEL_PWM;
-      clear_bottom_text();                          // clear bottom text area
-    } else if (x < 180) {     // DDS
-      item = SEL_DDS;
-      clear_bottom_text();                          // clear bottom text area
-    } else if (x < 240) {     // DISP
-      item = SEL_DISP;
-      clear_bottom_text();                          // clear bottom text area
-    } else if (x < 300) {     // Frequency Counter
-      item = SEL_FCNT;
-      fcount_mode = true;
-      clear_bottom_text();                          // clear bottom text area
+    //
+    // Page arrows
+    //
+    if (x < MENU_LEFT)
+    {
+      if (functionPage == 0)
+        functionPage = FUNCTION_PAGES - 1;
+      else
+        functionPage--;
+
+      redrawBottomMenu();
+      return;
     }
-  } else if (item >= SEL_PWM && item <= SEL_PWMDUTY) {
+
+    if (x > MENU_RIGHT)
+    {
+      if (functionPage >= FUNCTION_PAGES - 1)
+        functionPage = 0;
+      else
+        functionPage++;
+
+      redrawBottomMenu();
+      return;
+    }
+
+    //
+    // Which function button was touched?
+    //
+    int8_t button = getFunctionButtonFromTouch(x);
+
+    if (button < 0)
+      return;
+
+    const FunctionButton &f = functionPages[functionPage][button];
+
+    switch (f.item)
+    {
+      case SEL_FFT:
+        wfft = true;
+        break;
+
+      case SEL_PWM:
+        item = SEL_PWM;
+        clear_bottom_text();
+        break;
+
+      case SEL_DDS:
+        item = SEL_DDS;
+        clear_bottom_text();
+        break;
+
+      case SEL_DISP:
+        item = SEL_DISP;
+        clear_bottom_text();
+        break;
+
+      case SEL_FCNT:
+        item = SEL_FCNT;
+        fcount_mode = true;
+        clear_bottom_text();
+        break;
+
+      case SEL_LCR:
+        item = SEL_LCR;
+        lcr_mode = true;
+        clear_bottom_text();
+        break;
+
+      default:
+        break;
+    }
+    return;
+   } else if (item >= SEL_PWM && item <= SEL_PWMDUTY) {
     if (x < 60) {             // PWM
     } else if (x < 120) {     // ON/OFF
       if (pulse_mode == false) {  // turn on
@@ -462,27 +592,6 @@ void TextBG(byte *y, int x, byte chrs) {
 }
 
 #define BOTTOM_LINE 224
-
-
-// Define the Function Menu on the bottom of the screen
-// and how it will display the menu items
-void drawFunctionMenu(byte y)
-{
-    for (int i = 0; i < FUNCTION_BUTTONS; i++)
-    {
-        const FunctionButton &b = functionPages[functionPage][i];
-
-        if (b.item != 0)
-            set_pos_menu(functionMenuX[i], y, b.item);
-        else
-        {
-            display.setCursor(functionMenuX[i], y);
-            display.setTextColor(OFFCOLOR, BGCOLOR);
-        }
-
-        display.print(b.label);
-    }
-}
 
 
 void DrawText_big() {
