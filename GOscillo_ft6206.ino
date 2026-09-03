@@ -132,6 +132,17 @@ bool fcount_mode = false;
 bool lcr_mode = false;
 byte info_mode = 3; // Text information display mode
 
+//
+// enumeration of different modes of the project
+enum InstrumentMode
+{
+  MODE_SCOPE,
+  MODE_LCR
+};
+
+InstrumentMode instrumentMode = MODE_SCOPE;
+
+
 // Function page menu
 byte functionPage = 0;  // This is where we put the bottom menu of functions
 
@@ -538,6 +549,12 @@ void loop() {
 
   timeExec = 100;
   led_on();
+
+  if (instrumentMode == MODE_LCR) {
+    updateLCR();
+    return;
+  }
+
   if (rate > RATE_DMA) {
     adc_set_round_robin(0); // de-activate round robin
     set_trigger_ad();
