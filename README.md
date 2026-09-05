@@ -12,7 +12,7 @@ Adafruit Libraries being used for Capacitive touch and eventually TFT display:
 # Things to install:
 RP2040 board library: add https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json link under the Board Manager  
 TFT_eSPI library: for screen display  
-Adafruit FT6206 Library: For capacitive touch display support  
+Adafruit FT6206 Library: For capacitive touch display support (accept all library dependencies)
 
 
 # Updates to make:
