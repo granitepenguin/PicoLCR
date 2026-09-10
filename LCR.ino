@@ -2,6 +2,7 @@
 // LCR Instrument
 //
 
+
 void initializeLCR()
 {
   display.fillScreen(BGCOLOR);
@@ -15,6 +16,52 @@ void initializeLCR()
   // Load calibration
   //
 }
+
+
+//
+// Single impedance measurement
+//
+
+
+// Get results from measurements
+MeasurementPoint measureImpedance(uint32_t frequency)
+{
+  MeasurementPoint result;
+
+  result.frequency = frequency;
+
+  result.vrmsRef = 0.0f;
+  result.vrmsDut = 0.0f;
+
+  result.phaseDeg = 0.0f;
+
+  // Test static code to show display update
+  //
+  static float z = 1000.0f;
+
+  z += 0.1f;
+
+  if (z > 1010.0f)
+    z = 1000.0f;
+
+  result.impedance = z;
+
+  //result.impedance = 0.0f;
+
+  result.resistance = 0.0f;
+  result.reactance = 0.0f;
+
+  result.capacitance = 0.0f;
+  result.inductance = 0.0f;
+
+  result.esr = 0.0f;
+
+  result.q = 0.0f;
+  result.dissipation = 0.0f;
+
+  return result;
+}
+
 
 void enterLCRMode()
 {
@@ -36,15 +83,18 @@ void exitLCRMode()
 
 void updateLCR()
 {
-  uint16_t x, y;
+  static float z = 1000.0f;
 
-  if (readTouch(x, y))
-  {
-    if (y < 20)
-    {
-      exitLCRMode();
-    }
-  }
+  z += 0.05f;
+
+  if (z > 1010.0f)
+    z = 1000.0f;
+
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+  display.setTextSize(1);
+
+  display.setCursor(120, 60);
+  display.print(z, 2);
 }
 
 void drawLCRScreen()
@@ -69,4 +119,25 @@ void drawLCRScreen()
   display.print("Measurement engine");
   display.setCursor(30, 132);
   display.print("coming next...");
+}
+
+void updateLCRDisplay(const MeasurementPoint &m)
+{
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+  display.setTextSize(1);
+
+  display.setCursor(120, 40);
+  display.print(m.frequency);
+
+  display.setCursor(120, 60);
+  display.print(m.impedance, 3);
+
+  display.setCursor(120, 80);
+  display.print(m.phaseDeg, 2);
+
+  display.setCursor(120,100);
+  display.print(m.resistance, 3);
+
+  display.setCursor(120,120);
+  display.print(m.reactance, 3);
 }

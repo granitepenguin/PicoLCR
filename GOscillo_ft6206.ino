@@ -51,6 +51,18 @@ ArduinoFFT<double> FFT = ArduinoFFT<double>(vReal, vImag, FFT_N, 1.0);  // Creat
 Adafruit_NeoPixel pixels(1, DIN_PIN, NEO_GRB + NEO_KHZ800);
 #endif
 
+// Local project includes
+//
+// LCR.h must be included here.
+//
+// Arduino 2.x generates function prototypes before processing
+// secondary .ino tabs. Including the header in the primary sketch
+// ensures MeasurementPoint is known during prototype generation.
+//
+#include "LCR.h"
+
+
+
 float waveFreq[2];             // frequency (Hz)
 float waveDuty[2];             // duty ratio (%)
 int dataMin[2];                // buffer minimum value (smallest=0)
