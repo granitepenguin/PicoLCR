@@ -425,6 +425,7 @@ About
 
 # 10. Instrument State Model
 
+```
 Measure
 ├── LIVE
 └── HOLD
@@ -441,8 +442,9 @@ Calibration
 └── COMPLETE
 
 Settings
-
 (single state)
+```
+
 
 ---
 
