@@ -2,41 +2,97 @@
 
 #include <Arduino.h>
 
-typedef struct 
+// ====================================================================
+// LCR Instrument Interface
+//
+// This header defines the public interface for the LCR / Impedance
+// Analyzer instrument.
+//
+// It contains:
+//
+//    Measurement data structures
+//    Instrument configuration structures
+//    Backend selection
+//    Public API
+//
+// ====================================================================
+
+
+// Results from a single impedance measurement.
+//
+// This structure represents one measurement at a single frequency.
+// It is used by both the single-measurement mode and the future
+// sweep mode.
+struct MeasurementPoint
 {
-  uint32_t frequency;
+  uint32_t frequency;      // Measurement frequency (Hz)
 
-  float vrmsRef;
-  float vrmsDut;
+  float vrmsRef;           // RMS voltage across reference resistor
+  float vrmsDut;           // RMS voltage across DUT
 
-  float phaseDeg;
+  float phaseDeg;          // DUT phase angle (degrees)
 
-  float impedance;
+  float impedance;         // |Z| Magnitude (Ohms)
 
-  float resistance;
-  float reactance;
+  float resistance;        // Real component (Ohms)
+  float reactance;         // Imaginary component (Ohms)
 
-  float capacitance;
-  float inductance;
+  float capacitance;       // Equivalent capacitance (Farads)
+  float inductance;        // Equivalent inductance (Henries)
 
-  float esr;
+  float esr;               // Equivalent Series Resistance (Ohms)
 
-  float q;
-  float dissipation;
-} MeasurementPoint;
-
-struct MeasurementSettings
-{
-  uint32_t frequency;
-  float referenceResistance;
+  float q;                 // Quality factor
+  float dissipation;       // Dissipation factor
 };
 
-MeasurementPoint measureImpedance(uint32_t frequency);
 
+// Measurement configuration.
+//
+// Defines the parameters required to perform a single measurement.
+// This structure will expand as additional features such as averaging,
+// autoranging, and sweep support are added.
+struct MeasurementSettings
+{
+  uint32_t frequency;          // Test frequency (Hz)
+
+  float referenceResistance;   // Selected reference resistor (Ohms)
+};
+
+
+// Measurement backend.
+//
+// Simulation mode allows development of the GUI and workflow before
+// measurement hardware is available.
+enum LCRBackend
+{
+  LCR_BACKEND_SIMULATION,
+  LCR_BACKEND_HARDWARE
+};
+
+extern LCRBackend lcrBackend;
+
+
+//
+// Public API
+//
+
+// Perform one impedance measurement using the currently selected backend.
+MeasurementPoint measureImpedance(const MeasurementSettings &settings);
+
+// Initialize the LCR instrument.
 void initializeLCR();
+
+// Enter / leave LCR instrument mode.
 void enterLCRMode();
 void exitLCRMode();
-void updateLCR();
-void drawLCRScreen();
-void updateLCRDisplay(const MeasurementPoint &m);
 
+// Main LCR task.
+// Called once each pass through loop() while in LCR mode.
+void updateLCR();
+
+// Draw the static LCR instrument user interface.
+void drawLCRScreen();
+
+// Update the dynamic measurement fields on the display.
+void updateLCRDisplay(const MeasurementPoint &m);
