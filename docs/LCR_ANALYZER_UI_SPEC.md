@@ -80,22 +80,26 @@ LCR Analyzer
 
 ## 3.2 Future Navigation (Conceptual)
 
+```
 Home
 ├── Oscilloscope
 ├── LCR Analyzer
 ├── Function Generator
 ├── Frequency Counter
 └── Settings
+```
 
 This future navigation is conceptual and not part of Version 1.0.
 
 ## 3.3 Instrument Hierarchy
 
+```
 LCR Analyzer
 ├── Measure
 ├── Sweep
 ├── Calibration
 └── Settings
+```
 
 These are peer-level tabs.
 
