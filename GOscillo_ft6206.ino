@@ -51,6 +51,18 @@ ArduinoFFT<double> FFT = ArduinoFFT<double>(vReal, vImag, FFT_N, 1.0);  // Creat
 Adafruit_NeoPixel pixels(1, DIN_PIN, NEO_GRB + NEO_KHZ800);
 #endif
 
+// Local project includes
+//
+// LCR.h must be included here.
+//
+// Arduino 2.x generates function prototypes before processing
+// secondary .ino tabs. Including the header in the primary sketch
+// ensures MeasurementPoint is known during prototype generation.
+//
+#include "LCR.h"
+
+
+
 float waveFreq[2];             // frequency (Hz)
 float waveDuty[2];             // duty ratio (%)
 int dataMin[2];                // buffer minimum value (smallest=0)
@@ -131,6 +143,17 @@ bool dds_mode = false;
 bool fcount_mode = false;
 bool lcr_mode = false;
 byte info_mode = 3; // Text information display mode
+
+//
+// enumeration of different modes of the project
+enum InstrumentMode
+{
+  MODE_SCOPE,
+  MODE_LCR
+};
+
+InstrumentMode instrumentMode = MODE_SCOPE;
+
 
 // Function page menu
 byte functionPage = 0;  // This is where we put the bottom menu of functions
@@ -538,6 +561,12 @@ void loop() {
 
   timeExec = 100;
   led_on();
+
+  if (instrumentMode == MODE_LCR) {
+    updateLCR();
+    return;
+  }
+
   if (rate > RATE_DMA) {
     adc_set_round_robin(0); // de-activate round robin
     set_trigger_ad();

@@ -494,8 +494,8 @@ void low_touch_func(uint16_t x) {
 
       case SEL_LCR:
         item = SEL_LCR;
-        lcr_mode = true;
         clear_bottom_text();
+        enterLCRMode();
         break;
 
       default:
