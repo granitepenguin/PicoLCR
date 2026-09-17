@@ -38,28 +38,15 @@ bool lcrDisplayDirty = true;
 // Stores the calculated screen regions used by the LCR interface
 LCRLayout lcrLayout;
 
+// Off-screen drawing buffer used for dynamic LCR measurement fields.
+// Rendering into RAM first allows the completed field to be transferred
+// to the TFT at once, reducing visible erase/redraw flicker.
+TFT_eSprite lcrValueSprite = TFT_eSprite(&display);
+
 // measurement objects
 MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings);
 MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings);
 
-
-// Initialize the LCR analyzer when entering the instrument
-// Screen geometry is calculated here so all subsequent drawing and
-// touch handling use dimensions appropriate for the active display
-void initializeLCR()
-{
-  calculateLCRLayout();
-  display.fillScreen(BGCOLOR);
-
-  //
-  // TODO:
-  //
-  // Initialize AD9833
-  // Configure ADC
-  // Reset measurements
-  // Load calibration
-  //
-}
 
 
 // Generate simulated measurement data for GUI and workflow development
@@ -196,6 +183,32 @@ void clearValueField(int x, int y, int width = 120)
 
 
 
+// Configure the reusable sprite used for dynamic LCR measurement fields.
+// The sprite is created at the largest dynamic-region size and reused for
+// both primary and secondary measurements to minimize RAM consumption.
+void initializeLCRValueSprite()
+{
+  // Remove an existing buffer before recreating it.
+  lcrValueSprite.deleteSprite();
+
+  int16_t spriteW = max(
+    lcrLayout.primary.w,
+    lcrLayout.secondary.w
+  );
+
+  int16_t spriteH = max(
+    lcrLayout.primary.h,
+    lcrLayout.secondary.h
+  );
+
+  lcrValueSprite.setColorDepth(16);
+  lcrValueSprite.createSprite(spriteW, spriteH);
+
+  lcrValueSprite.fillSprite(BGCOLOR);
+  lcrValueSprite.setTextColor(TXTCOLOR, BGCOLOR);
+}
+
+
 // Calculate the major LCR screen regions from the current display size.
 // All geometry is derived from the active display dimensions so the
 // interface can adapt to different display resolutions.
@@ -269,6 +282,28 @@ void calculateLCRLayout()
     screenW,
     contextH
   };
+}
+
+
+
+// Initialize the LCR analyzer when entering the instrument.
+// Screen geometry and the dynamic measurement sprite are prepared before
+// any analyzer UI elements are drawn.
+void initializeLCR()
+{
+  calculateLCRLayout();
+  initializeLCRValueSprite();
+
+  display.fillScreen(BGCOLOR);
+
+  //
+  // Future initialization:
+  //
+  // - Initialize AD9833
+  // - Configure ADC/DMA
+  // - Reset measurement state
+  // - Load calibration data
+  //
 }
 
 
@@ -356,10 +391,44 @@ void drawLCRCenteredMeasurement(const LCRRect &rect, int16_t y,
 }
 
 
+// Draw a value and engineering unit as one centered group inside the
+// reusable sprite. The numeric value and unit may use different text sizes
+// while remaining visually centered as a single measurement.
+void drawLCRSpriteMeasurement(int16_t width, int16_t height,
+                              const char *value, const char *unit,
+                              uint8_t valueSize, uint8_t unitSize,
+                              uint16_t color)
+{
+  int16_t valueWidth = strlen(value) * 6 * valueSize;
+  int16_t unitWidth = strlen(unit) * 6 * unitSize;
+  int16_t gap = 4;
 
-// Draw the primary measurement as a large numeric value followed by its
-// engineering unit. The complete value/unit pair is centered within the
-// primary measurement region.
+  int16_t totalWidth = valueWidth + gap + unitWidth;
+  int16_t startX = (width - totalWidth) / 2;
+
+  int16_t valueHeight = 8 * valueSize;
+  int16_t unitHeight = 8 * unitSize;
+
+  int16_t valueY = (height - valueHeight) / 2;
+  int16_t unitY = valueY + valueHeight - unitHeight;
+
+  lcrValueSprite.setTextColor(color, BGCOLOR);
+
+  lcrValueSprite.setTextSize(valueSize);
+  lcrValueSprite.setCursor(startX, valueY);
+  lcrValueSprite.print(value);
+
+  lcrValueSprite.setTextSize(unitSize);
+  lcrValueSprite.setCursor(
+    startX + valueWidth + gap,
+    unitY
+  );
+  lcrValueSprite.print(unit);
+}
+
+
+// Render the primary measurement into an off-screen sprite and transfer
+// the completed field to the TFT in one operation to minimize flicker.
 void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
 {
   const LCRRect &r = lcrLayout.primary;
@@ -367,36 +436,40 @@ void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
   char value[16];
   char unit[8];
 
-  // Development display: show capacitance in nF.
   float capacitanceNF = m.capacitance * 1.0e9f;
 
   snprintf(value, sizeof(value), "%.2f", capacitanceNF);
   snprintf(unit, sizeof(unit), "nF");
 
-  // Clear only the dynamic primary measurement region.
-  display.fillRect(r.x, r.y, r.w, r.h, BGCOLOR);
+  // Clear the sprite in RAM rather than clearing the visible TFT.
+  lcrValueSprite.fillSprite(BGCOLOR);
 
-  uint8_t valueSize = 4;
-  uint8_t unitSize = 2;
-
-  int16_t valueY = r.y + (r.h - 8 * valueSize) / 2;
-
-  drawLCRCenteredMeasurement(
-    r,
-    valueY,
+  drawLCRSpriteMeasurement(
+    r.w,
+    r.h,
     value,
     unit,
-    valueSize,
-    unitSize,
+    4,
+    2,
     TXTCOLOR
+  );
+
+  // Transfer only the portion of the sprite occupied by this field.
+  lcrValueSprite.pushSprite(
+    r.x,
+    r.y,
+    0,
+    0,
+    r.w,
+    r.h
   );
 }
 
 
 
-// Draw the secondary measurement as a centered label/value pair.
-// Keeping the label and value on one horizontal line uses less vertical
-// space and follows the same visual style as the primary measurement.
+// Render the secondary measurement as a horizontal label/value pair.
+// The complete field is composed in RAM and pushed to the TFT at once to
+// avoid visible clearing between successive display updates.
 void drawLCRSecondaryMeasurement(const MeasurementPoint &m)
 {
   const LCRRect &r = lcrLayout.secondary;
@@ -414,23 +487,42 @@ void drawLCRSecondaryMeasurement(const MeasurementPoint &m)
   int16_t valueWidth = strlen(value) * 6 * valueSize;
   int16_t gap = 12;
 
-  int16_t totalWidth = labelWidth + gap + valueWidth;
-  int16_t startX = r.x + (r.w - totalWidth) / 2;
+  int16_t totalWidth =
+    labelWidth + gap + valueWidth;
 
-  int16_t valueY = r.y + (r.h - 8 * valueSize) / 2;
-  int16_t labelY = valueY + (8 * valueSize - 8 * labelSize);
+  int16_t startX =
+    (r.w - totalWidth) / 2;
 
-  display.fillRect(r.x, r.y, r.w, r.h, BGCOLOR);
+  int16_t valueHeight = 8 * valueSize;
 
-  display.setTextColor(TXTCOLOR, BGCOLOR);
+  int16_t valueY =
+    (r.h - valueHeight) / 2;
 
-  display.setTextSize(labelSize);
-  display.setCursor(startX, labelY);
-  display.print(label);
+  int16_t labelY =
+    valueY + valueHeight - (8 * labelSize);
 
-  display.setTextSize(valueSize);
-  display.setCursor(startX + labelWidth + gap, valueY);
-  display.print(value);
+  lcrValueSprite.fillSprite(BGCOLOR);
+  lcrValueSprite.setTextColor(TXTCOLOR, BGCOLOR);
+
+  lcrValueSprite.setTextSize(labelSize);
+  lcrValueSprite.setCursor(startX, labelY);
+  lcrValueSprite.print(label);
+
+  lcrValueSprite.setTextSize(valueSize);
+  lcrValueSprite.setCursor(
+    startX + labelWidth + gap,
+    valueY
+  );
+  lcrValueSprite.print(value);
+
+  lcrValueSprite.pushSprite(
+    r.x,
+    r.y,
+    0,
+    0,
+    r.w,
+    r.h
+  );
 }
 
 
