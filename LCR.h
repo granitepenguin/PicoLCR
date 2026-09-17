@@ -85,6 +85,18 @@ enum LCRTab
 extern LCRTab lcrTab;
 
 
+// Identifies the operating state of the LCR Measure tab.
+// LIVE continuously acquires measurements while HOLD preserves the
+// most recently acquired measurement on the display.
+enum LCRMeasureState
+{
+  LCR_MEASURE_LIVE,
+  LCR_MEASURE_HOLD
+};
+
+extern LCRMeasureState lcrMeasureState;
+
+
 // Defines a rectangular region of the LCR user interface
 // The same geometry is used for both drawing and touch detection
 struct LCRRect
@@ -110,6 +122,8 @@ struct LCRLayout
   LCRRect primary;
   LCRRect secondary;
   LCRRect context;
+
+  LCRRect measureSoftKeys[4];
 };
 
 extern LCRLayout lcrLayout;

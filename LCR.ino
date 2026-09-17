@@ -38,6 +38,10 @@ bool lcrDisplayDirty = true;
 // Stores the calculated screen regions used by the LCR interface
 LCRLayout lcrLayout;
 
+// Stores the current operating state of the Measure tab.
+// New LCR analyzer sessions begin in continuous LIVE measurement mode.
+LCRMeasureState lcrMeasureState = LCR_MEASURE_LIVE;
+
 // Off-screen drawing buffer used for dynamic LCR measurement fields.
 // Rendering into RAM first allows the completed field to be transferred
 // to the TFT at once, reducing visible erase/redraw flicker.
@@ -114,12 +118,12 @@ MeasurementPoint measureImpedance(const MeasurementSettings &settings)
 
 
 // Enter the LCR analyzer and display the default Measure tab.
-// The dynamic display is marked dirty so measurement values are drawn
-// immediately when the instrument begins running.
+// Each new analyzer session begins on the Measure tab in LIVE mode.
 void enterLCRMode()
 {
   instrumentMode = MODE_LCR;
   lcrTab = LCR_TAB_MEASURE;
+  lcrMeasureState = LCR_MEASURE_LIVE;
   lcrDisplayDirty = true;
 
   initializeLCR();
@@ -139,9 +143,8 @@ void exitLCRMode()
 
 
 // Main LCR instrument task.
-// Measurements are acquired continuously while TFT updates are rate-limited.
-// A dirty flag forces an immediate refresh after entering or redrawing the
-// analyzer interface.
+// LIVE mode continuously acquires and periodically displays measurements.
+// HOLD preserves the last measurement while leaving all UI controls active.
 void updateLCR()
 {
   static MeasurementSettings settings = {
@@ -151,27 +154,48 @@ void updateLCR()
 
   static MeasurementPoint measurement;
   static uint32_t lastDisplayUpdate = 0;
-
-  measurement = measureImpedance(settings);
+  static bool lastPressed = false;
 
   uint32_t now = millis();
 
-  if (lcrDisplayDirty ||
-      now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
+  if (lcrMeasureState == LCR_MEASURE_LIVE) {
+    measurement = measureImpedance(settings);
 
-    lastDisplayUpdate = now;
-    lcrDisplayDirty = false;
+    if (lcrDisplayDirty ||
+        now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
 
-    updateLCRDisplay(measurement, settings);
+      lastDisplayUpdate = now;
+      lcrDisplayDirty = false;
+
+      updateLCRDisplay(measurement, settings);
+    }
   }
 
   uint16_t x, y;
+  bool pressed = readTouch(x, y);
 
-  if (readTouch(x, y)) {
-    if (y < 20) {
-      exitLCRMode();
-      return;
-    }
+  // Require release before accepting another touch.
+  if (!pressed) {
+    lastPressed = false;
+    return;
+  }
+
+  if (lastPressed)
+    return;
+
+  lastPressed = true;
+
+  // Temporary Back handling.
+  if (pointInLCRRect(x, y, lcrLayout.header)) {
+    exitLCRMode();
+    return;
+  }
+
+  if (lcrTab == LCR_TAB_MEASURE &&
+      pointInLCRRect(x, y, lcrLayout.footer)) {
+
+    handleMeasureSoftKeyTouch(x, y);
+    return;
   }
 }
 
@@ -247,6 +271,27 @@ void calculateLCRLayout()
   lcrLayout.primary = { 0, contentY, screenW, primaryH };
   lcrLayout.secondary = { 0, secondaryY, screenW, secondaryH };
   lcrLayout.context = { 0, contextY, screenW, contextH };
+
+  // Divide the Measure footer into four equal soft-key regions.
+  // These rectangles are shared by drawing and touch detection so the
+  // visible controls and their touch targets always remain aligned.
+  const int16_t softKeyCount = 4;
+  const int16_t softKeyW = lcrLayout.footer.w / softKeyCount;
+
+  for (int16_t i = 0; i < softKeyCount; i++) {
+    int16_t x = lcrLayout.footer.x + i * softKeyW;
+
+    int16_t w = (i == softKeyCount - 1)
+      ? lcrLayout.footer.w - softKeyW * i
+      : softKeyW;
+
+    lcrLayout.measureSoftKeys[i] = {
+      x,
+      lcrLayout.footer.y,
+      w,
+      lcrLayout.footer.h
+    };
+  }
 }
 
 
@@ -365,6 +410,48 @@ LCRFormattedValue formatImpedance(float ohms)
   return formatEngineeringValue( ohms, 1.0f, "Ohm", 2);
 }
 
+
+
+//
+// Touch handlers
+//
+
+// Handle touches within the Measure-tab soft-key footer.
+// Only LIVE/HOLD is implemented during this milestone; the remaining
+// buttons are reserved for their upcoming Measure-control milestones.
+void handleMeasureSoftKeyTouch(uint16_t x, uint16_t y)
+{
+  // Freq - implemented in a future milestone.
+  if (pointInLCRRect(x, y, lcrLayout.measureSoftKeys[0])) {
+    return;
+  }
+
+  // Ref - implemented in a future milestone.
+  if (pointInLCRRect(x, y, lcrLayout.measureSoftKeys[1])) {
+    return;
+  }
+
+  // LIVE / HOLD
+  if (pointInLCRRect(x, y, lcrLayout.measureSoftKeys[2])) {
+    if (lcrMeasureState == LCR_MEASURE_LIVE)
+      lcrMeasureState = LCR_MEASURE_HOLD;
+    else
+      lcrMeasureState = LCR_MEASURE_LIVE;
+
+    drawMeasureSoftKeys();
+
+    // Force an immediate measurement when returning to LIVE.
+    if (lcrMeasureState == LCR_MEASURE_LIVE)
+      lcrDisplayDirty = true;
+
+    return;
+  }
+
+  // More - implemented in a future milestone.
+  if (pointInLCRRect(x, y, lcrLayout.measureSoftKeys[3])) {
+    return;
+  }
+}
 
 
 
@@ -701,50 +788,51 @@ void drawMeasureScreen()
 }
 
 
-// Draw the Measure tab soft keys in the common footer.
-// Button geometry is calculated from the footer width so the controls
-// remain evenly spaced on different display resolutions.
+// Draw the Measure-tab soft keys using the same calculated rectangles
+// used for touch detection. The third key reflects the current LIVE/HOLD
+// measurement state.
 void drawMeasureSoftKeys()
 {
-  const LCRRect &r = lcrLayout.footer;
-
   const char *labels[] = {
     "Freq",
     "Ref",
-    "LIVE",
+    lcrMeasureState == LCR_MEASURE_LIVE ? "LIVE" : "HOLD",
     "More"
   };
 
-  const int16_t buttonCount = 4;
-  const int16_t buttonW = r.w / buttonCount;
+  display.fillRect(
+    lcrLayout.footer.x,
+    lcrLayout.footer.y,
+    lcrLayout.footer.w,
+    lcrLayout.footer.h,
+    BGCOLOR
+  );
 
-  display.fillRect(r.x, r.y, r.w, r.h, BGCOLOR);
-
-  display.drawFastHLine( r.x, r.y, r.w, GRIDCOLOR);
+  display.drawFastHLine(
+    lcrLayout.footer.x,
+    lcrLayout.footer.y,
+    lcrLayout.footer.w,
+    GRIDCOLOR
+  );
 
   display.setTextSize(1);
 
-  for (int16_t i = 0; i < buttonCount; i++) {
-    int16_t x = r.x + i * buttonW;
-
-    int16_t w = (i == buttonCount - 1)
-      ? r.w - buttonW * i
-      : buttonW;
+  for (int16_t i = 0; i < 4; i++) {
+    const LCRRect &r = lcrLayout.measureSoftKeys[i];
 
     int16_t textWidth = strlen(labels[i]) * 6;
-    int16_t textX = x + (w - textWidth) / 2;
+    int16_t textX = r.x + (r.w - textWidth) / 2;
     int16_t textY = r.y + (r.h - 8) / 2;
 
     display.setTextColor(TXTCOLOR, BGCOLOR);
     display.setCursor(textX, textY);
     display.print(labels[i]);
 
-    if (i < buttonCount - 1) {
-      display.drawFastVLine( x + w - 1, r.y + 3, r.h - 6, GRIDCOLOR);
+    if (i < 3) {
+      display.drawFastVLine( r.x + r.w - 1, r.y + 3, r.h - 6, GRIDCOLOR);
     }
   }
 }
-
 
 
 // Draw the complete static LCR analyzer interface.
