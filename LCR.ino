@@ -1,3 +1,5 @@
+// LCR.ino
+//
 // LCR Instrument
 //
 // This module implements the LCR / Impedance Analyzer instrument.
@@ -41,6 +43,19 @@ LCRLayout lcrLayout;
 // Stores the current operating state of the Measure tab.
 // New LCR analyzer sessions begin in continuous LIVE measurement mode.
 LCRMeasureState lcrMeasureState = LCR_MEASURE_LIVE;
+
+// Stores the current LCR user-interface state.
+// The analyzer normally displays the active tab unless a selector is open.
+LCRUIState lcrUIState = LCR_UI_NORMAL;
+
+// Stores the active measurement configuration used by the LCR analyzer.
+// UI controls modify these values and the measurement backend reads them
+// whenever a new impedance measurement is requested.
+MeasurementSettings lcrSettings = {
+  1000,      // Frequency: 1 kHz
+  1000.0f    // Reference resistor: 1 kOhm
+};
+
 
 // Off-screen drawing buffer used for dynamic LCR measurement fields.
 // Rendering into RAM first allows the completed field to be transferred
@@ -118,12 +133,13 @@ MeasurementPoint measureImpedance(const MeasurementSettings &settings)
 
 
 // Enter the LCR analyzer and display the default Measure tab.
-// Each new analyzer session begins on the Measure tab in LIVE mode.
+// Each new analyzer session begins in LIVE mode with no selector open.
 void enterLCRMode()
 {
   instrumentMode = MODE_LCR;
   lcrTab = LCR_TAB_MEASURE;
   lcrMeasureState = LCR_MEASURE_LIVE;
+  lcrUIState = LCR_UI_NORMAL;
   lcrDisplayDirty = true;
 
   initializeLCR();
@@ -147,19 +163,14 @@ void exitLCRMode()
 // HOLD preserves the last measurement while leaving all UI controls active.
 void updateLCR()
 {
-  static MeasurementSettings settings = {
-    1000,
-    1000.0f
-  };
-
   static MeasurementPoint measurement;
   static uint32_t lastDisplayUpdate = 0;
   static bool lastPressed = false;
 
   uint32_t now = millis();
 
-  if (lcrMeasureState == LCR_MEASURE_LIVE) {
-    measurement = measureImpedance(settings);
+  if (lcrMeasureState == LCR_MEASURE_LIVE && lcrUIState == LCR_UI_NORMAL) {
+    measurement = measureImpedance(lcrSettings);
 
     if (lcrDisplayDirty ||
         now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
@@ -167,10 +178,13 @@ void updateLCR()
       lastDisplayUpdate = now;
       lcrDisplayDirty = false;
 
-      updateLCRDisplay(measurement, settings);
+      updateLCRDisplay(measurement, lcrSettings);
     }
   }
 
+  //
+  // Touch handling code 
+  //
   uint16_t x, y;
   bool pressed = readTouch(x, y);
 
@@ -185,9 +199,15 @@ void updateLCR()
 
   lastPressed = true;
 
-  // Temporary Back handling.
+  // Back remains available regardless of active LCR UI state
   if (pointInLCRRect(x, y, lcrLayout.header)) {
     exitLCRMode();
+    return;
+  }
+
+  // Modal selectors consume touch input before the underlying tab.
+  if (lcrUIState == LCR_UI_FREQ_SELECT) {
+    handleLCRFrequencySelectorTouch(x, y);
     return;
   }
 
@@ -292,6 +312,76 @@ void calculateLCRLayout()
       lcrLayout.footer.h
     };
   }
+
+  // Define the modal selector area below the analyzer tabs.
+  // The selector occupies both the normal content and footer areas so
+  // underlying Measure controls cannot be mistaken for active controls.
+  lcrLayout.selector = {
+    lcrLayout.content.x,
+    lcrLayout.content.y,
+    lcrLayout.content.w,
+    lcrLayout.content.h + lcrLayout.footer.h
+  };
+
+  const int16_t selectorMarginX =
+    lcrLayout.selector.w * 12 / 100;
+
+  const int16_t selectorTop =
+    lcrLayout.selector.y + lcrLayout.selector.h * 22 / 100;
+
+  const int16_t buttonGapX =
+    lcrLayout.selector.w * 8 / 100;
+
+  const int16_t buttonGapY =
+    lcrLayout.selector.h * 8 / 100;
+
+  const int16_t buttonW =
+    (lcrLayout.selector.w -
+     selectorMarginX * 2 -
+     buttonGapX) / 2;
+
+  const int16_t buttonH =
+    lcrLayout.selector.h * 18 / 100;
+
+  for (int16_t i = 0; i < 4; i++) {
+    int16_t column = i % 2;
+    int16_t row = i / 2;
+
+    int16_t x =
+      lcrLayout.selector.x +
+      selectorMarginX +
+      column * (buttonW + buttonGapX);
+
+    int16_t y =
+      selectorTop +
+      row * (buttonH + buttonGapY);
+
+    lcrLayout.frequencyPresets[i] = {
+      x,
+      y,
+      buttonW,
+      buttonH
+    };
+  }
+
+  const int16_t cancelW =
+    lcrLayout.selector.w * 35 / 100;
+
+  const int16_t cancelH =
+    lcrLayout.selector.h * 16 / 100;
+
+  lcrLayout.selectorCancel = {
+    lcrLayout.selector.x +
+      (lcrLayout.selector.w - cancelW) / 2,
+
+    lcrLayout.selector.y +
+      lcrLayout.selector.h -
+      cancelH -
+      lcrLayout.selector.h * 5 / 100,
+
+    cancelW,
+    cancelH
+  };
 }
 
 
@@ -411,6 +501,34 @@ LCRFormattedValue formatImpedance(float ohms)
 }
 
 
+// Format frequency using compact engineering notation.
+// Decimal precision decreases as the displayed magnitude increases,
+// providing roughly four significant digits without unnecessary zeros.
+LCRFormattedValue formatFrequency(uint32_t frequencyHz)
+{
+  if (frequencyHz >= 1000000UL) {
+    float frequencyMHz = frequencyHz * 1.0e-6f;
+
+    uint8_t decimals =
+      frequencyMHz < 10.0f ? 3 :
+      frequencyMHz < 100.0f ? 2 : 1;
+
+    return formatEngineeringValue( frequencyHz, 1.0e-6f, "MHz", decimals);
+  }
+
+  if (frequencyHz >= 1000UL) {
+    float frequencyKHz = frequencyHz * 1.0e-3f;
+
+    uint8_t decimals =
+      frequencyKHz < 10.0f ? 3 :
+      frequencyKHz < 100.0f ? 2 : 1;
+
+    return formatEngineeringValue( frequencyHz, 1.0e-3f, "kHz", decimals);
+  }
+
+  return formatEngineeringValue( frequencyHz, 1.0f, "Hz", 0);
+}
+
 
 //
 // Touch handlers
@@ -421,8 +539,10 @@ LCRFormattedValue formatImpedance(float ohms)
 // buttons are reserved for their upcoming Measure-control milestones.
 void handleMeasureSoftKeyTouch(uint16_t x, uint16_t y)
 {
-  // Freq - implemented in a future milestone.
+  // Open the frequency preset selector.
   if (pointInLCRRect(x, y, lcrLayout.measureSoftKeys[0])) {
+    lcrUIState = LCR_UI_FREQ_SELECT;
+    drawLCRFrequencySelector();
     return;
   }
 
@@ -453,6 +573,45 @@ void handleMeasureSoftKeyTouch(uint16_t x, uint16_t y)
   }
 }
 
+
+// Handle touch input while the frequency selector is displayed.
+// Selecting a preset updates the shared measurement settings and returns
+// the analyzer to LIVE measurement; Cancel leaves all settings unchanged.
+void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
+{
+  const uint32_t frequencies[] = {
+    100,
+    1000,
+    10000,
+    100000
+  };
+
+  for (int16_t i = 0; i < 4; i++) {
+    if (pointInLCRRect(
+          x,
+          y,
+          lcrLayout.frequencyPresets[i])) {
+
+      lcrSettings.frequency = frequencies[i];
+
+      // A held measurement belongs to the old frequency, so changing
+      // frequency always resumes live acquisition.
+      lcrMeasureState = LCR_MEASURE_LIVE;
+
+      returnToLCRMeasureScreen();
+      return;
+    }
+  }
+
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.selectorCancel)) {
+
+    returnToLCRMeasureScreen();
+    return;
+  }
+}
 
 
 //
@@ -653,9 +812,13 @@ void drawLCRMeasurementContext(const MeasurementPoint &m,
   display.setTextColor(TXTCOLOR, BGCOLOR);
 
   // Frequency
+  // Format the active measurement frequency using engineering units
+  // so the context display remains compact and easy to read.
+  LCRFormattedValue frequency = formatFrequency(m.frequency);
   display.setCursor(leftValueX, row1Y);
-  display.print(m.frequency);
-  display.print(" Hz");
+  display.print(frequency.value);
+  display.print(" ");
+  display.print(frequency.unit);
 
   // Reference resistor
   display.setCursor(rightValueX, row1Y);
@@ -832,6 +995,112 @@ void drawMeasureSoftKeys()
       display.drawFastVLine( r.x + r.w - 1, r.y + 3, r.h - 6, GRIDCOLOR);
     }
   }
+}
+
+
+// Draw a rectangular selector button with a centered text label.
+// The supplied rectangle is also used by touch detection, keeping visual
+// controls and touch targets synchronized.
+void drawLCRSelectorButton(const LCRRect &rect,
+                           const char *label,
+                           bool selected)
+{
+  uint16_t color = selected ? HIGHCOLOR : TXTCOLOR;
+
+  display.drawRect(
+    rect.x,
+    rect.y,
+    rect.w,
+    rect.h,
+    color
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(color, BGCOLOR);
+
+  int16_t textWidth = strlen(label) * 6;
+  int16_t textX =
+    rect.x + (rect.w - textWidth) / 2;
+
+  int16_t textY =
+    rect.y + (rect.h - 8) / 2;
+
+  display.setCursor(textX, textY);
+  display.print(label);
+}
+
+
+// Draw the frequency preset selector over the normal Measure content.
+// The current frequency is highlighted and the underlying Measure controls
+// remain hidden until a preset is selected or the operation is cancelled.
+void drawLCRFrequencySelector()
+{
+  const LCRRect &r = lcrLayout.selector;
+
+  const char *labels[] = {
+    "100 Hz",
+    "1 kHz",
+    "10 kHz",
+    "100 kHz"
+  };
+
+  const uint32_t frequencies[] = {
+    100,
+    1000,
+    10000,
+    100000
+  };
+
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  const char *title = "Select Frequency";
+
+  int16_t titleWidth = strlen(title) * 6;
+
+  display.setCursor(
+    r.x + (r.w - titleWidth) / 2,
+    r.y + r.h * 7 / 100
+  );
+
+  display.print(title);
+
+  for (int16_t i = 0; i < 4; i++) {
+    bool selected =
+      lcrSettings.frequency == frequencies[i];
+
+    drawLCRSelectorButton(
+      lcrLayout.frequencyPresets[i],
+      labels[i],
+      selected
+    );
+  }
+
+  drawLCRSelectorButton(
+    lcrLayout.selectorCancel,
+    "Cancel",
+    false
+  );
+}
+
+
+// Close any active Measure selector and restore the complete Measure screen.
+// The dynamic display is marked dirty so current measurement values are
+// restored immediately after the static interface is redrawn.
+void returnToLCRMeasureScreen()
+{
+  lcrUIState = LCR_UI_NORMAL;
+  lcrDisplayDirty = true;
+
+  drawLCRScreen();
 }
 
 

@@ -1,7 +1,4 @@
-#pragma once
-
-#include <Arduino.h>
-
+// LCR.h
 // ====================================================================
 // LCR Instrument Interface
 //
@@ -16,6 +13,10 @@
 //    Public API
 //
 // ====================================================================
+
+#pragma once
+
+#include <Arduino.h>
 
 
 // Results from a single impedance measurement.
@@ -55,10 +56,13 @@ struct MeasurementPoint
 struct MeasurementSettings
 {
   uint32_t frequency;          // Test frequency (Hz)
-
   float referenceResistance;   // Selected reference resistor (Ohms)
 };
 
+// Stores the active measurement configuration for the LCR analyzer.
+// These settings are shared by measurement acquisition and UI controls
+// such as the frequency and reference-resistor selectors.
+extern MeasurementSettings lcrSettings;
 
 // Holds a numeric measurement formatted for display.
 // The value and engineering unit are kept separate so the renderer can
@@ -97,6 +101,18 @@ enum LCRMeasureState
 extern LCRMeasureState lcrMeasureState;
 
 
+// Identifies the current LCR user-interface state.
+// NORMAL displays the active analyzer tab, while selector states temporarily
+// replace the tab content with a modal control.
+enum LCRUIState
+{
+  LCR_UI_NORMAL,
+  LCR_UI_FREQ_SELECT
+};
+
+extern LCRUIState lcrUIState;
+
+
 // Defines a rectangular region of the LCR user interface
 // The same geometry is used for both drawing and touch detection
 struct LCRRect
@@ -124,6 +140,10 @@ struct LCRLayout
   LCRRect context;
 
   LCRRect measureSoftKeys[4];
+
+  LCRRect selector;
+  LCRRect frequencyPresets[4];
+  LCRRect selectorCancel;
 };
 
 extern LCRLayout lcrLayout;
@@ -175,3 +195,4 @@ void updateLCRDisplay(const MeasurementPoint &m,
 LCRFormattedValue formatCapacitance(float farads);
 LCRFormattedValue formatInductance(float henries);
 LCRFormattedValue formatImpedance(float ohms);
+LCRFormattedValue formatFrequency(uint32_t frequencyHz);
