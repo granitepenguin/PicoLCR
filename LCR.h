@@ -141,5 +141,7 @@ void updateLCR();
 // Draw the static LCR instrument user interface.
 void drawLCRScreen();
 
-// Update the dynamic measurement fields on the display.
-void updateLCRDisplay(const MeasurementPoint &m);
+// Update the dynamic Measure-tab fields from the latest measurement
+void updateLCRDisplay(const MeasurementPoint &m,
+                      const MeasurementSettings &settings);
+
