@@ -52,11 +52,9 @@ The analyzer manages workflow internally.
 Development is intentionally divided into:
 
 GUI
-
 ↓
 
 Measurement Engine
-
 ↓
 
 Hardware
@@ -144,7 +142,7 @@ Observe Measurement
 LIVE/HOLD (optional)
 ↓
 
-Return to Scope
+Return 
 
 ---
 
@@ -171,7 +169,7 @@ Results
 Cursor
 ↓
 
-Re-Sweep
+Sweep
 
 ---
 
@@ -184,7 +182,7 @@ Layout/Wireframe
 
 ```
 +------------------------------------------------------+
-| ← Scope             LCR ANALYZER                     |
+| ← Return            LCR ANALYZER                     |
 +------------------------------------------------------+
 
 | Measure | Sweep | Cal | Settings |
@@ -237,7 +235,7 @@ More menu
 
 ```
 +------------------------------------------------------+
-| ← Scope             LCR ANALYZER                     |
+| ← Return            LCR ANALYZER                     |
 +------------------------------------------------------+
 
 | Measure | Sweep | Cal | Settings |
@@ -282,7 +280,7 @@ Sweep Time
 
 ```
 +------------------------------------------------------+
-| ← Scope             LCR ANALYZER                     |
+| ← Return            LCR ANALYZER                     |
 +------------------------------------------------------+
 
 | Measure | Sweep | Cal | Settings |
@@ -301,13 +299,13 @@ Remaining
 
 --------------------------------------------------------
 
-              Cancel Sweep
+                      Cancel 
 ```
 
 ### Results
 ```
 +------------------------------------------------------+
-| ← Scope             LCR ANALYZER                     |
+| ← Return            LCR ANALYZER                     |
 +------------------------------------------------------+
 
 | Measure | Sweep | Cal | Settings |
@@ -328,7 +326,7 @@ Remaining
 
 --------------------------------------------------------
 
-Cursor      Plot      Re-Sweep
+Cursor      Plot      Sweep
 ```
 
 ### Plot Functions
@@ -336,7 +334,7 @@ Cursor: allow for displaying values by tapping on plot
 
 Plot selection: cycle through plots vs Freq
 
-Re-Sweep : Re-run a sweep (preloading previous settings)
+Sweep : Re-run a sweep (preloading previous settings)
 
 
 
@@ -350,7 +348,7 @@ Workflow
 
 ```
 +------------------------------------------------------+
-| ← Scope             LCR ANALYZER                     |
+| ← Return            LCR ANALYZER                     |
 +------------------------------------------------------+
 
 | Measure | Sweep | Cal | Settings |
@@ -391,7 +389,7 @@ Complete
 
 ```
 +------------------------------------------------------+
-| ← Scope             LCR ANALYZER                     |
+| ← Return            LCR ANALYZER                     |
 +------------------------------------------------------+
 
 | Measure | Sweep | Cal | Settings |

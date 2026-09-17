@@ -59,6 +59,44 @@ struct MeasurementSettings
   float referenceResistance;   // Selected reference resistor (Ohms)
 };
 
+// LCR tab displays
+//
+// enumberation of all the major LCR tabs
+enum LCRTab
+{
+  LCR_TAB_MEASURE,
+  LCR_TAB_SWEEP,
+  LCR_TAB_CALIBRATION,
+  LCR_TAB_SETTINGS
+};
+
+extern LCRTab lcrTab;
+
+
+// Defines a rectangular region of the LCR user interface
+// The same geometry is used for both drawing and touch detection
+struct LCRRect
+{
+  int16_t x;
+  int16_t y;
+  int16_t w;
+  int16_t h;
+};
+
+// Defines the major screen regions shared by all LCR analyzer tabs
+struct LCRLayout
+{
+  LCRRect header;
+  LCRRect tabs;
+  LCRRect content;
+  LCRRect footer;
+};
+
+extern LCRLayout lcrLayout;
+
+// Calculate the LCR screen geometry from the active display dimensions
+void calculateLCRLayout();
+
 
 // Measurement backend.
 //

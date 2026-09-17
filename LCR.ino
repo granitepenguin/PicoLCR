@@ -21,13 +21,26 @@ constexpr int R_Y     = 100;
 constexpr int X_Y     = 120;
 
 
+// Stores the currently selected LCR analyzer tab
+// Measure is always the default tab when entering the instrument
+LCRTab lcrTab = LCR_TAB_MEASURE;
+
 LCRBackend lcrBackend = LCR_BACKEND_SIMULATION;
 
+// Stores the calculated screen regions used by the LCR interface
+LCRLayout lcrLayout;
+
+// measurement objects
 MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings);
 MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings);
 
+
+// Initialize the LCR analyzer when entering the instrument
+// Screen geometry is calculated here so all subsequent drawing and
+// touch handling use dimensions appropriate for the active display
 void initializeLCR()
 {
+  calculateLCRLayout();
   display.fillScreen(BGCOLOR);
 
   //
@@ -99,11 +112,14 @@ MeasurementPoint measureImpedance(const MeasurementSettings &settings)
 }
 
 
-// Enter the LCR instrument.
-// Performs one-time initialization and draws the initial screen.
+// Enter the LCR analyzer and display the default Measure tab
+// Resetting the selected tab here ensures every new analyzer session
+// begins at the primary measurement screen
 void enterLCRMode()
 {
   instrumentMode = MODE_LCR;
+  lcrTab = LCR_TAB_MEASURE;
+
   initializeLCR();
   drawLCRScreen();
 }
@@ -131,7 +147,9 @@ void updateLCR()
   };
 
   MeasurementPoint measurement = measureImpedance(settings);
-  updateLCRDisplay(measurement);
+
+  // disabled for testing
+  //updateLCRDisplay(measurement);
 
   uint16_t x, y;
 
@@ -157,36 +175,216 @@ void clearValueField(int x, int y, int width = 120)
 }
 
 
-// Draw the static LCR instrument user interface.
+// Calculate the major LCR screen regions from the current display size
+// Using display.width() and display.height() avoids tying the interface
+// to the current 320x240 display resolution
+void calculateLCRLayout()
+{
+  const int16_t screenW = display.width();
+  const int16_t screenH = display.height();
+
+  const int16_t headerH = screenH * 10 / 100;
+  const int16_t tabsH   = screenH * 10 / 100;
+  const int16_t footerH = screenH * 12 / 100;
+
+  lcrLayout.header = {
+    0,
+    0,
+    screenW,
+    headerH
+  };
+
+  lcrLayout.tabs = {
+    0,
+    headerH,
+    screenW,
+    tabsH
+  };
+
+  lcrLayout.content = {
+    0,
+    headerH + tabsH,
+    screenW,
+    screenH - headerH - tabsH - footerH
+  };
+
+  lcrLayout.footer = {
+    0,
+    screenH - footerH,
+    screenW,
+    footerH
+  };
+}
+
+// Return true when a screen coordinate lies inside a rectangular UI region.
+// This allows the same calculated geometry to be shared by drawing and
+// touchscreen hit detection.
+bool pointInLCRRect(uint16_t x, uint16_t y, const LCRRect &rect)
+{
+  return x >= rect.x &&
+         x < rect.x + rect.w &&
+         y >= rect.y &&
+         y < rect.y + rect.h;
+}
+
 //
-// Dynamic measurement values are updated separately by
-// updateLCRDisplay().
+// drawLCRScreen helpers
+//
+
+
+// text scaler for different sized fonts
+uint8_t lcrTextScale(uint8_t baseSize)
+{
+  int16_t scaleX = display.width() / 320;
+  int16_t scaleY = display.height() / 240;
+
+  int16_t scale = min(scaleX, scaleY);
+
+  if (scale < 1)
+    scale = 1;
+
+  return baseSize * scale;
+}
+
+
+// Draw the common LCR analyzer header.
+// The header provides a Back control and identifies the active instrument.
+// Its dimensions are derived entirely from the calculated screen layout.
+void drawLCRHeader()
+{
+  const LCRRect &r = lcrLayout.header;
+
+  display.fillRect(r.x, r.y, r.w, r.h, BGCOLOR);
+
+  // Bottom separator.
+  display.drawFastHLine(
+    r.x,
+    r.y + r.h - 1,
+    r.w,
+    GRIDCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  // Back control.
+  const char *backLabel = "< Back";
+  int16_t backY = r.y + (r.h - 8) / 2;
+
+  display.setCursor(r.x + 6, backY);
+  display.print(backLabel);
+
+  // Instrument title.
+  const char *title = "LCR ANALYZER";
+  int16_t titleWidth = strlen(title) * 6;
+  int16_t titleX = r.x + (r.w - titleWidth) / 2;
+  int16_t titleY = r.y + (r.h - 8) / 2;
+
+  display.setCursor(titleX, titleY);
+  display.print(title);
+}
+
+
+
+// Draw the four top-level LCR analyzer tabs.
+// Each tab receives an equal share of the available width, and the active
+// tab is highlighted using the existing GOscillo highlight color.
+void drawLCRTabs()
+{
+  const LCRRect &r = lcrLayout.tabs;
+
+  const char *tabLabels[] = {
+    "Measure",
+    "Sweep",
+    "Cal",
+    "Settings"
+  };
+
+  const int16_t tabCount = 4;
+  const int16_t tabW = r.w / tabCount;
+
+  display.fillRect(r.x, r.y, r.w, r.h, BGCOLOR);
+
+  for (int16_t i = 0; i < tabCount; i++) {
+    int16_t x = r.x + i * tabW;
+
+    // Let the last tab absorb any pixels left over by integer division.
+    int16_t w = (i == tabCount - 1)
+      ? r.w - (tabW * i)
+      : tabW;
+
+    bool selected = (i == static_cast<int16_t>(lcrTab));
+
+    uint16_t textColor = selected ? HIGHCOLOR : TXTCOLOR;
+
+    display.setTextSize(1);
+    display.setTextColor(textColor, BGCOLOR);
+
+    int16_t textWidth = strlen(tabLabels[i]) * 6;
+    int16_t textX = x + (w - textWidth) / 2;
+    int16_t textY = r.y + (r.h - 8) / 2;
+
+    display.setCursor(textX, textY);
+    display.print(tabLabels[i]);
+
+    // Vertical separator between adjacent tabs.
+    if (i < tabCount - 1) {
+      display.drawFastVLine(
+        x + w - 1,
+        r.y + 3,
+        r.h - 6,
+        GRIDCOLOR
+      );
+    }
+  }
+
+  // Bottom separator.
+  display.drawFastHLine(
+    r.x,
+    r.y + r.h - 1,
+    r.w,
+    GRIDCOLOR
+  );
+}
+
+
+void drawMeasureScreen()
+{
+  // Static portions of Measure view:
+  // measurement labels, separators, context labels, etc.
+}
+
+void drawMeasureSoftKeys()
+{
+  // Freq | Ref | LIVE | More
+}
+
+
+
+// Draw the complete static LCR analyzer screen.
+// During Milestone 2.3B this draws the common header and tabs while
+// retaining a simple placeholder in the Measure content region.
 void drawLCRScreen()
 {
   display.fillScreen(BGCOLOR);
 
-  display.setTextColor(TXTCOLOR, BGCOLOR);
+  drawLCRHeader();
+  drawLCRTabs();
 
-  display.setTextSize(2);
-  display.setCursor(60, 20);
-  display.print("LCR ANALYZER");
+  const LCRRect &r = lcrLayout.content;
 
   display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
 
-  display.setCursor(LABEL_X, FREQ_Y);
-  display.print("Frequency");
+  const char *placeholder = "Measure Screen";
+  int16_t textWidth = strlen(placeholder) * 6;
 
-  display.setCursor(LABEL_X, Z_Y);
-  display.print("Impedance");
+  display.setCursor(
+    r.x + (r.w - textWidth) / 2,
+    r.y + 10
+  );
 
-  display.setCursor(LABEL_X, PHASE_Y);
-  display.print("Phase");
-
-  display.setCursor(LABEL_X,R_Y);
-  display.print("Resistance");
-
-  display.setCursor(LABEL_X,X_Y);
-  display.print("Reactance");
+  display.print(placeholder);
 }
 
 
