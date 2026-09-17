@@ -60,7 +60,12 @@ MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings)
   m.phaseDeg = phase;
   m.resistance = m.impedance * cos(radians(phase));
   m.reactance = m.impedance * sin(radians(phase));
-  m.capacitance = (100.0f + 0.25f * sin(millis() / 1200.0f)) * 1.0e-9f;
+
+  // Sweep the simulated capacitance across the nF/uF boundary so automatic
+  // engineering-unit selection can be verified without measurement hardware.
+  float simulationPosition = (sin(millis() / 2500.0f) + 1.0f) / 2.0f;
+  m.capacitance = (500.0e-9f + simulationPosition * 1.0e-6f);
+
   m.inductance = 0.0f;
   m.esr = 2.5f;
   m.q = fabs(m.reactance) / m.resistance;
@@ -225,33 +230,10 @@ void calculateLCRLayout()
   const int16_t contentH = screenH - headerH - tabsH - footerH;
   const int16_t footerY = screenH - footerH;
 
-  lcrLayout.header = {
-    0,
-    0,
-    screenW,
-    headerH
-  };
-
-  lcrLayout.tabs = {
-    0,
-    headerH,
-    screenW,
-    tabsH
-  };
-
-  lcrLayout.content = {
-    0,
-    contentY,
-    screenW,
-    contentH
-  };
-
-  lcrLayout.footer = {
-    0,
-    footerY,
-    screenW,
-    footerH
-  };
+  lcrLayout.header = { 0, 0, screenW, headerH };
+  lcrLayout.tabs = { 0, headerH, screenW, tabsH };
+  lcrLayout.content = { 0, contentY, screenW, contentH };
+  lcrLayout.footer = { 0, footerY, screenW, footerH };
 
   // Divide the Measure content area into primary measurement,
   // secondary measurement, and measurement context regions.
@@ -262,26 +244,9 @@ void calculateLCRLayout()
   const int16_t contextY = secondaryY + secondaryH;
   const int16_t contextH = contentH - primaryH - secondaryH;
 
-  lcrLayout.primary = {
-    0,
-    contentY,
-    screenW,
-    primaryH
-  };
-
-  lcrLayout.secondary = {
-    0,
-    secondaryY,
-    screenW,
-    secondaryH
-  };
-
-  lcrLayout.context = {
-    0,
-    contextY,
-    screenW,
-    contextH
-  };
+  lcrLayout.primary = { 0, contentY, screenW, primaryH };
+  lcrLayout.secondary = { 0, secondaryY, screenW, secondaryH };
+  lcrLayout.context = { 0, contextY, screenW, contextH };
 }
 
 
@@ -318,6 +283,90 @@ bool pointInLCRRect(uint16_t x, uint16_t y, const LCRRect &rect)
          y >= rect.y &&
          y < rect.y + rect.h;
 }
+
+
+// value formatters
+//
+
+// Format a raw measurement using the supplied engineering scale and unit.
+// This helper keeps engineering-prefix selection separate from the display
+// code so the same formatting can be reused throughout the analyzer.
+LCRFormattedValue formatEngineeringValue(float value,
+                                          float scale,
+                                          const char *unit,
+                                          uint8_t decimals)
+{
+  LCRFormattedValue result;
+  float scaledValue = value * scale;
+  snprintf( result.value, sizeof(result.value), "%.*f", decimals, scaledValue);
+  snprintf( result.unit, sizeof(result.unit), "%s", unit);
+
+  return result;
+}
+
+
+// Format capacitance using an appropriate engineering unit.
+// The selected unit keeps the displayed numeric value within a practical
+// range while the underlying measurement remains stored in farads.
+LCRFormattedValue formatCapacitance(float farads)
+{
+  float magnitude = fabs(farads);
+
+  if (magnitude < 1.0e-9f) {
+    return formatEngineeringValue( farads, 1.0e12f, "pF", 2);
+  }
+
+  if (magnitude < 1.0e-6f) {
+    return formatEngineeringValue( farads, 1.0e9f, "nF", 2);
+  }
+
+  if (magnitude < 1.0e-3f) {
+    return formatEngineeringValue( farads, 1.0e6f, "uF", 2);
+  }
+
+  return formatEngineeringValue( farads, 1.0f, "F", 3);
+}
+
+
+// Format inductance using an appropriate engineering unit.
+// Raw inductance remains stored in henries while the displayed value is
+// scaled to uH, mH, or H as appropriate.
+LCRFormattedValue formatInductance(float henries)
+{
+  float magnitude = fabs(henries);
+
+  if (magnitude < 1.0e-3f) {
+    return formatEngineeringValue( henries, 1.0e6f, "uH", 2);
+  }
+
+  if (magnitude < 1.0f) {
+    return formatEngineeringValue( henries, 1.0e3f, "mH", 2);
+  }
+
+  return formatEngineeringValue( henries, 1.0f, "H", 3);
+}
+
+
+// Format impedance or resistance using Ohm, kOhm, or MOhm.
+// This formatter can be reused for impedance magnitude, resistance,
+// reactance, ESR, and reference-resistor values.
+LCRFormattedValue formatImpedance(float ohms)
+{
+  float magnitude = fabs(ohms);
+
+  if (magnitude >= 1.0e6f) {
+    return formatEngineeringValue( ohms, 1.0e-6f, "MOhm", 2);
+  }
+
+  if (magnitude >= 1.0e3f) {
+    return formatEngineeringValue( ohms, 1.0e-3f, "kOhm", 2);
+  }
+
+  return formatEngineeringValue( ohms, 1.0f, "Ohm", 2);
+}
+
+
+
 
 //
 // drawLCRScreen helpers
@@ -427,42 +476,21 @@ void drawLCRSpriteMeasurement(int16_t width, int16_t height,
 }
 
 
-// Render the primary measurement into an off-screen sprite and transfer
-// the completed field to the TFT in one operation to minimize flicker.
+
+// Render the primary measurement using automatically selected engineering
+// units. The completed value/unit pair is composed in the sprite and pushed
+// to the TFT in one operation to prevent visible refresh flicker.
 void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
 {
   const LCRRect &r = lcrLayout.primary;
 
-  char value[16];
-  char unit[8];
+  LCRFormattedValue formatted = formatCapacitance(m.capacitance);
 
-  float capacitanceNF = m.capacitance * 1.0e9f;
-
-  snprintf(value, sizeof(value), "%.2f", capacitanceNF);
-  snprintf(unit, sizeof(unit), "nF");
-
-  // Clear the sprite in RAM rather than clearing the visible TFT.
   lcrValueSprite.fillSprite(BGCOLOR);
 
-  drawLCRSpriteMeasurement(
-    r.w,
-    r.h,
-    value,
-    unit,
-    4,
-    2,
-    TXTCOLOR
-  );
+  drawLCRSpriteMeasurement( r.w, r.h, formatted.value, formatted.unit, 4, 2, TXTCOLOR);
 
-  // Transfer only the portion of the sprite occupied by this field.
-  lcrValueSprite.pushSprite(
-    r.x,
-    r.y,
-    0,
-    0,
-    r.w,
-    r.h
-  );
+  lcrValueSprite.pushSprite( r.x, r.y, 0, 0, r.w, r.h);
 }
 
 
@@ -515,14 +543,7 @@ void drawLCRSecondaryMeasurement(const MeasurementPoint &m)
   );
   lcrValueSprite.print(value);
 
-  lcrValueSprite.pushSprite(
-    r.x,
-    r.y,
-    0,
-    0,
-    r.w,
-    r.h
-  );
+  lcrValueSprite.pushSprite( r.x, r.y, 0, 0, r.w, r.h);
 }
 
 
@@ -574,12 +595,7 @@ void drawLCRHeader()
   display.fillRect(r.x, r.y, r.w, r.h, BGCOLOR);
 
   // Bottom separator.
-  display.drawFastHLine(
-    r.x,
-    r.y + r.h - 1,
-    r.w,
-    GRIDCOLOR
-  );
+  display.drawFastHLine( r.x, r.y + r.h - 1, r.w, GRIDCOLOR);
 
   display.setTextSize(1);
   display.setTextColor(TXTCOLOR, BGCOLOR);
@@ -646,22 +662,12 @@ void drawLCRTabs()
 
     // Vertical separator between adjacent tabs.
     if (i < tabCount - 1) {
-      display.drawFastVLine(
-        x + w - 1,
-        r.y + 3,
-        r.h - 6,
-        GRIDCOLOR
-      );
+      display.drawFastVLine( x + w - 1, r.y + 3, r.h - 6, GRIDCOLOR);
     }
   }
 
   // Bottom separator.
-  display.drawFastHLine(
-    r.x,
-    r.y + r.h - 1,
-    r.w,
-    GRIDCOLOR
-  );
+  display.drawFastHLine( r.x, r.y + r.h - 1, r.w, GRIDCOLOR);
 }
 
 
@@ -714,12 +720,7 @@ void drawMeasureSoftKeys()
 
   display.fillRect(r.x, r.y, r.w, r.h, BGCOLOR);
 
-  display.drawFastHLine(
-    r.x,
-    r.y,
-    r.w,
-    GRIDCOLOR
-  );
+  display.drawFastHLine( r.x, r.y, r.w, GRIDCOLOR);
 
   display.setTextSize(1);
 
@@ -739,12 +740,7 @@ void drawMeasureSoftKeys()
     display.print(labels[i]);
 
     if (i < buttonCount - 1) {
-      display.drawFastVLine(
-        x + w - 1,
-        r.y + 3,
-        r.h - 6,
-        GRIDCOLOR
-      );
+      display.drawFastVLine( x + w - 1, r.y + 3, r.h - 6, GRIDCOLOR);
     }
   }
 }

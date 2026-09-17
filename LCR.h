@@ -59,6 +59,18 @@ struct MeasurementSettings
   float referenceResistance;   // Selected reference resistor (Ohms)
 };
 
+
+// Holds a numeric measurement formatted for display.
+// The value and engineering unit are kept separate so the renderer can
+// use different font sizes while treating them as one measurement.
+struct LCRFormattedValue
+{
+  char value[16];
+  char unit[8];
+};
+
+
+
 // LCR tab displays
 //
 // enumberation of all the major LCR tabs
@@ -145,3 +157,7 @@ void drawLCRScreen();
 void updateLCRDisplay(const MeasurementPoint &m,
                       const MeasurementSettings &settings);
 
+// Format raw SI measurements into human-readable engineering units.
+LCRFormattedValue formatCapacitance(float farads);
+LCRFormattedValue formatInductance(float henries);
+LCRFormattedValue formatImpedance(float ohms);
