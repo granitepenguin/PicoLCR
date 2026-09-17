@@ -83,16 +83,25 @@ struct LCRRect
   int16_t h;
 };
 
-// Defines the major screen regions shared by all LCR analyzer tabs
+
+// Defines the major screen regions used by the LCR analyzer
+// Common regions are shared by every tab, while measurement-specific
+// regions subdivide the content area for the Measure display
 struct LCRLayout
 {
   LCRRect header;
   LCRRect tabs;
   LCRRect content;
   LCRRect footer;
+
+  // Content subdivisions
+  LCRRect primary;
+  LCRRect secondary;
+  LCRRect context;
 };
 
 extern LCRLayout lcrLayout;
+
 
 // Calculate the LCR screen geometry from the active display dimensions
 void calculateLCRLayout();

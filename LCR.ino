@@ -186,6 +186,8 @@ void calculateLCRLayout()
   const int16_t headerH = screenH * 10 / 100;
   const int16_t tabsH   = screenH * 10 / 100;
   const int16_t footerH = screenH * 12 / 100;
+  const int16_t primaryH = lcrLayout.content.h * 42 / 100;
+  const int16_t secondaryH = lcrLayout.content.h * 25 / 100;
 
   lcrLayout.header = {
     0,
@@ -206,6 +208,29 @@ void calculateLCRLayout()
     headerH + tabsH,
     screenW,
     screenH - headerH - tabsH - footerH
+  };
+
+  // Divide the Measure content area into primary measurement,
+  // secondary measurement, and measurement context regions
+  lcrLayout.primary = {
+    lcrLayout.content.x,
+    lcrLayout.content.y,
+    lcrLayout.content.w,
+    primaryH
+  };
+
+  lcrLayout.secondary = {
+    lcrLayout.content.x,
+    lcrLayout.content.y + primaryH,
+    lcrLayout.content.w,
+    secondaryH
+  };
+
+  lcrLayout.context = {
+    lcrLayout.content.x,
+    lcrLayout.content.y + primaryH + secondaryH,
+    lcrLayout.content.w,
+    lcrLayout.content.h - primaryH - secondaryH
   };
 
   lcrLayout.footer = {
@@ -348,22 +373,95 @@ void drawLCRTabs()
 }
 
 
+// Draw the static portions of the Measure tab.
+// Measurement values themselves are not drawn here; they are refreshed
+// separately by updateLCRDisplay().
 void drawMeasureScreen()
 {
-  // Static portions of Measure view:
-  // measurement labels, separators, context labels, etc.
+  const LCRRect &context = lcrLayout.context;
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  int16_t leftX = context.x + context.w * 5 / 100;
+  int16_t rightX = context.x + context.w * 55 / 100;
+
+  int16_t row1Y = context.y + context.h * 20 / 100;
+  int16_t row2Y = context.y + context.h * 60 / 100;
+
+  display.setCursor(leftX, row1Y);
+  display.print("FREQ:");
+
+  display.setCursor(rightX, row1Y);
+  display.print("REF:");
+
+  display.setCursor(leftX, row2Y);
+  display.print("LEVEL:");
+
+  display.setCursor(rightX, row2Y);
+  display.print("AVG:");
 }
 
+
+// Draw the Measure tab soft keys in the common footer.
+// Button geometry is calculated from the footer width so the controls
+// remain evenly spaced on different display resolutions.
 void drawMeasureSoftKeys()
 {
-  // Freq | Ref | LIVE | More
+  const LCRRect &r = lcrLayout.footer;
+
+  const char *labels[] = {
+    "Freq",
+    "Ref",
+    "LIVE",
+    "More"
+  };
+
+  const int16_t buttonCount = 4;
+  const int16_t buttonW = r.w / buttonCount;
+
+  display.fillRect(r.x, r.y, r.w, r.h, BGCOLOR);
+
+  display.drawFastHLine(
+    r.x,
+    r.y,
+    r.w,
+    GRIDCOLOR
+  );
+
+  display.setTextSize(1);
+
+  for (int16_t i = 0; i < buttonCount; i++) {
+    int16_t x = r.x + i * buttonW;
+
+    int16_t w = (i == buttonCount - 1)
+      ? r.w - buttonW * i
+      : buttonW;
+
+    int16_t textWidth = strlen(labels[i]) * 6;
+    int16_t textX = x + (w - textWidth) / 2;
+    int16_t textY = r.y + (r.h - 8) / 2;
+
+    display.setTextColor(TXTCOLOR, BGCOLOR);
+    display.setCursor(textX, textY);
+    display.print(labels[i]);
+
+    if (i < buttonCount - 1) {
+      display.drawFastVLine(
+        x + w - 1,
+        r.y + 3,
+        r.h - 6,
+        GRIDCOLOR
+      );
+    }
+  }
 }
 
 
 
-// Draw the complete static LCR analyzer screen.
-// During Milestone 2.3B this draws the common header and tabs while
-// retaining a simple placeholder in the Measure content region.
+// Draw the complete static LCR analyzer interface.
+// Common navigation is drawn first, followed by the static content and
+// soft keys belonging to the currently selected analyzer tab.
 void drawLCRScreen()
 {
   display.fillScreen(BGCOLOR);
@@ -371,20 +469,17 @@ void drawLCRScreen()
   drawLCRHeader();
   drawLCRTabs();
 
-  const LCRRect &r = lcrLayout.content;
+  switch (lcrTab) {
+    case LCR_TAB_MEASURE:
+      drawMeasureScreen();
+      drawMeasureSoftKeys();
+      break;
 
-  display.setTextSize(1);
-  display.setTextColor(TXTCOLOR, BGCOLOR);
-
-  const char *placeholder = "Measure Screen";
-  int16_t textWidth = strlen(placeholder) * 6;
-
-  display.setCursor(
-    r.x + (r.w - textWidth) / 2,
-    r.y + 10
-  );
-
-  display.print(placeholder);
+    case LCR_TAB_SWEEP:
+    case LCR_TAB_CALIBRATION:
+    case LCR_TAB_SETTINGS:
+      break;
+  }
 }
 
 
