@@ -69,6 +69,31 @@ extern MeasurementSettings lcrSettings;
 // to be restored after temporary selector screens are closed.
 extern MeasurementPoint lcrMeasurement;
 
+
+// Identifies how measurement frequencies are distributed during a sweep.
+// LINEAR uses a fixed frequency step; LOG uses a logarithmic distribution.
+enum LCRSweepMode
+{
+  LCR_SWEEP_LINEAR,
+  LCR_SWEEP_LOG
+};
+
+// Stores the configuration used to perform an LCR frequency sweep.
+// Linear sweeps use stepFrequency; logarithmic sweeps use pointsPerDecade.
+struct SweepSettings
+{
+  uint32_t startFrequency;
+  uint32_t stopFrequency;
+
+  LCRSweepMode mode;
+
+  uint32_t stepFrequency;
+  uint16_t pointsPerDecade;
+};
+
+// Stores the active sweep configuration used by the LCR analyzer.
+extern SweepSettings lcrSweepSettings;
+
 // Holds a numeric measurement formatted for display.
 // The value and engineering unit are kept separate so the renderer can
 // use different font sizes while treating them as one measurement.
@@ -131,6 +156,17 @@ enum LCRUIState
 
 extern LCRUIState lcrUIState;
 
+// Identifies which frequency setting is currently being edited.
+// The common frequency selector uses this target to update either the
+// Measure frequency or one of the Sweep frequency limits.
+enum LCRFrequencyTarget
+{
+  LCR_FREQ_MEASURE,
+  LCR_FREQ_SWEEP_START,
+  LCR_FREQ_SWEEP_STOP
+};
+
+extern LCRFrequencyTarget lcrFrequencyTarget;
 
 // Defines a rectangular region of the LCR user interface
 // The same geometry is used for both drawing and touch detection
@@ -159,11 +195,15 @@ struct LCRLayout
   LCRRect tabs;
   LCRRect tabButtons[4];
 
+  // Measurement tab
   LCRRect content;
   // Content subdivisions
   LCRRect primary;
   LCRRect secondary;
   LCRRect context;
+
+  // Sweep setup tab
+  LCRRect sweepSetupRows[5];
 
   LCRRect footer;
 
@@ -189,6 +229,9 @@ void calculateLCRLayout();
 
 // Calculate regions specific to the Measure tab.
 void calculateMeasureLayout();
+
+// Calculate interactive row geometry for the Sweep Setup screen.
+void calculateSweepLayout();
 
 // Calculate geometry shared by modal selector screens.
 void calculateSelectorLayout();

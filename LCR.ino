@@ -79,6 +79,10 @@ LCRMeasureState lcrMeasureState = LCR_MEASURE_LIVE;
 // Entering the analyzer initializes Sweep in its configuration state.
 LCRSweepState lcrSweepState = LCR_SWEEP_SETUP;
 
+// Identifies which setting will receive the next frequency selection.
+// Measure frequency is the default target when entering the analyzer.
+LCRFrequencyTarget lcrFrequencyTarget = LCR_FREQ_MEASURE;
+
 // Stores the current LCR user-interface state.
 // The analyzer normally displays the active tab unless a selector is open.
 LCRUIState lcrUIState = LCR_UI_NORMAL;
@@ -94,6 +98,17 @@ MeasurementSettings lcrSettings = {
 // Stores the most recently acquired LCR measurement.
 // LIVE updates this value continuously while HOLD preserves it for display.
 MeasurementPoint lcrMeasurement = {};
+
+// Stores the active LCR sweep configuration.
+// Defaults provide a useful full-range linear sweep while allowing the
+// Sweep Setup screen to modify these values later.
+SweepSettings lcrSweepSettings = {
+  100,                 // Start frequency: 100 Hz
+  110000,              // Stop frequency: 110 kHz
+  LCR_SWEEP_LINEAR,    // Sweep mode
+  1000,                // Linear step: 1 kHz
+  10                   // Logarithmic density: 10 points/decade
+};
 
 // Off-screen drawing buffer used for dynamic LCR measurement fields.
 // Rendering into RAM first allows the completed field to be transferred
@@ -223,6 +238,7 @@ void enterLCRMode()
   lcrTab = LCR_TAB_MEASURE;
   lcrMeasureState = LCR_MEASURE_LIVE;
   lcrSweepState = LCR_SWEEP_SETUP;
+  lcrFrequencyTarget = LCR_FREQ_MEASURE;
   lcrUIState = LCR_UI_NORMAL;
   lcrDisplayDirty = true;
 
@@ -243,8 +259,9 @@ void exitLCRMode()
 
 
 // Main LCR instrument task.
-// LIVE mode continuously acquires and periodically displays measurements.
-// HOLD preserves the last measurement while leaving all UI controls active.
+// Handles Measure acquisition/display updates and routes touchscreen input
+// according to the active tab and UI state. Modal selectors receive touch
+// input before the controls on the underlying Measure or Sweep screens.
 void updateLCR()
 {
   static uint32_t lastDisplayUpdate = 0;
@@ -252,13 +269,16 @@ void updateLCR()
 
   uint32_t now = millis();
 
-  // Acquire and update live measurements only while the Measure tab is active.
-  // This prevents Measure rendering from continuing underneath other LCR tabs.
+  //
+  // Measure acquisition and display update
+  //
+
   if (lcrTab == LCR_TAB_MEASURE &&
       lcrMeasureState == LCR_MEASURE_LIVE &&
       lcrUIState == LCR_UI_NORMAL) {
 
-    lcrMeasurement = measureImpedance(lcrSettings);
+    lcrMeasurement =
+      measureImpedance(lcrSettings);
 
     if (lcrDisplayDirty ||
         now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
@@ -266,17 +286,23 @@ void updateLCR()
       lastDisplayUpdate = now;
       lcrDisplayDirty = false;
 
-      updateLCRDisplay(lcrMeasurement, lcrSettings);
+      updateLCRDisplay(
+        lcrMeasurement,
+        lcrSettings
+      );
     }
   }
 
   //
-  // Touch handling code 
+  // Touch detection
   //
-  uint16_t x, y;
+
+  uint16_t x = 0;
+  uint16_t y = 0;
+
   bool pressed = readTouch(x, y);
 
-  // Require release before accepting another touch.
+  // Require the screen to be released before accepting another touch.
   if (!pressed) {
     lastPressed = false;
     return;
@@ -287,41 +313,79 @@ void updateLCR()
 
   lastPressed = true;
 
-  // Exit the analyzer only when the dedicated Back control is touched.
-  // The remainder of the header is intentionally non-interactive.
-  if (pointInLCRRect(x, y, lcrLayout.backButton)) {
+  //
+  // Back
+  //
+
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.backButton)) {
+
     exitLCRMode();
     return;
   }
 
-  // Top-level analyzer tabs remain available whenever no measurement
-  // operation explicitly locks navigation.
-  if (pointInLCRRect(x, y, lcrLayout.tabs)) {
+  //
+  // Top-level analyzer tabs
+  //
+
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.tabs)) {
+
     handleLCRTabTouch(x, y);
     return;
   }
 
-  // Modal selectors consume touch input before the underlying tab.
+  //
+  // Modal selectors
+  //
+  // These must be processed before controls on the underlying tab.
+  //
+
   if (lcrUIState == LCR_UI_FREQ_SELECT) {
     handleLCRFrequencySelectorTouch(x, y);
     return;
   }
 
-  // Route modal reference-selector touches before the underlying
-  // Measure-screen controls are allowed to process them.
   if (lcrUIState == LCR_UI_REF_SELECT) {
     handleLCRReferenceSelectorTouch(x, y);
     return;
   }
 
+  //
+  // Sweep Setup controls
+  //
+
+  if (lcrTab == LCR_TAB_SWEEP &&
+      lcrSweepState == LCR_SWEEP_SETUP &&
+      lcrUIState == LCR_UI_NORMAL &&
+      pointInLCRRect(
+        x,
+        y,
+        lcrLayout.content)) {
+
+    handleLCRSweepSetupTouch(x, y);
+    return;
+  }
+
+  //
+  // Measure soft keys
+  //
+
   if (lcrTab == LCR_TAB_MEASURE &&
-      pointInLCRRect(x, y, lcrLayout.footer)) {
+      lcrUIState == LCR_UI_NORMAL &&
+      pointInLCRRect(
+        x,
+        y,
+        lcrLayout.footer)) {
 
     handleMeasureSoftKeyTouch(x, y);
     return;
   }
 }
-
 
 
 // Clear a measurement value before drawing a new one.
@@ -484,6 +548,50 @@ void calculateMeasureLayout()
   }
 }
 
+
+// Divide the Sweep Setup content area into five interactive rows.
+// The same row rectangles are used for drawing and touch detection so
+// Sweep controls remain aligned on different display resolutions.
+void calculateSweepLayout()
+{
+  const LCRRect &content = lcrLayout.content;
+
+  const int16_t rowCount = 5;
+  const int16_t rowH = content.h / rowCount;
+
+  for (int16_t i = 0; i < rowCount; i++) {
+    int16_t y =
+      content.y + i * rowH;
+
+    int16_t h = (i == rowCount - 1)
+      ? content.h - rowH * i
+      : rowH;
+
+    lcrLayout.sweepSetupRows[i] = {
+      content.x,
+      y,
+      content.w,
+      h
+    };
+  }
+}
+
+
+// Calculate the number of measurements produced by a linear sweep.
+// Invalid settings return zero rather than allowing divide-by-zero or an
+// inverted frequency range to propagate into the sweep engine.
+uint32_t calculateLinearSweepPointCount(const SweepSettings &settings)
+{
+  if (settings.stepFrequency == 0)
+    return 0;
+
+  if (settings.stopFrequency < settings.startFrequency)
+    return 0;
+
+  return
+    (settings.stopFrequency - settings.startFrequency) /
+    settings.stepFrequency + 1;
+}
 
 
 // Calculate geometry shared by modal selectors.
@@ -659,6 +767,7 @@ void initializeLCR()
 {
   calculateLCRLayout();
   calculateMeasureLayout();
+  calculateSweepLayout();
   calculateSelectorLayout();
   calculateFrequencySelectorLayout();
   calculateReferenceSelectorLayout();
@@ -801,6 +910,20 @@ LCRFormattedValue formatFrequency(uint32_t frequencyHz)
 }
 
 
+// Print a frequency at the current display cursor using compact engineering
+// units. Frequency remains stored internally as integer Hz.
+void printLCRFrequency(uint32_t frequencyHz)
+{
+  LCRFormattedValue formatted =
+    formatFrequency(frequencyHz);
+
+  display.print(formatted.value);
+  display.print(" ");
+  display.print(formatted.unit);
+}
+
+
+
 //
 // Touch handlers
 //
@@ -830,12 +953,13 @@ void handleLCRTabTouch(uint16_t x, uint16_t y)
 
 
 // Handle touches within the Measure-tab soft-key footer.
-// Only LIVE/HOLD is implemented during this milestone; the remaining
-// buttons are reserved for their upcoming Measure-control milestones.
+// Frequency, reference-resistor, and LIVE/HOLD controls are active;
+// More remains reserved for a future milestone.
 void handleMeasureSoftKeyTouch(uint16_t x, uint16_t y)
 {
   // Open the frequency preset selector.
   if (pointInLCRRect(x, y, lcrLayout.measureSoftKeys[0])) {
+    lcrFrequencyTarget = LCR_FREQ_MEASURE;
     lcrUIState = LCR_UI_FREQ_SELECT;
     drawLCRFrequencySelector();
     return;
@@ -871,35 +995,52 @@ void handleMeasureSoftKeyTouch(uint16_t x, uint16_t y)
 }
 
 
-// Handle touch input while the frequency selector is displayed.
-// Selecting a preset updates the shared measurement settings and returns
-// the analyzer to LIVE measurement; Cancel leaves all settings unchanged.
+// Handle touch input while the shared frequency selector is displayed.
+// The selected value is applied to whichever frequency setting opened the
+// selector: Measure frequency, Sweep Start, or Sweep Stop. Cancel returns
+// to the originating screen without modifying the current setting.
 void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
 {
-  // Match touches against the frequency preset table so the same data
-  // controls layout, labels, values, and touch handling.
+  // Check each available frequency preset.
   for (uint8_t i = 0; i < FREQUENCY_PRESET_COUNT; i++) {
     if (pointInLCRRect(
           x,
           y,
           lcrLayout.frequencyPresets[i])) {
 
-      lcrSettings.frequency =
-        frequencyPresets[i].value;
+      // Apply the selected frequency to the setting currently being edited.
+      setLCRSelectedFrequency(
+        frequencyPresets[i].value
+      );
 
-      lcrMeasureState = LCR_MEASURE_LIVE;
+      // Return to the screen that opened the selector.
+      if (lcrFrequencyTarget == LCR_FREQ_MEASURE) {
+        returnToLCRMeasureScreen();
+      } else {
+        lcrUIState = LCR_UI_NORMAL;
+        lcrDisplayDirty = true;
 
-      returnToLCRMeasureScreen();
+        drawLCRScreen();
+      }
+
       return;
     }
   }
 
+  // Cancel closes the selector without changing the current frequency.
   if (pointInLCRRect(
         x,
         y,
         lcrLayout.selectorCancel)) {
 
-    returnToLCRMeasureScreen();
+    if (lcrFrequencyTarget == LCR_FREQ_MEASURE) {
+      returnToLCRMeasureScreen();
+    } else {
+      lcrUIState = LCR_UI_NORMAL;
+
+      drawLCRScreen();
+    }
+
     return;
   }
 }
@@ -939,6 +1080,41 @@ void handleLCRReferenceSelectorTouch(uint16_t x, uint16_t y)
 }
 
 
+// Handle interactive controls on the Sweep Setup screen.
+// Start and Stop currently reuse the common frequency preset selector;
+// Mode and Step are added in subsequent Sweep configuration milestones.
+void handleLCRSweepSetupTouch(uint16_t x, uint16_t y)
+{
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.sweepSetupRows[0])) {
+
+    lcrFrequencyTarget =
+      LCR_FREQ_SWEEP_START;
+
+    lcrUIState =
+      LCR_UI_FREQ_SELECT;
+
+    drawLCRFrequencySelector();
+    return;
+  }
+
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.sweepSetupRows[1])) {
+
+    lcrFrequencyTarget =
+      LCR_FREQ_SWEEP_STOP;
+
+    lcrUIState =
+      LCR_UI_FREQ_SELECT;
+
+    drawLCRFrequencySelector();
+    return;
+  }
+}
 
 
 
@@ -1175,9 +1351,9 @@ void drawLCRMeasurementContext(const MeasurementPoint &m,
 //
 
 
-// Draw the initial Sweep Setup view.
-// This first implementation establishes the approved screen structure;
-// interactive sweep controls are added in subsequent milestones.
+// Draw the Sweep Setup view using shared row geometry and the active sweep
+// configuration. Row rectangles are also used for touch detection so the
+// displayed controls and interactive areas remain synchronized.
 void drawLCRSweepSetup()
 {
   const LCRRect &r = lcrLayout.content;
@@ -1193,45 +1369,104 @@ void drawLCRSweepSetup()
   display.setTextSize(1);
   display.setTextColor(TXTCOLOR, BGCOLOR);
 
-  int16_t leftX =
+  const int16_t leftX =
     r.x + r.w * 10 / 100;
 
-  int16_t valueX =
+  const int16_t valueX =
     r.x + r.w * 55 / 100;
 
-  int16_t rowH =
-    r.h / 5;
+  // Start frequency.
+  const LCRRect &startRow =
+    lcrLayout.sweepSetupRows[0];
 
-  display.setCursor(leftX, r.y + rowH * 0 + 8);
+  int16_t y =
+    startRow.y + (startRow.h - 8) / 2;
+
+  display.setCursor(leftX, y);
   display.print("Start");
 
-  display.setCursor(valueX, r.y + rowH * 0 + 8);
-  display.print("100 Hz");
+  display.setCursor(valueX, y);
+  printLCRFrequency(
+    lcrSweepSettings.startFrequency
+  );
 
-  display.setCursor(leftX, r.y + rowH * 1 + 8);
+  // Stop frequency.
+  const LCRRect &stopRow =
+    lcrLayout.sweepSetupRows[1];
+
+  y = stopRow.y + (stopRow.h - 8) / 2;
+
+  display.setCursor(leftX, y);
   display.print("Stop");
 
-  display.setCursor(valueX, r.y + rowH * 1 + 8);
-  display.print("110 kHz");
+  display.setCursor(valueX, y);
+  printLCRFrequency(
+    lcrSweepSettings.stopFrequency
+  );
 
-  display.setCursor(leftX, r.y + rowH * 2 + 8);
+  // Sweep mode.
+  const LCRRect &modeRow =
+    lcrLayout.sweepSetupRows[2];
+
+  y = modeRow.y + (modeRow.h - 8) / 2;
+
+  display.setCursor(leftX, y);
   display.print("Mode");
 
-  display.setCursor(valueX, r.y + rowH * 2 + 8);
-  display.print("Linear");
+  display.setCursor(valueX, y);
 
-  display.setCursor(leftX, r.y + rowH * 3 + 8);
-  display.print("Step");
+  if (lcrSweepSettings.mode == LCR_SWEEP_LINEAR)
+    display.print("Linear");
+  else
+    display.print("Log");
 
-  display.setCursor(valueX, r.y + rowH * 3 + 8);
-  display.print("1 kHz");
+  // Linear step or logarithmic density.
+  const LCRRect &stepRow =
+    lcrLayout.sweepSetupRows[3];
 
-  display.setCursor(leftX, r.y + rowH * 4 + 8);
+  y = stepRow.y + (stepRow.h - 8) / 2;
+
+  display.setCursor(leftX, y);
+
+  if (lcrSweepSettings.mode == LCR_SWEEP_LINEAR)
+    display.print("Step");
+  else
+    display.print("Points/Dec");
+
+  display.setCursor(valueX, y);
+
+  if (lcrSweepSettings.mode == LCR_SWEEP_LINEAR) {
+    printLCRFrequency(
+      lcrSweepSettings.stepFrequency
+    );
+  } else {
+    display.print(
+      lcrSweepSettings.pointsPerDecade
+    );
+  }
+
+  // Derived measurement count.
+  const LCRRect &countRow =
+    lcrLayout.sweepSetupRows[4];
+
+  y = countRow.y + (countRow.h - 8) / 2;
+
+  display.setCursor(leftX, y);
   display.print("Measurements");
 
-  display.setCursor(valueX, r.y + rowH * 4 + 8);
-  display.print("---");
+  display.setCursor(valueX, y);
+
+  if (lcrSweepSettings.mode == LCR_SWEEP_LINEAR) {
+    display.print(
+      calculateLinearSweepPointCount(
+        lcrSweepSettings
+      )
+    );
+  } else {
+    display.print("---");
+  }
 }
+
 
 
 // Draw the Sweep Setup footer.
@@ -1473,9 +1708,49 @@ void drawLCRSelectorButton(const LCRRect &rect,
 }
 
 
-// Draw the frequency preset selector over the normal Measure content.
-// The current frequency is highlighted and the underlying Measure controls
-// remain hidden until a preset is selected or the operation is cancelled.
+// Return the frequency associated with the currently active selector target.
+// This lets the shared selector highlight the correct value for Measure,
+// Sweep Start, or Sweep Stop without duplicating selector code.
+uint32_t getLCRSelectedFrequency()
+{
+  switch (lcrFrequencyTarget) {
+    case LCR_FREQ_SWEEP_START:
+      return lcrSweepSettings.startFrequency;
+
+    case LCR_FREQ_SWEEP_STOP:
+      return lcrSweepSettings.stopFrequency;
+
+    case LCR_FREQ_MEASURE:
+    default:
+      return lcrSettings.frequency;
+  }
+}
+
+
+// Store a selected frequency in the setting currently being edited.
+// Measure-frequency changes resume LIVE acquisition, while Sweep settings
+// return to the Sweep Setup screen for further configuration.
+void setLCRSelectedFrequency(uint32_t frequency)
+{
+  switch (lcrFrequencyTarget) {
+    case LCR_FREQ_SWEEP_START:
+      lcrSweepSettings.startFrequency = frequency;
+      break;
+
+    case LCR_FREQ_SWEEP_STOP:
+      lcrSweepSettings.stopFrequency = frequency;
+      break;
+
+    case LCR_FREQ_MEASURE:
+    default:
+      lcrSettings.frequency = frequency;
+      lcrMeasureState = LCR_MEASURE_LIVE;
+      break;
+  }
+}
+
+// Draw the frequency preset selector over the active screen.
+// The current value for the setting being edited is highlighted.
 void drawLCRFrequencySelector()
 {
   const LCRRect &r = lcrLayout.selector;
@@ -1502,10 +1777,10 @@ void drawLCRFrequencySelector()
 
   display.print(title);
 
-  // Draw each frequency preset directly from the shared preset table.
   for (uint8_t i = 0; i < FREQUENCY_PRESET_COUNT; i++) {
     bool selected =
-      lcrSettings.frequency == frequencyPresets[i].value;
+      getLCRSelectedFrequency() ==
+      frequencyPresets[i].value;
 
     drawLCRSelectorButton(
       lcrLayout.frequencyPresets[i],
