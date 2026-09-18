@@ -211,6 +211,13 @@ void updateLCR()
     return;
   }
 
+  // Route modal reference-selector touches before the underlying
+  // Measure-screen controls are allowed to process them.
+  if (lcrUIState == LCR_UI_REF_SELECT) {
+    handleLCRReferenceSelectorTouch(x, y);
+    return;
+  }
+
   if (lcrTab == LCR_TAB_MEASURE &&
       pointInLCRRect(x, y, lcrLayout.footer)) {
 
@@ -258,9 +265,10 @@ void initializeLCRValueSprite()
 }
 
 
-// Calculate the major LCR screen regions from the current display size.
-// All geometry is derived from the active display dimensions so the
-// interface can adapt to different display resolutions.
+
+// Calculate only the major screen regions shared by every LCR analyzer tab.
+// Tab-specific and selector-specific geometry is calculated separately so
+// this function remains independent of individual instrument screens.
 void calculateLCRLayout()
 {
   const int16_t screenW = display.width();
@@ -271,90 +279,189 @@ void calculateLCRLayout()
   const int16_t footerH = screenH * 12 / 100;
 
   const int16_t contentY = headerH + tabsH;
-  const int16_t contentH = screenH - headerH - tabsH - footerH;
+  const int16_t contentH =
+    screenH - headerH - tabsH - footerH;
+
   const int16_t footerY = screenH - footerH;
 
-  lcrLayout.header = { 0, 0, screenW, headerH };
-  lcrLayout.tabs = { 0, headerH, screenW, tabsH };
-  lcrLayout.content = { 0, contentY, screenW, contentH };
-  lcrLayout.footer = { 0, footerY, screenW, footerH };
+  lcrLayout.header = {
+    0,
+    0,
+    screenW,
+    headerH
+  };
 
-  // Divide the Measure content area into primary measurement,
-  // secondary measurement, and measurement context regions.
-  const int16_t primaryH = contentH * 42 / 100;
-  const int16_t secondaryH = contentH * 25 / 100;
+  lcrLayout.tabs = {
+    0,
+    headerH,
+    screenW,
+    tabsH
+  };
 
-  const int16_t secondaryY = contentY + primaryH;
-  const int16_t contextY = secondaryY + secondaryH;
-  const int16_t contextH = contentH - primaryH - secondaryH;
+  lcrLayout.content = {
+    0,
+    contentY,
+    screenW,
+    contentH
+  };
 
-  lcrLayout.primary = { 0, contentY, screenW, primaryH };
-  lcrLayout.secondary = { 0, secondaryY, screenW, secondaryH };
-  lcrLayout.context = { 0, contextY, screenW, contextH };
+  lcrLayout.footer = {
+    0,
+    footerY,
+    screenW,
+    footerH
+  };
+}
 
-  // Divide the Measure footer into four equal soft-key regions.
-  // These rectangles are shared by drawing and touch detection so the
-  // visible controls and their touch targets always remain aligned.
+
+
+// Divide the common content and footer regions into areas used by the
+// Measure tab, including primary/secondary measurements, context fields,
+// and the four Measure soft-key touch regions.
+void calculateMeasureLayout()
+{
+  const LCRRect &content = lcrLayout.content;
+  const LCRRect &footer = lcrLayout.footer;
+
+  const int16_t primaryH =
+    content.h * 42 / 100;
+
+  const int16_t secondaryH =
+    content.h * 25 / 100;
+
+  const int16_t secondaryY =
+    content.y + primaryH;
+
+  const int16_t contextY =
+    secondaryY + secondaryH;
+
+  const int16_t contextH =
+    content.h - primaryH - secondaryH;
+
+  lcrLayout.primary = {
+    content.x,
+    content.y,
+    content.w,
+    primaryH
+  };
+
+  lcrLayout.secondary = {
+    content.x,
+    secondaryY,
+    content.w,
+    secondaryH
+  };
+
+  lcrLayout.context = {
+    content.x,
+    contextY,
+    content.w,
+    contextH
+  };
+
   const int16_t softKeyCount = 4;
-  const int16_t softKeyW = lcrLayout.footer.w / softKeyCount;
+  const int16_t softKeyW =
+    footer.w / softKeyCount;
 
   for (int16_t i = 0; i < softKeyCount; i++) {
-    int16_t x = lcrLayout.footer.x + i * softKeyW;
+    int16_t x =
+      footer.x + i * softKeyW;
 
     int16_t w = (i == softKeyCount - 1)
-      ? lcrLayout.footer.w - softKeyW * i
+      ? footer.w - softKeyW * i
       : softKeyW;
 
     lcrLayout.measureSoftKeys[i] = {
       x,
-      lcrLayout.footer.y,
+      footer.y,
       w,
-      lcrLayout.footer.h
+      footer.h
     };
   }
+}
 
-  // Define the modal selector area below the analyzer tabs.
-  // The selector occupies both the normal content and footer areas so
-  // underlying Measure controls cannot be mistaken for active controls.
+
+// Calculate geometry shared by modal selectors.
+// Selectors replace the normal content and footer areas while leaving the
+// common analyzer header and tabs visible.
+void calculateSelectorLayout()
+{
+  const LCRRect &content = lcrLayout.content;
+  const LCRRect &footer = lcrLayout.footer;
+
+  const int16_t selectorH =
+    content.h + footer.h;
+
   lcrLayout.selector = {
-    lcrLayout.content.x,
-    lcrLayout.content.y,
-    lcrLayout.content.w,
-    lcrLayout.content.h + lcrLayout.footer.h
+    content.x,
+    content.y,
+    content.w,
+    selectorH
   };
 
-  const int16_t selectorMarginX =
-    lcrLayout.selector.w * 12 / 100;
+  const int16_t cancelW =
+    lcrLayout.selector.w * 35 / 100;
 
-  const int16_t selectorTop =
-    lcrLayout.selector.y + lcrLayout.selector.h * 22 / 100;
+  const int16_t cancelH =
+    lcrLayout.selector.h * 16 / 100;
 
-  const int16_t buttonGapX =
-    lcrLayout.selector.w * 8 / 100;
+  const int16_t cancelX =
+    lcrLayout.selector.x +
+    (lcrLayout.selector.w - cancelW) / 2;
 
-  const int16_t buttonGapY =
-    lcrLayout.selector.h * 8 / 100;
+  const int16_t cancelY =
+    lcrLayout.selector.y +
+    lcrLayout.selector.h -
+    cancelH -
+    lcrLayout.selector.h * 5 / 100;
+
+  lcrLayout.selectorCancel = {
+    cancelX,
+    cancelY,
+    cancelW,
+    cancelH
+  };
+}
+
+
+
+// Calculate the four frequency-preset button regions.
+// Presets are arranged as a responsive two-column by two-row grid within
+// the common selector area.
+void calculateFrequencySelectorLayout()
+{
+  const LCRRect &selector = lcrLayout.selector;
+
+  const int16_t marginX =
+    selector.w * 12 / 100;
+
+  const int16_t top =
+    selector.y + selector.h * 22 / 100;
+
+  const int16_t gapX =
+    selector.w * 8 / 100;
+
+  const int16_t gapY =
+    selector.h * 8 / 100;
 
   const int16_t buttonW =
-    (lcrLayout.selector.w -
-     selectorMarginX * 2 -
-     buttonGapX) / 2;
+    (selector.w - marginX * 2 - gapX) / 2;
 
   const int16_t buttonH =
-    lcrLayout.selector.h * 18 / 100;
+    selector.h * 18 / 100;
 
   for (int16_t i = 0; i < 4; i++) {
     int16_t column = i % 2;
     int16_t row = i / 2;
 
     int16_t x =
-      lcrLayout.selector.x +
-      selectorMarginX +
-      column * (buttonW + buttonGapX);
+      selector.x +
+      marginX +
+      column * (buttonW + gapX);
 
     int16_t y =
-      selectorTop +
-      row * (buttonH + buttonGapY);
+      top +
+      row * (buttonH + gapY);
 
     lcrLayout.frequencyPresets[i] = {
       x,
@@ -363,35 +470,58 @@ void calculateLCRLayout()
       buttonH
     };
   }
+}
 
-  const int16_t cancelW =
-    lcrLayout.selector.w * 35 / 100;
 
-  const int16_t cancelH =
-    lcrLayout.selector.h * 16 / 100;
+// Calculate the three reference-resistor preset button regions.
+// The presets are distributed evenly across one horizontal row within
+// the common selector area.
+void calculateReferenceSelectorLayout()
+{
+  const LCRRect &selector = lcrLayout.selector;
 
-  lcrLayout.selectorCancel = {
-    lcrLayout.selector.x +
-      (lcrLayout.selector.w - cancelW) / 2,
+  const int16_t marginX =
+    selector.w * 6 / 100;
 
-    lcrLayout.selector.y +
-      lcrLayout.selector.h -
-      cancelH -
-      lcrLayout.selector.h * 5 / 100,
+  const int16_t gap =
+    selector.w * 4 / 100;
 
-    cancelW,
-    cancelH
-  };
+  const int16_t buttonW =
+    (selector.w - marginX * 2 - gap * 2) / 3;
+
+  const int16_t buttonH =
+    selector.h * 20 / 100;
+
+  const int16_t buttonY =
+    selector.y + selector.h * 35 / 100;
+
+  for (int16_t i = 0; i < 3; i++) {
+    int16_t x =
+      selector.x +
+      marginX +
+      i * (buttonW + gap);
+
+    lcrLayout.referencePresets[i] = {
+      x,
+      buttonY,
+      buttonW,
+      buttonH
+    };
+  }
 }
 
 
 
-// Initialize the LCR analyzer when entering the instrument.
-// Screen geometry and the dynamic measurement sprite are prepared before
-// any analyzer UI elements are drawn.
+// Initialize the LCR analyzer and calculate all currently supported UI
+// geometry before drawing the instrument screen.
 void initializeLCR()
 {
   calculateLCRLayout();
+  calculateMeasureLayout();
+  calculateSelectorLayout();
+  calculateFrequencySelectorLayout();
+  calculateReferenceSelectorLayout();
+
   initializeLCRValueSprite();
 
   display.fillScreen(BGCOLOR);
@@ -546,8 +676,10 @@ void handleMeasureSoftKeyTouch(uint16_t x, uint16_t y)
     return;
   }
 
-  // Ref - implemented in a future milestone.
+  // Open the reference-resistor preset selector.
   if (pointInLCRRect(x, y, lcrLayout.measureSoftKeys[1])) {
+    lcrUIState = LCR_UI_REF_SELECT;
+    drawLCRReferenceSelector();
     return;
   }
 
@@ -612,6 +744,49 @@ void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
     return;
   }
 }
+
+
+// Handle touch input while the reference-resistor selector is displayed.
+// Selecting a reference updates the shared measurement settings and resumes
+// LIVE acquisition; Cancel closes the selector without changing anything.
+void handleLCRReferenceSelectorTouch(uint16_t x, uint16_t y)
+{
+  const float references[] = {
+    100.0f,
+    1000.0f,
+    10000.0f
+  };
+
+  for (int16_t i = 0; i < 3; i++) {
+    if (pointInLCRRect(
+          x,
+          y,
+          lcrLayout.referencePresets[i])) {
+
+      lcrSettings.referenceResistance =
+        references[i];
+
+      // The existing held measurement was acquired using the old
+      // reference resistor, so resume acquisition after changing it.
+      lcrMeasureState = LCR_MEASURE_LIVE;
+
+      returnToLCRMeasureScreen();
+      return;
+    }
+  }
+
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.selectorCancel)) {
+
+    returnToLCRMeasureScreen();
+    return;
+  }
+}
+
+
+
 
 
 //
@@ -820,10 +995,13 @@ void drawLCRMeasurementContext(const MeasurementPoint &m,
   display.print(" ");
   display.print(frequency.unit);
 
-  // Reference resistor
+  // Format the selected reference resistor using engineering units so values
+  // such as 1000 Ohm and 10000 Ohm display more readably as kOhm.
+  LCRFormattedValue reference = formatImpedance(settings.referenceResistance);
   display.setCursor(rightValueX, row1Y);
-  display.print(settings.referenceResistance, 0);
-  display.print(" Ohm");
+  display.print(reference.value);
+  display.print(" ");
+  display.print(reference.unit);
 
   // Temporary excitation level.
   display.setCursor(leftValueX, row2Y);
@@ -1090,6 +1268,70 @@ void drawLCRFrequencySelector()
     false
   );
 }
+
+
+// Draw the reference-resistor preset selector over the Measure screen.
+// The currently selected reference is highlighted, while the shared
+// selector geometry keeps drawing and touch targets synchronized.
+void drawLCRReferenceSelector()
+{
+  const LCRRect &r = lcrLayout.selector;
+
+  const char *labels[] = {
+    "100 Ohm",
+    "1 kOhm",
+    "10 kOhm"
+  };
+
+  const float references[] = {
+    100.0f,
+    1000.0f,
+    10000.0f
+  };
+
+  // Clear the Measure content and footer occupied by the selector.
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  // Draw selector title.
+  const char *title = "Select Reference";
+  int16_t titleWidth = strlen(title) * 6;
+
+  display.setCursor(
+    r.x + (r.w - titleWidth) / 2,
+    r.y + r.h * 7 / 100
+  );
+
+  display.print(title);
+
+  // Draw the three reference-resistor presets.
+  for (int16_t i = 0; i < 3; i++) {
+    bool selected =
+      lcrSettings.referenceResistance == references[i];
+
+    drawLCRSelectorButton(
+      lcrLayout.referencePresets[i],
+      labels[i],
+      selected
+    );
+  }
+
+  // Draw the common selector Cancel button.
+  drawLCRSelectorButton(
+    lcrLayout.selectorCancel,
+    "Cancel",
+    false
+  );
+}
+
 
 
 // Close any active Measure selector and restore the complete Measure screen.

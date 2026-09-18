@@ -107,7 +107,8 @@ extern LCRMeasureState lcrMeasureState;
 enum LCRUIState
 {
   LCR_UI_NORMAL,
-  LCR_UI_FREQ_SELECT
+  LCR_UI_FREQ_SELECT,
+  LCR_UI_REF_SELECT
 };
 
 extern LCRUIState lcrUIState;
@@ -143,14 +144,32 @@ struct LCRLayout
 
   LCRRect selector;
   LCRRect frequencyPresets[4];
+  LCRRect referencePresets[3];
   LCRRect selectorCancel;
 };
 
 extern LCRLayout lcrLayout;
 
 
-// Calculate the LCR screen geometry from the active display dimensions
+//
+// screen geometry functions
+//
+
+// Calculate the common screen regions shared by every LCR analyzer tab.
 void calculateLCRLayout();
+
+// Calculate regions specific to the Measure tab.
+void calculateMeasureLayout();
+
+// Calculate geometry shared by modal selector screens.
+void calculateSelectorLayout();
+
+// Calculate button geometry for the frequency selector.
+void calculateFrequencySelectorLayout();
+
+// Calculate button geometry for the reference-resistor selector.
+void calculateReferenceSelectorLayout();
+
 
 
 // Measurement backend.
