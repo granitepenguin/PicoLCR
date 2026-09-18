@@ -118,6 +118,21 @@ struct SweepSettings
 // Stores the active sweep configuration used by the LCR analyzer.
 extern SweepSettings lcrSweepSettings;
 
+
+// Stores the runtime state of an active LCR frequency sweep.
+// Configuration remains in SweepSettings while this structure tracks
+// progress through the currently executing sweep.
+struct SweepExecution
+{
+  uint32_t totalPoints;
+  uint32_t currentPoint;
+  uint32_t currentFrequency;
+  bool active;
+};
+
+extern SweepExecution lcrSweepExecution;
+
+
 // Holds a numeric measurement formatted for display.
 // The value and engineering unit are kept separate so the renderer can
 // use different font sizes while treating them as one measurement.
@@ -232,6 +247,7 @@ struct LCRLayout
   // Sweep setup tab
   LCRRect sweepSetupRows[5];
   LCRRect sweepModePresets[2];
+  LCRRect sweepButton;
 
   LCRRect footer;
 

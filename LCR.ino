@@ -116,6 +116,18 @@ SweepPoint lcrSweepPoints[LCR_MAX_SWEEP_POINTS];
 
 uint16_t lcrSweepPointCount = 0;
 
+
+// Tracks progress through the currently active frequency sweep.
+// This state is separate from Sweep configuration so settings can remain
+// unchanged while acquisition advances from point to point.
+SweepExecution lcrSweepExecution = {
+  0,      // Total points
+  0,      // Current point
+  0,      // Current frequency
+  false   // Active
+};
+
+
 // Off-screen drawing buffer used for dynamic LCR measurement fields.
 // Rendering into RAM first allows the completed field to be transferred
 // to the TFT at once, reducing visible erase/redraw flicker.
@@ -222,6 +234,131 @@ SweepPoint makeSweepPoint(const MeasurementPoint &measurement)
 
   return point;
 }
+
+
+// Acquire and store one measurement at the requested Sweep frequency.
+// The normal measurement backend is used so this works with the simulation
+// backend now and the hardware backend later without changing Sweep logic.
+bool acquireLCRSweepPoint(uint32_t frequency)
+{
+  if (lcrSweepPointCount >= LCR_MAX_SWEEP_POINTS)
+    return false;
+
+  MeasurementSettings settings = lcrSettings;
+  settings.frequency = frequency;
+
+  MeasurementPoint measurement =
+    measureImpedance(settings);
+
+  lcrSweepPoints[lcrSweepPointCount] =
+    makeSweepPoint(measurement);
+
+  lcrSweepPointCount++;
+
+  return true;
+}
+
+
+// Initialize a new frequency sweep from the current Sweep configuration.
+// Existing Sweep results are discarded only after the configuration has
+// been validated and the new Sweep is ready to begin.
+bool startLCRSweep()
+{
+  if (!isLCRSweepConfigurationValid(
+        lcrSweepSettings)) {
+
+    return false;
+  }
+
+  uint32_t totalPoints =
+    calculateSweepPointCount(
+      lcrSweepSettings
+    );
+
+  if (totalPoints == 0 ||
+      totalPoints > LCR_MAX_SWEEP_POINTS) {
+
+    return false;
+  }
+
+  lcrSweepPointCount = 0;
+
+  lcrSweepExecution.totalPoints =
+    totalPoints;
+
+  lcrSweepExecution.currentPoint = 0;
+
+  lcrSweepExecution.currentFrequency =
+    lcrSweepSettings.startFrequency;
+
+  lcrSweepExecution.active = true;
+
+  lcrSweepState = LCR_SWEEP_RUNNING;
+  lcrUIState = LCR_UI_NORMAL;
+
+  drawLCRScreen();
+
+  return true;
+}
+
+
+// Complete the active frequency sweep and transition to the Results state.
+// All successfully acquired SweepPoint entries remain available for
+// plotting and cursor inspection.
+void finishLCRSweep()
+{
+  lcrSweepExecution.active = false;
+
+  lcrSweepState =
+    LCR_SWEEP_RESULTS;
+
+  lcrUIState =
+    LCR_UI_NORMAL;
+
+  drawLCRScreen();
+}
+
+
+
+// Advance an active Sweep by exactly one measurement point.
+// Processing only one point per call keeps the main LCR task responsive
+// to display updates and touchscreen input while acquisition is running.
+void updateLCRSweep()
+{
+  if (!lcrSweepExecution.active)
+    return;
+
+  if (lcrSweepExecution.currentPoint >=
+      lcrSweepExecution.totalPoints) {
+
+    finishLCRSweep();
+    return;
+  }
+
+  uint32_t frequency =
+    calculateSweepFrequency(
+      lcrSweepSettings,
+      lcrSweepExecution.currentPoint
+    );
+
+  lcrSweepExecution.currentFrequency =
+    frequency;
+
+  if (!acquireLCRSweepPoint(frequency)) {
+    finishLCRSweep();
+    return;
+  }
+
+  lcrSweepExecution.currentPoint++;
+
+  if (lcrSweepExecution.currentPoint >=
+      lcrSweepExecution.totalPoints) {
+
+    finishLCRSweep();
+  }
+}
+
+
 
 
 // measurement objects
@@ -332,6 +469,15 @@ void updateLCR()
   static bool lastPressed = false;
 
   uint32_t now = millis();
+
+  //
+  // Active Sweep execution
+  //
+  if (lcrTab == LCR_TAB_SWEEP &&
+      lcrSweepState == LCR_SWEEP_RUNNING) {
+
+    updateLCRSweep();
+  }
 
   //
   // Measure acquisition and display update
@@ -447,6 +593,22 @@ void updateLCR()
         lcrLayout.content)) {
 
     handleLCRSweepSetupTouch(x, y);
+    return;
+  }
+
+  //
+  // Sweep Setup action
+  //
+
+  if (lcrTab == LCR_TAB_SWEEP &&
+      lcrSweepState == LCR_SWEEP_SETUP &&
+      lcrUIState == LCR_UI_NORMAL &&
+      pointInLCRRect(
+        x,
+        y,
+        lcrLayout.footer)) {
+
+    handleLCRSweepFooterTouch(x, y);
     return;
   }
 
@@ -653,6 +815,9 @@ void calculateSweepLayout()
       h
     };
   }
+  // Use the complete Sweep footer as the Sweep action touch region.
+  // Drawing and touch detection therefore share the same geometry.
+  lcrLayout.sweepButton = lcrLayout.footer;
 }
 
 
@@ -1416,6 +1581,23 @@ void handleLCRSweepSetupTouch(uint16_t x, uint16_t y)
 }
 
 
+// Handle the Sweep action shown in the Setup footer.
+// Sweep execution begins only when the current configuration passes the
+// same validation used by the acquisition engine.
+void handleLCRSweepFooterTouch(uint16_t x, uint16_t y)
+{
+  if (!pointInLCRRect(
+        x,
+        y,
+        lcrLayout.sweepButton)) {
+
+    return;
+  }
+
+  startLCRSweep();
+}
+
+
 // Handle touch input while the Sweep-mode selector is displayed.
 // Selecting a mode updates the active Sweep configuration and returns to
 // Sweep Setup; Cancel returns without modifying the current mode.
@@ -2129,6 +2311,68 @@ void drawLCRSweepFooter()
 }
 
 
+// Draw a temporary Sweep Running screen while the execution engine is
+// being validated. A full progress display is added in the next milestone.
+void drawLCRSweepRunning()
+{
+  const LCRRect &r = lcrLayout.content;
+
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  const char *label = "Running Sweep";
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  int16_t textWidth =
+    strlen(label) * 6;
+
+  display.setCursor(
+    r.x + (r.w - textWidth) / 2,
+    r.y + r.h / 2
+  );
+
+  display.print(label);
+}
+
+
+// Draw a temporary Sweep Results screen after acquisition completes.
+// The graph and result controls are added after Sweep execution is verified.
+void drawLCRSweepResults()
+{
+  const LCRRect &r = lcrLayout.content;
+
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  const char *label = "Sweep Complete";
+
+  int16_t textWidth =
+    strlen(label) * 6;
+
+  display.setCursor(
+    r.x + (r.w - textWidth) / 2,
+    r.y + r.h / 2
+  );
+
+  display.print(label);
+}
+
+
 
 // Draw the common LCR analyzer header.
 // The header provides a Back control and identifies the active instrument.
@@ -2535,7 +2779,11 @@ void drawLCRScreen()
           break;
 
         case LCR_SWEEP_RUNNING:
+          drawLCRSweepRunning();
+          break;
+
         case LCR_SWEEP_RESULTS:
+          drawLCRSweepResults();
           break;
       }
       break;
