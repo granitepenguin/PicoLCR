@@ -702,9 +702,85 @@ uint32_t calculateLogSweepPointCount(const SweepSettings &settings)
 }
 
 
+// Return the number of measurement points required by the active Sweep
+// configuration. The appropriate calculation is selected by Sweep mode.
+uint32_t calculateSweepPointCount(const SweepSettings &settings)
+{
+  if (settings.mode == LCR_SWEEP_LINEAR)
+    return calculateLinearSweepPointCount(settings);
+
+  return calculateLogSweepPointCount(settings);
+}
+
+
+// Calculate the frequency for one point in a linear Sweep.
+// Frequencies advance from Start using the configured fixed step size.
+// The final generated frequency is limited to the configured Stop value.
+uint32_t calculateLinearSweepFrequency(const SweepSettings &settings,
+                                       uint32_t pointIndex)
+{
+  uint64_t frequency =
+    static_cast<uint64_t>(settings.startFrequency) +
+    static_cast<uint64_t>(pointIndex) *
+    static_cast<uint64_t>(settings.stepFrequency);
+
+  if (frequency > settings.stopFrequency)
+    frequency = settings.stopFrequency;
+
+  return static_cast<uint32_t>(frequency);
+}
+
+
+// Calculate the frequency for one point in a logarithmic Sweep.
+// Each point advances by the configured number of points per decade.
+// The final generated frequency is limited to the configured Stop value.
+uint32_t calculateLogSweepFrequency(const SweepSettings &settings,
+                                    uint32_t pointIndex)
+{
+  if (pointIndex == 0)
+    return settings.startFrequency;
+
+  float exponent =
+    static_cast<float>(pointIndex) /
+    static_cast<float>(settings.pointsPerDecade);
+
+  float frequency =
+    static_cast<float>(settings.startFrequency) *
+    powf(10.0f, exponent);
+
+  if (frequency > settings.stopFrequency)
+    frequency = settings.stopFrequency;
+
+  return static_cast<uint32_t>(
+    roundf(frequency)
+  );
+}
+
+
+// Calculate the requested frequency for any Sweep point.
+// The Sweep engine uses this function without needing to know whether the
+// active configuration is Linear or Logarithmic.
+uint32_t calculateSweepFrequency(const SweepSettings &settings,
+                                 uint32_t pointIndex)
+{
+  if (settings.mode == LCR_SWEEP_LINEAR) {
+    return calculateLinearSweepFrequency(
+      settings,
+      pointIndex
+    );
+  }
+
+  return calculateLogSweepFrequency(
+    settings,
+    pointIndex
+  );
+}
+
+
+
 // Validate the complete Sweep configuration before acquisition begins.
-// UI controls prevent most invalid combinations, but the Sweep engine
-// performs its own validation rather than relying solely on the interface.
+// In addition to checking the frequency parameters, this prevents a Sweep
+// configuration from exceeding the allocated result-storage capacity.
 bool isLCRSweepConfigurationValid(const SweepSettings &settings)
 {
   if (settings.startFrequency == 0)
@@ -723,8 +799,19 @@ bool isLCRSweepConfigurationValid(const SweepSettings &settings)
       return false;
   }
 
+  uint32_t pointCount =
+    calculateSweepPointCount(settings);
+
+  if (pointCount == 0)
+    return false;
+
+  if (pointCount > LCR_MAX_SWEEP_POINTS)
+    return false;
+
   return true;
 }
+
+
 
 
 // Calculate geometry shared by modal selectors.
