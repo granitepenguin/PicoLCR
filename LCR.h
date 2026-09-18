@@ -48,6 +48,30 @@ struct MeasurementPoint
 };
 
 
+// Stores the measurement data retained for one frequency-sweep point.
+// This is intentionally smaller than MeasurementPoint so large sweeps can
+// be retained in RAM without storing intermediate acquisition values.
+struct SweepPoint
+{
+  uint32_t frequency;
+
+  float impedance;
+  float phaseDeg;
+
+  float resistance;
+  float reactance;
+
+  float esr;
+  float q;
+};
+
+// Maximum number of measurement points retained for one frequency sweep.
+// This accommodates the current full-range 100 Hz-step linear sweep while
+// bounding RAM usage for sweep-result storage.
+constexpr uint16_t LCR_MAX_SWEEP_POINTS = 1200;
+extern SweepPoint lcrSweepPoints[LCR_MAX_SWEEP_POINTS];
+extern uint16_t lcrSweepPointCount;
+
 // Measurement configuration.
 //
 // Defines the parameters required to perform a single measurement.
@@ -93,6 +117,25 @@ struct SweepSettings
 
 // Stores the active sweep configuration used by the LCR analyzer.
 extern SweepSettings lcrSweepSettings;
+
+
+// Stores the runtime state of an active LCR frequency sweep.
+// Configuration remains in SweepSettings while this structure tracks
+// progress and timing through the currently executing sweep.
+struct SweepExecution
+{
+  uint32_t totalPoints;
+  uint32_t currentPoint;
+  uint32_t currentFrequency;
+
+  uint32_t startTime;
+  uint32_t lastPointTime;
+
+  bool active;
+};
+
+extern SweepExecution lcrSweepExecution;
+
 
 // Holds a numeric measurement formatted for display.
 // The value and engineering unit are kept separate so the renderer can
@@ -208,6 +251,11 @@ struct LCRLayout
   // Sweep setup tab
   LCRRect sweepSetupRows[5];
   LCRRect sweepModePresets[2];
+  LCRRect sweepButton;
+  LCRRect sweepProgress;
+  LCRRect sweepCancelButton;
+  LCRRect sweepResultsSetupButton;
+  LCRRect sweepResultsSweepButton;
 
   LCRRect footer;
 
