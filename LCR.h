@@ -124,6 +124,10 @@ struct LCRRect
   int16_t h;
 };
 
+// Maximum number of preset buttons supported by an LCR selector.
+// Actual button counts are derived from their preset data tables.
+constexpr uint8_t LCR_MAX_SELECTOR_BUTTONS = 8;
+
 
 // Defines the major screen regions used by the LCR analyzer
 // Common regions are shared by every tab, while measurement-specific
@@ -143,8 +147,8 @@ struct LCRLayout
   LCRRect measureSoftKeys[4];
 
   LCRRect selector;
-  LCRRect frequencyPresets[4];
-  LCRRect referencePresets[3];
+  LCRRect frequencyPresets[LCR_MAX_SELECTOR_BUTTONS];
+  LCRRect referencePresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect selectorCancel;
 };
 
