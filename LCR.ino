@@ -32,6 +32,7 @@ constexpr int X_Y     = 120;
 //
 
 constexpr int16_t LCR_HEADER_HEIGHT_PERCENT = 10;
+constexpr int16_t LCR_BACK_BUTTON_WIDTH_PERCENT = 22;
 constexpr int16_t LCR_TAB_HEIGHT_PERCENT = 10;
 constexpr int16_t LCR_FOOTER_HEIGHT_PERCENT = 12;
 
@@ -73,6 +74,10 @@ LCRLayout lcrLayout;
 // Stores the current operating state of the Measure tab.
 // New LCR analyzer sessions begin in continuous LIVE measurement mode.
 LCRMeasureState lcrMeasureState = LCR_MEASURE_LIVE;
+
+// Stores the current Sweep-tab operating state.
+// Entering the analyzer initializes Sweep in its configuration state.
+LCRSweepState lcrSweepState = LCR_SWEEP_SETUP;
 
 // Stores the current LCR user-interface state.
 // The analyzer normally displays the active tab unless a selector is open.
@@ -213,6 +218,7 @@ void enterLCRMode()
   instrumentMode = MODE_LCR;
   lcrTab = LCR_TAB_MEASURE;
   lcrMeasureState = LCR_MEASURE_LIVE;
+  lcrSweepState = LCR_SWEEP_SETUP;
   lcrUIState = LCR_UI_NORMAL;
   lcrDisplayDirty = true;
 
@@ -243,7 +249,12 @@ void updateLCR()
 
   uint32_t now = millis();
 
-  if (lcrMeasureState == LCR_MEASURE_LIVE && lcrUIState == LCR_UI_NORMAL) {
+  // Acquire and update live measurements only while the Measure tab is active.
+  // This prevents Measure rendering from continuing underneath other LCR tabs.
+  if (lcrTab == LCR_TAB_MEASURE &&
+      lcrMeasureState == LCR_MEASURE_LIVE &&
+      lcrUIState == LCR_UI_NORMAL) {
+
     measurement = measureImpedance(lcrSettings);
 
     if (lcrDisplayDirty ||
@@ -273,9 +284,17 @@ void updateLCR()
 
   lastPressed = true;
 
-  // Back remains available regardless of active LCR UI state
-  if (pointInLCRRect(x, y, lcrLayout.header)) {
+  // Exit the analyzer only when the dedicated Back control is touched.
+  // The remainder of the header is intentionally non-interactive.
+  if (pointInLCRRect(x, y, lcrLayout.backButton)) {
     exitLCRMode();
+    return;
+  }
+
+  // Top-level analyzer tabs remain available whenever no measurement
+  // operation explicitly locks navigation.
+  if (pointInLCRRect(x, y, lcrLayout.tabs)) {
+    handleLCRTabTouch(x, y);
     return;
   }
 
@@ -358,33 +377,47 @@ void calculateLCRLayout()
 
   const int16_t footerY = screenH - footerH;
 
-  lcrLayout.header = {
-    0,
-    0,
-    screenW,
-    headerH
+  lcrLayout.header = { 0, 0, screenW, headerH };
+
+  // Define the Back-button touch region within the left side of the header.
+  // Keeping this separate from the complete header prevents accidental exits
+  // when the instrument title or unused header space is touched.
+  const int16_t backButtonW = screenW * LCR_BACK_BUTTON_WIDTH_PERCENT / 100;
+
+  lcrLayout.backButton = {
+    lcrLayout.header.x,
+    lcrLayout.header.y,
+    backButtonW,
+    lcrLayout.header.h
   };
 
-  lcrLayout.tabs = {
-    0,
-    headerH,
-    screenW,
-    tabsH
-  };
+  lcrLayout.tabs = { 0, headerH, screenW, tabsH };
 
-  lcrLayout.content = {
-    0,
-    contentY,
-    screenW,
-    contentH
-  };
+  // Divide the analyzer tab bar into four equal touch regions.
+  // These rectangles are shared by tab drawing and touch detection so the
+  // visible navigation controls always match their active touch areas.
+  const int16_t tabCount = 4;
+  const int16_t tabW = lcrLayout.tabs.w / tabCount;
 
-  lcrLayout.footer = {
-    0,
-    footerY,
-    screenW,
-    footerH
-  };
+  for (int16_t i = 0; i < tabCount; i++) {
+    int16_t x =
+      lcrLayout.tabs.x + i * tabW;
+
+    int16_t w = (i == tabCount - 1)
+      ? lcrLayout.tabs.w - tabW * i
+      : tabW;
+
+    lcrLayout.tabButtons[i] = {
+      x,
+      lcrLayout.tabs.y,
+      w,
+      lcrLayout.tabs.h
+    };
+  }
+
+  lcrLayout.content = { 0, contentY, screenW, contentH };
+
+  lcrLayout.footer = { 0, footerY, screenW, footerH };
 }
 
 
@@ -769,6 +802,30 @@ LCRFormattedValue formatFrequency(uint32_t frequencyHz)
 // Touch handlers
 //
 
+// Handle touches on the four top-level analyzer tabs.
+// Changing tabs closes any modal selector and redraws the newly selected
+// analyzer view while preserving instrument-level measurement settings.
+void handleLCRTabTouch(uint16_t x, uint16_t y)
+{
+  for (uint8_t i = 0; i < 4; i++) {
+    if (!pointInLCRRect(x, y, lcrLayout.tabButtons[i]))
+      continue;
+
+    LCRTab newTab = static_cast<LCRTab>(i);
+
+    if (newTab == lcrTab)
+      return;
+
+    lcrTab = newTab;
+    lcrUIState = LCR_UI_NORMAL;
+    lcrDisplayDirty = true;
+
+    drawLCRScreen();
+    return;
+  }
+}
+
+
 // Handle touches within the Measure-tab soft-key footer.
 // Only LIVE/HOLD is implemented during this milestone; the remaining
 // buttons are reserved for their upcoming Measure-control milestones.
@@ -919,6 +976,10 @@ void drawLCRCenteredText(const LCRRect &rect, int16_t y,
   display.print(text);
 }
 
+
+//
+// Draw Measurement screen routines
+//
 
 
 // Draw a measurement value and its unit as one horizontally centered group.
@@ -1106,6 +1167,109 @@ void drawLCRMeasurementContext(const MeasurementPoint &m,
 }
 
 
+//
+// Sweep screen draw routines
+//
+
+
+// Draw the initial Sweep Setup view.
+// This first implementation establishes the approved screen structure;
+// interactive sweep controls are added in subsequent milestones.
+void drawLCRSweepSetup()
+{
+  const LCRRect &r = lcrLayout.content;
+
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  int16_t leftX =
+    r.x + r.w * 10 / 100;
+
+  int16_t valueX =
+    r.x + r.w * 55 / 100;
+
+  int16_t rowH =
+    r.h / 5;
+
+  display.setCursor(leftX, r.y + rowH * 0 + 8);
+  display.print("Start");
+
+  display.setCursor(valueX, r.y + rowH * 0 + 8);
+  display.print("100 Hz");
+
+  display.setCursor(leftX, r.y + rowH * 1 + 8);
+  display.print("Stop");
+
+  display.setCursor(valueX, r.y + rowH * 1 + 8);
+  display.print("110 kHz");
+
+  display.setCursor(leftX, r.y + rowH * 2 + 8);
+  display.print("Mode");
+
+  display.setCursor(valueX, r.y + rowH * 2 + 8);
+  display.print("Linear");
+
+  display.setCursor(leftX, r.y + rowH * 3 + 8);
+  display.print("Step");
+
+  display.setCursor(valueX, r.y + rowH * 3 + 8);
+  display.print("1 kHz");
+
+  display.setCursor(leftX, r.y + rowH * 4 + 8);
+  display.print("Measurements");
+
+  display.setCursor(valueX, r.y + rowH * 4 + 8);
+  display.print("---");
+}
+
+
+// Draw the Sweep Setup footer.
+// The Sweep action will become interactive once sweep configuration and
+// acquisition state are implemented.
+void drawLCRSweepFooter()
+{
+  const LCRRect &r = lcrLayout.footer;
+
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  display.drawFastHLine(
+    r.x,
+    r.y,
+    r.w,
+    GRIDCOLOR
+  );
+
+  const char *label = "Sweep";
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  int16_t textWidth = strlen(label) * 6;
+
+  display.setCursor(
+    r.x + (r.w - textWidth) / 2,
+    r.y + (r.h - 8) / 2
+  );
+
+  display.print(label);
+}
+
+
+
 // Draw the common LCR analyzer header.
 // The header provides a Back control and identifies the active instrument.
 // Its dimensions are derived entirely from the calculated screen layout.
@@ -1121,11 +1285,16 @@ void drawLCRHeader()
   display.setTextSize(1);
   display.setTextColor(TXTCOLOR, BGCOLOR);
 
-  // Back control.
+  // Draw the Back label centered inside its actual touch region so the
+  // visible control accurately represents the area that responds to touch.
+  const LCRRect &back = lcrLayout.backButton;
   const char *backLabel = "< Back";
-  int16_t backY = r.y + (r.h - 8) / 2;
 
-  display.setCursor(r.x + 6, backY);
+  int16_t backWidth = strlen(backLabel) * 6;
+  int16_t backX = back.x + (back.w - backWidth) / 2;
+  int16_t backY = back.y + (back.h - 8) / 2;
+
+  display.setCursor(backX, backY);
   display.print(backLabel);
 
   // Instrument title.
@@ -1416,8 +1585,8 @@ void returnToLCRMeasureScreen()
 
 
 // Draw the complete static LCR analyzer interface.
-// Common navigation is drawn first, followed by the static content and
-// soft keys belonging to the currently selected analyzer tab.
+// Common navigation is drawn first, followed by content belonging to the
+// currently selected top-level analyzer tab.
 void drawLCRScreen()
 {
   display.fillScreen(BGCOLOR);
@@ -1432,6 +1601,18 @@ void drawLCRScreen()
       break;
 
     case LCR_TAB_SWEEP:
+      switch (lcrSweepState) {
+        case LCR_SWEEP_SETUP:
+          drawLCRSweepSetup();
+          drawLCRSweepFooter();
+          break;
+
+        case LCR_SWEEP_RUNNING:
+        case LCR_SWEEP_RESULTS:
+          break;
+      }
+      break;
+
     case LCR_TAB_CALIBRATION:
     case LCR_TAB_SETTINGS:
       break;

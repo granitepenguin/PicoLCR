@@ -101,6 +101,19 @@ enum LCRMeasureState
 extern LCRMeasureState lcrMeasureState;
 
 
+// Identifies the current operating state of the Sweep tab.
+// A sweep begins in SETUP, transitions through RUNNING, and automatically
+// displays RESULTS when acquisition is complete.
+enum LCRSweepState
+{
+  LCR_SWEEP_SETUP,
+  LCR_SWEEP_RUNNING,
+  LCR_SWEEP_RESULTS
+};
+
+extern LCRSweepState lcrSweepState;
+
+
 // Identifies the current LCR user-interface state.
 // NORMAL displays the active analyzer tab, while selector states temporarily
 // replace the tab content with a modal control.
@@ -135,17 +148,24 @@ constexpr uint8_t LCR_MAX_SELECTOR_BUTTONS = 8;
 struct LCRLayout
 {
   LCRRect header;
-  LCRRect tabs;
-  LCRRect content;
-  LCRRect footer;
 
+  LCRRect backButton;
+
+  LCRRect tabs;
+  LCRRect tabButtons[4];
+
+  LCRRect content;
   // Content subdivisions
   LCRRect primary;
   LCRRect secondary;
   LCRRect context;
 
+  LCRRect footer;
+
+  // Submenus
   LCRRect measureSoftKeys[4];
 
+  // Softkey screen info
   LCRRect selector;
   LCRRect frequencyPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect referencePresets[LCR_MAX_SELECTOR_BUTTONS];
