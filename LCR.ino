@@ -22,6 +22,36 @@ constexpr int PHASE_Y = 80;
 constexpr int R_Y     = 100;
 constexpr int X_Y     = 120;
 
+
+//
+// LCR UI layout tuning
+//
+// These values control proportional spacing and sizing throughout the
+// responsive LCR interface. Values are percentages of the applicable
+// screen or layout region so the UI can adapt to different resolutions.
+//
+
+constexpr int16_t LCR_HEADER_HEIGHT_PERCENT = 10;
+constexpr int16_t LCR_TAB_HEIGHT_PERCENT = 10;
+constexpr int16_t LCR_FOOTER_HEIGHT_PERCENT = 12;
+
+constexpr int16_t LCR_PRIMARY_HEIGHT_PERCENT = 42;
+constexpr int16_t LCR_SECONDARY_HEIGHT_PERCENT = 25;
+
+constexpr int16_t LCR_SELECTOR_MARGIN_PERCENT = 6;
+constexpr int16_t LCR_SELECTOR_GAP_X_PERCENT = 4;
+constexpr int16_t LCR_SELECTOR_GAP_Y_PERCENT = 6;
+
+constexpr int16_t LCR_SELECTOR_TOP_PERCENT = 22;
+constexpr int16_t LCR_SELECTOR_BOTTOM_GAP_PERCENT = 6;
+
+constexpr int16_t LCR_SELECTOR_BUTTON_HEIGHT_PERCENT = 13;
+
+constexpr int16_t LCR_SELECTOR_CANCEL_WIDTH_PERCENT = 35;
+constexpr int16_t LCR_SELECTOR_CANCEL_HEIGHT_PERCENT = 16;
+constexpr int16_t LCR_SELECTOR_CANCEL_BOTTOM_PERCENT = 5;
+
+
 // Controls the maximum refresh rate of dynamic LCR display values.
 // Measurement acquisition may occur faster, but TFT updates are limited
 // to reduce flicker and unnecessary SPI traffic.
@@ -56,11 +86,55 @@ MeasurementSettings lcrSettings = {
   1000.0f    // Reference resistor: 1 kOhm
 };
 
-
 // Off-screen drawing buffer used for dynamic LCR measurement fields.
 // Rendering into RAM first allows the completed field to be transferred
 // to the TFT at once, reducing visible erase/redraw flicker.
 TFT_eSprite lcrValueSprite = TFT_eSprite(&display);
+
+
+// Defines one selectable frequency preset.
+// The label is used by the UI and the value is stored internally in Hz.
+struct FrequencyPreset
+{
+  const char *label;
+  uint32_t value;
+};
+
+// Defines all frequency presets available from the Measure screen.
+// Adding or removing an entry automatically changes the selector button
+// count, layout, drawing, and touch handling.
+const FrequencyPreset frequencyPresets[] = {
+  { "100 Hz", 100 },
+  { "1 kHz", 1000 },
+  { "10 kHz", 10000 },
+  { "100 kHz", 100000 },
+  { "110 kHz", 110000 }
+};
+
+constexpr uint8_t FREQUENCY_PRESET_COUNT =
+  sizeof(frequencyPresets) / sizeof(frequencyPresets[0]);
+
+
+// Defines one selectable reference-resistor preset.
+// The label is used by the UI and the value is stored internally in Ohms.
+struct ReferencePreset
+{
+  const char *label;
+  float value;
+};
+
+// Defines all reference-resistor presets available from the Measure screen.
+// Adding or removing an entry automatically changes the selector button
+// count, layout, drawing, and touch handling.
+const ReferencePreset referencePresets[] = {
+  { "100 Ohm", 100.0f },
+  { "1 kOhm", 1000.0f },
+  { "10 kOhm", 10000.0f }
+};
+
+constexpr uint8_t REFERENCE_PRESET_COUNT =
+  sizeof(referencePresets) / sizeof(referencePresets[0]);
+
 
 // measurement objects
 MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings);
@@ -274,9 +348,9 @@ void calculateLCRLayout()
   const int16_t screenW = display.width();
   const int16_t screenH = display.height();
 
-  const int16_t headerH = screenH * 10 / 100;
-  const int16_t tabsH = screenH * 10 / 100;
-  const int16_t footerH = screenH * 12 / 100;
+  const int16_t headerH = screenH * LCR_HEADER_HEIGHT_PERCENT / 100;
+  const int16_t tabsH = screenH * LCR_TAB_HEIGHT_PERCENT / 100;
+  const int16_t footerH = screenH * LCR_FOOTER_HEIGHT_PERCENT / 100;
 
   const int16_t contentY = headerH + tabsH;
   const int16_t contentH =
@@ -323,20 +397,14 @@ void calculateMeasureLayout()
   const LCRRect &content = lcrLayout.content;
   const LCRRect &footer = lcrLayout.footer;
 
-  const int16_t primaryH =
-    content.h * 42 / 100;
+  const int16_t primaryH = content.h * LCR_PRIMARY_HEIGHT_PERCENT / 100;
+  const int16_t secondaryH = content.h * LCR_SECONDARY_HEIGHT_PERCENT / 100;
 
-  const int16_t secondaryH =
-    content.h * 25 / 100;
+  const int16_t secondaryY = content.y + primaryH;
 
-  const int16_t secondaryY =
-    content.y + primaryH;
+  const int16_t contextY = secondaryY + secondaryH;
 
-  const int16_t contextY =
-    secondaryY + secondaryH;
-
-  const int16_t contextH =
-    content.h - primaryH - secondaryH;
+  const int16_t contextH = content.h - primaryH - secondaryH;
 
   lcrLayout.primary = {
     content.x,
@@ -381,9 +449,10 @@ void calculateMeasureLayout()
 }
 
 
+
 // Calculate geometry shared by modal selectors.
-// Selectors replace the normal content and footer areas while leaving the
-// common analyzer header and tabs visible.
+// Selector dimensions are controlled by the common LCR UI tuning constants
+// so visual adjustments do not require changes to the layout algorithm.
 void calculateSelectorLayout()
 {
   const LCRRect &content = lcrLayout.content;
@@ -400,10 +469,12 @@ void calculateSelectorLayout()
   };
 
   const int16_t cancelW =
-    lcrLayout.selector.w * 35 / 100;
+    lcrLayout.selector.w *
+    LCR_SELECTOR_CANCEL_WIDTH_PERCENT / 100;
 
   const int16_t cancelH =
-    lcrLayout.selector.h * 16 / 100;
+    lcrLayout.selector.h *
+    LCR_SELECTOR_CANCEL_HEIGHT_PERCENT / 100;
 
   const int16_t cancelX =
     lcrLayout.selector.x +
@@ -413,7 +484,8 @@ void calculateSelectorLayout()
     lcrLayout.selector.y +
     lcrLayout.selector.h -
     cancelH -
-    lcrLayout.selector.h * 5 / 100;
+    lcrLayout.selector.h *
+      LCR_SELECTOR_CANCEL_BOTTOM_PERCENT / 100;
 
   lcrLayout.selectorCancel = {
     cancelX,
@@ -425,45 +497,93 @@ void calculateSelectorLayout()
 
 
 
-// Calculate the four frequency-preset button regions.
-// Presets are arranged as a responsive two-column by two-row grid within
-// the common selector area.
-void calculateFrequencySelectorLayout()
+// Arrange a variable number of selector buttons into a centered grid.
+// Button count determines the grid arrangement while common UI tuning
+// constants control spacing and maximum button size.
+void calculateSelectorButtonGrid(LCRRect *buttons, uint8_t count)
 {
+  if (count == 0)
+    return;
+
+  count = min(count, LCR_MAX_SELECTOR_BUTTONS);
+
   const LCRRect &selector = lcrLayout.selector;
 
-  const int16_t marginX =
-    selector.w * 12 / 100;
+  uint8_t columns;
 
-  const int16_t top =
-    selector.y + selector.h * 22 / 100;
+  if (count <= 3)
+    columns = count;
+  else if (count == 4)
+    columns = 2;
+  else
+    columns = 3;
 
-  const int16_t gapX =
-    selector.w * 8 / 100;
+  uint8_t rows = (count + columns - 1) / columns;
 
-  const int16_t gapY =
-    selector.h * 8 / 100;
+  const int16_t marginX = selector.w * LCR_SELECTOR_MARGIN_PERCENT / 100;
+
+  const int16_t gapX = selector.w * LCR_SELECTOR_GAP_X_PERCENT / 100;
+
+  const int16_t gapY = selector.h * LCR_SELECTOR_GAP_Y_PERCENT / 100;
+
+  const int16_t gridTop = selector.y + selector.h * LCR_SELECTOR_TOP_PERCENT / 100;
+
+  const int16_t gridBottom =
+    lcrLayout.selectorCancel.y -
+    selector.h * LCR_SELECTOR_BOTTOM_GAP_PERCENT / 100;
+
+  const int16_t availableGridH = gridBottom - gridTop;
 
   const int16_t buttonW =
-    (selector.w - marginX * 2 - gapX) / 2;
+    (selector.w -
+     marginX * 2 -
+     gapX * (columns - 1)) / columns;
 
-  const int16_t buttonH =
-    selector.h * 18 / 100;
+  const int16_t maxButtonH =
+    display.height() *
+    LCR_SELECTOR_BUTTON_HEIGHT_PERCENT / 100;
 
-  for (int16_t i = 0; i < 4; i++) {
-    int16_t column = i % 2;
-    int16_t row = i / 2;
+  int16_t buttonH =
+    (availableGridH -
+     gapY * (rows - 1)) / rows;
+
+  buttonH = min(buttonH, maxButtonH);
+
+  const int16_t actualGridH =
+    rows * buttonH +
+    (rows - 1) * gapY;
+
+  const int16_t centeredGridTop =
+    gridTop +
+    (availableGridH - actualGridH) / 2;
+
+  for (uint8_t i = 0; i < count; i++) {
+    uint8_t row = i / columns;
+    uint8_t column = i % columns;
+
+    uint8_t itemsInRow =
+      min(
+        static_cast<uint8_t>(columns),
+        static_cast<uint8_t>(count - row * columns)
+      );
+
+    int16_t rowWidth =
+      itemsInRow * buttonW +
+      (itemsInRow - 1) * gapX;
+
+    int16_t rowX =
+      selector.x +
+      (selector.w - rowWidth) / 2;
 
     int16_t x =
-      selector.x +
-      marginX +
+      rowX +
       column * (buttonW + gapX);
 
     int16_t y =
-      top +
+      centeredGridTop +
       row * (buttonH + gapY);
 
-    lcrLayout.frequencyPresets[i] = {
+    buttons[i] = {
       x,
       y,
       buttonW,
@@ -473,41 +593,26 @@ void calculateFrequencySelectorLayout()
 }
 
 
-// Calculate the three reference-resistor preset button regions.
-// The presets are distributed evenly across one horizontal row within
-// the common selector area.
+
+// Calculate frequency-selector geometry from the frequency preset table.
+// No button count or arrangement is duplicated outside the preset data.
+void calculateFrequencySelectorLayout()
+{
+  calculateSelectorButtonGrid(
+    lcrLayout.frequencyPresets,
+    FREQUENCY_PRESET_COUNT
+  );
+}
+
+
+// Calculate reference-selector geometry from the reference preset table.
+// No button count or arrangement is duplicated outside the preset data.
 void calculateReferenceSelectorLayout()
 {
-  const LCRRect &selector = lcrLayout.selector;
-
-  const int16_t marginX =
-    selector.w * 6 / 100;
-
-  const int16_t gap =
-    selector.w * 4 / 100;
-
-  const int16_t buttonW =
-    (selector.w - marginX * 2 - gap * 2) / 3;
-
-  const int16_t buttonH =
-    selector.h * 20 / 100;
-
-  const int16_t buttonY =
-    selector.y + selector.h * 35 / 100;
-
-  for (int16_t i = 0; i < 3; i++) {
-    int16_t x =
-      selector.x +
-      marginX +
-      i * (buttonW + gap);
-
-    lcrLayout.referencePresets[i] = {
-      x,
-      buttonY,
-      buttonW,
-      buttonH
-    };
-  }
+  calculateSelectorButtonGrid(
+    lcrLayout.referencePresets,
+    REFERENCE_PRESET_COUNT
+  );
 }
 
 
@@ -711,23 +816,17 @@ void handleMeasureSoftKeyTouch(uint16_t x, uint16_t y)
 // the analyzer to LIVE measurement; Cancel leaves all settings unchanged.
 void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
 {
-  const uint32_t frequencies[] = {
-    100,
-    1000,
-    10000,
-    100000
-  };
-
-  for (int16_t i = 0; i < 4; i++) {
+  // Match touches against the frequency preset table so the same data
+  // controls layout, labels, values, and touch handling.
+  for (uint8_t i = 0; i < FREQUENCY_PRESET_COUNT; i++) {
     if (pointInLCRRect(
           x,
           y,
           lcrLayout.frequencyPresets[i])) {
 
-      lcrSettings.frequency = frequencies[i];
+      lcrSettings.frequency =
+        frequencyPresets[i].value;
 
-      // A held measurement belongs to the old frequency, so changing
-      // frequency always resumes live acquisition.
       lcrMeasureState = LCR_MEASURE_LIVE;
 
       returnToLCRMeasureScreen();
@@ -751,23 +850,17 @@ void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
 // LIVE acquisition; Cancel closes the selector without changing anything.
 void handleLCRReferenceSelectorTouch(uint16_t x, uint16_t y)
 {
-  const float references[] = {
-    100.0f,
-    1000.0f,
-    10000.0f
-  };
-
-  for (int16_t i = 0; i < 3; i++) {
+  // Match touches against the reference preset table so button labels,
+  // values, layout, and touch behavior all originate from one definition.
+  for (uint8_t i = 0; i < REFERENCE_PRESET_COUNT; i++) {
     if (pointInLCRRect(
           x,
           y,
           lcrLayout.referencePresets[i])) {
 
       lcrSettings.referenceResistance =
-        references[i];
+        referencePresets[i].value;
 
-      // The existing held measurement was acquired using the old
-      // reference resistor, so resume acquisition after changing it.
       lcrMeasureState = LCR_MEASURE_LIVE;
 
       returnToLCRMeasureScreen();
@@ -1215,20 +1308,6 @@ void drawLCRFrequencySelector()
 {
   const LCRRect &r = lcrLayout.selector;
 
-  const char *labels[] = {
-    "100 Hz",
-    "1 kHz",
-    "10 kHz",
-    "100 kHz"
-  };
-
-  const uint32_t frequencies[] = {
-    100,
-    1000,
-    10000,
-    100000
-  };
-
   display.fillRect(
     r.x,
     r.y,
@@ -1251,13 +1330,14 @@ void drawLCRFrequencySelector()
 
   display.print(title);
 
-  for (int16_t i = 0; i < 4; i++) {
+  // Draw each frequency preset directly from the shared preset table.
+  for (uint8_t i = 0; i < FREQUENCY_PRESET_COUNT; i++) {
     bool selected =
-      lcrSettings.frequency == frequencies[i];
+      lcrSettings.frequency == frequencyPresets[i].value;
 
     drawLCRSelectorButton(
       lcrLayout.frequencyPresets[i],
-      labels[i],
+      frequencyPresets[i].label,
       selected
     );
   }
@@ -1276,18 +1356,6 @@ void drawLCRFrequencySelector()
 void drawLCRReferenceSelector()
 {
   const LCRRect &r = lcrLayout.selector;
-
-  const char *labels[] = {
-    "100 Ohm",
-    "1 kOhm",
-    "10 kOhm"
-  };
-
-  const float references[] = {
-    100.0f,
-    1000.0f,
-    10000.0f
-  };
 
   // Clear the Measure content and footer occupied by the selector.
   display.fillRect(
@@ -1312,14 +1380,15 @@ void drawLCRReferenceSelector()
 
   display.print(title);
 
-  // Draw the three reference-resistor presets.
-  for (int16_t i = 0; i < 3; i++) {
+  // Draw each reference preset directly from the shared preset table.
+  for (uint8_t i = 0; i < REFERENCE_PRESET_COUNT; i++) {
     bool selected =
-      lcrSettings.referenceResistance == references[i];
+      lcrSettings.referenceResistance ==
+      referencePresets[i].value;
 
     drawLCRSelectorButton(
       lcrLayout.referencePresets[i],
-      labels[i],
+      referencePresets[i].label,
       selected
     );
   }
