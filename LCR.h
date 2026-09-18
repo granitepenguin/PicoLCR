@@ -152,7 +152,9 @@ enum LCRUIState
   LCR_UI_NORMAL,
   LCR_UI_FREQ_SELECT,
   LCR_UI_REF_SELECT,
-  LCR_UI_SWEEP_MODE_SELECT
+  LCR_UI_SWEEP_MODE_SELECT,
+  LCR_UI_SWEEP_STEP_SELECT,
+  LCR_UI_SWEEP_DENSITY_SELECT
 };
 
 extern LCRUIState lcrUIState;
@@ -216,6 +218,8 @@ struct LCRLayout
   LCRRect selector;
   LCRRect frequencyPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect referencePresets[LCR_MAX_SELECTOR_BUTTONS];
+  LCRRect sweepStepPresets[LCR_MAX_SELECTOR_BUTTONS];
+  LCRRect sweepDensityPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect selectorCancel;
 };
 
@@ -246,6 +250,13 @@ void calculateReferenceSelectorLayout();
 
 // Calculate button geometry for the Sweep-mode selector.
 void calculateSweepModeSelectorLayout();
+
+// Calculate button geometry for the linear Sweep-step selector.
+void calculateSweepStepSelectorLayout();
+
+// Calculate button geometry for the logarithmic Sweep-density selector.
+void calculateSweepDensitySelectorLayout();
+
 
 
 

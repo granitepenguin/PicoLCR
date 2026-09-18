@@ -160,6 +160,45 @@ constexpr uint8_t REFERENCE_PRESET_COUNT =
   sizeof(referencePresets) / sizeof(referencePresets[0]);
 
 
+// Defines one selectable linear Sweep step.
+// The label is displayed by the UI while the value is stored in Hz.
+struct SweepStepPreset
+{
+  const char *label;
+  uint32_t value;
+};
+
+// Defines all available linear Sweep step sizes.
+// Adding or removing entries automatically changes selector layout,
+// drawing, and touch handling.
+const SweepStepPreset sweepStepPresets[] = {
+  { "100 Hz", 100 },
+  { "1 kHz", 1000 },
+  { "10 kHz", 10000 }
+};
+
+constexpr uint8_t SWEEP_STEP_PRESET_COUNT =
+  sizeof(sweepStepPresets) / sizeof(sweepStepPresets[0]);
+
+
+// Defines one selectable logarithmic Sweep measurement density.
+struct SweepDensityPreset
+{
+  const char *label;
+  uint16_t value;
+};
+
+// Defines all available logarithmic Sweep densities in points per decade.
+const SweepDensityPreset sweepDensityPresets[] = {
+  { "10", 10 },
+  { "20", 20 },
+  { "50", 50 }
+};
+
+constexpr uint8_t SWEEP_DENSITY_PRESET_COUNT =
+  sizeof(sweepDensityPresets) / sizeof(sweepDensityPresets[0]);
+
+
 // measurement objects
 MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings);
 MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings);
@@ -357,6 +396,16 @@ void updateLCR()
 
   if (lcrUIState == LCR_UI_SWEEP_MODE_SELECT) {
     handleLCRSweepModeSelectorTouch(x, y);
+    return;
+  }
+
+  if (lcrUIState == LCR_UI_SWEEP_STEP_SELECT) {
+    handleLCRSweepStepSelectorTouch(x, y);
+    return;
+  }
+
+  if (lcrUIState == LCR_UI_SWEEP_DENSITY_SELECT) {
+    handleLCRSweepDensitySelectorTouch(x, y);
     return;
   }
 
@@ -599,6 +648,35 @@ uint32_t calculateLinearSweepPointCount(const SweepSettings &settings)
 }
 
 
+// Calculate the number of measurements produced by a logarithmic sweep.
+// Measurement density is specified in points per decade, with one
+// additional point included for the initial Start frequency.
+uint32_t calculateLogSweepPointCount(const SweepSettings &settings)
+{
+  if (settings.startFrequency == 0)
+    return 0;
+
+  if (settings.stopFrequency <= settings.startFrequency)
+    return 0;
+
+  if (settings.pointsPerDecade == 0)
+    return 0;
+
+  float decades =
+    log10f(
+      static_cast<float>(settings.stopFrequency) /
+      static_cast<float>(settings.startFrequency)
+    );
+
+  uint32_t intervals =
+    static_cast<uint32_t>(
+      ceilf(decades * settings.pointsPerDecade)
+    );
+
+  return intervals + 1;
+}
+
+
 // Calculate geometry shared by modal selectors.
 // Selector dimensions are controlled by the common LCR UI tuning constants
 // so visual adjustments do not require changes to the layout algorithm.
@@ -777,6 +855,27 @@ void calculateSweepModeSelectorLayout()
 }
 
 
+// Calculate linear Sweep-step selector geometry using the shared dynamic
+// selector grid and the number of entries in the Sweep-step preset table.
+void calculateSweepStepSelectorLayout()
+{
+  calculateSelectorButtonGrid(
+    lcrLayout.sweepStepPresets,
+    SWEEP_STEP_PRESET_COUNT
+  );
+}
+
+
+// Calculate logarithmic Sweep-density selector geometry using the shared
+// dynamic selector grid and the number of available density presets.
+void calculateSweepDensitySelectorLayout()
+{
+  calculateSelectorButtonGrid(
+    lcrLayout.sweepDensityPresets,
+    SWEEP_DENSITY_PRESET_COUNT
+  );
+}
+
 
 // Initialize the LCR analyzer and calculate all currently supported UI
 // geometry before drawing the instrument screen.
@@ -789,6 +888,8 @@ void initializeLCR()
   calculateFrequencySelectorLayout();
   calculateReferenceSelectorLayout();
   calculateSweepModeSelectorLayout();
+  calculateSweepStepSelectorLayout();
+  calculateSweepDensitySelectorLayout();
 
   initializeLCRValueSprite();
 
@@ -1147,6 +1248,28 @@ void handleLCRSweepSetupTouch(uint16_t x, uint16_t y)
     drawLCRSweepModeSelector();
     return;
   }
+
+  // Open the selector appropriate for the current Sweep mode.
+  // Linear mode selects a frequency step; Log mode selects points per decade.
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.sweepSetupRows[3])) {
+
+    if (lcrSweepSettings.mode == LCR_SWEEP_LINEAR) {
+      lcrUIState =
+        LCR_UI_SWEEP_STEP_SELECT;
+
+      drawLCRSweepStepSelector();
+    } else {
+      lcrUIState =
+        LCR_UI_SWEEP_DENSITY_SELECT;
+
+      drawLCRSweepDensitySelector();
+    }
+
+    return;
+  }
 }
 
 
@@ -1198,6 +1321,80 @@ void handleLCRSweepModeSelectorTouch(uint16_t x, uint16_t y)
   }
 }
 
+
+
+// Handle touch input while the linear Sweep-step selector is displayed.
+// Selecting a step updates Sweep configuration and returns to Setup;
+// Cancel returns without changing the current step.
+void handleLCRSweepStepSelectorTouch(uint16_t x, uint16_t y)
+{
+  for (uint8_t i = 0;
+       i < SWEEP_STEP_PRESET_COUNT;
+       i++) {
+
+    if (pointInLCRRect(
+          x,
+          y,
+          lcrLayout.sweepStepPresets[i])) {
+
+      lcrSweepSettings.stepFrequency =
+        sweepStepPresets[i].value;
+
+      lcrUIState = LCR_UI_NORMAL;
+
+      drawLCRScreen();
+      return;
+    }
+  }
+
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.selectorCancel)) {
+
+    lcrUIState = LCR_UI_NORMAL;
+
+    drawLCRScreen();
+    return;
+  }
+}
+
+
+// Handle touch input while the logarithmic Sweep-density selector is shown.
+// Selecting a value updates points-per-decade and returns to Sweep Setup;
+// Cancel returns without modifying the current density.
+void handleLCRSweepDensitySelectorTouch(uint16_t x, uint16_t y)
+{
+  for (uint8_t i = 0;
+       i < SWEEP_DENSITY_PRESET_COUNT;
+       i++) {
+
+    if (pointInLCRRect(
+          x,
+          y,
+          lcrLayout.sweepDensityPresets[i])) {
+
+      lcrSweepSettings.pointsPerDecade =
+        sweepDensityPresets[i].value;
+
+      lcrUIState = LCR_UI_NORMAL;
+
+      drawLCRScreen();
+      return;
+    }
+  }
+
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.selectorCancel)) {
+
+    lcrUIState = LCR_UI_NORMAL;
+
+    drawLCRScreen();
+    return;
+  }
+}
 
 
 //
@@ -1538,6 +1735,7 @@ void drawLCRSweepSetup()
 
   display.setCursor(valueX, y);
 
+  // Display the number of measurements derived from the active Sweep mode.
   if (lcrSweepSettings.mode == LCR_SWEEP_LINEAR) {
     display.print(
       calculateLinearSweepPointCount(
@@ -1545,7 +1743,11 @@ void drawLCRSweepSetup()
       )
     );
   } else {
-    display.print("---");
+    display.print(
+      calculateLogSweepPointCount(
+        lcrSweepSettings
+      )
+    );
   }
 }
 
@@ -1597,6 +1799,112 @@ void drawLCRSweepModeSelector()
     false
   );
 }
+
+
+// Draw the linear Sweep-step selector.
+// The current step is highlighted and all button labels and values come
+// directly from the Sweep-step preset table.
+void drawLCRSweepStepSelector()
+{
+  const LCRRect &r = lcrLayout.selector;
+
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  const char *title = "Select Sweep Step";
+
+  int16_t titleWidth = strlen(title) * 6;
+
+  display.setCursor(
+    r.x + (r.w - titleWidth) / 2,
+    r.y + r.h * 7 / 100
+  );
+
+  display.print(title);
+
+  for (uint8_t i = 0;
+       i < SWEEP_STEP_PRESET_COUNT;
+       i++) {
+
+    bool selected =
+      lcrSweepSettings.stepFrequency ==
+      sweepStepPresets[i].value;
+
+    drawLCRSelectorButton(
+      lcrLayout.sweepStepPresets[i],
+      sweepStepPresets[i].label,
+      selected
+    );
+  }
+
+  drawLCRSelectorButton(
+    lcrLayout.selectorCancel,
+    "Cancel",
+    false
+  );
+}
+
+
+
+// Draw the logarithmic Sweep-density selector.
+// The selected points-per-decade value is highlighted and all available
+// choices come directly from the Sweep-density preset table.
+void drawLCRSweepDensitySelector()
+{
+  const LCRRect &r = lcrLayout.selector;
+
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  const char *title = "Select Points/Decade";
+
+  int16_t titleWidth = strlen(title) * 6;
+
+  display.setCursor(
+    r.x + (r.w - titleWidth) / 2,
+    r.y + r.h * 7 / 100
+  );
+
+  display.print(title);
+
+  for (uint8_t i = 0;
+       i < SWEEP_DENSITY_PRESET_COUNT;
+       i++) {
+
+    bool selected =
+      lcrSweepSettings.pointsPerDecade ==
+      sweepDensityPresets[i].value;
+
+    drawLCRSelectorButton(
+      lcrLayout.sweepDensityPresets[i],
+      sweepDensityPresets[i].label,
+      selected
+    );
+  }
+
+  drawLCRSelectorButton(
+    lcrLayout.selectorCancel,
+    "Cancel",
+    false
+  );
+}
+
 
 
 // Draw the Sweep Setup footer.
@@ -1896,7 +2204,25 @@ void drawLCRFrequencySelector()
   display.setTextSize(1);
   display.setTextColor(TXTCOLOR, BGCOLOR);
 
-  const char *title = "Select Frequency";
+  // Select a title that identifies which frequency setting is being edited.
+  // The shared frequency selector is used by Measure, Sweep Start, and
+  // Sweep Stop, so its title should provide the appropriate context.
+  const char *title;
+
+  switch (lcrFrequencyTarget) {
+    case LCR_FREQ_SWEEP_START:
+      title = "Select Sweep Start";
+      break;
+
+    case LCR_FREQ_SWEEP_STOP:
+      title = "Select Sweep Stop";
+      break;
+
+    case LCR_FREQ_MEASURE:
+    default:
+      title = "Select Frequency";
+      break;
+  }
 
   int16_t titleWidth = strlen(title) * 6;
 
