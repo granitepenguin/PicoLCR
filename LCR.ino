@@ -677,6 +677,31 @@ uint32_t calculateLogSweepPointCount(const SweepSettings &settings)
 }
 
 
+// Validate the complete Sweep configuration before acquisition begins.
+// UI controls prevent most invalid combinations, but the Sweep engine
+// performs its own validation rather than relying solely on the interface.
+bool isLCRSweepConfigurationValid(const SweepSettings &settings)
+{
+  if (settings.startFrequency == 0)
+    return false;
+
+  if (settings.stopFrequency <= settings.startFrequency)
+    return false;
+
+  if (settings.mode == LCR_SWEEP_LINEAR) {
+    if (settings.stepFrequency == 0)
+      return false;
+  }
+
+  if (settings.mode == LCR_SWEEP_LOG) {
+    if (settings.pointsPerDecade == 0)
+      return false;
+  }
+
+  return true;
+}
+
+
 // Calculate geometry shared by modal selectors.
 // Selector dimensions are controlled by the common LCR UI tuning constants
 // so visual adjustments do not require changes to the layout algorithm.
@@ -1120,30 +1145,36 @@ void handleMeasureSoftKeyTouch(uint16_t x, uint16_t y)
 // to the originating screen without modifying the current setting.
 void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
 {
-  // Check each available frequency preset.
+  // Handle selectable frequency presets. Disabled Sweep limits ignore touch
+  // input so an invalid Start/Stop combination cannot be created through
+  // the normal user interface.
   for (uint8_t i = 0; i < FREQUENCY_PRESET_COUNT; i++) {
-    if (pointInLCRRect(
+    if (!pointInLCRRect(
           x,
           y,
           lcrLayout.frequencyPresets[i])) {
 
-      // Apply the selected frequency to the setting currently being edited.
-      setLCRSelectedFrequency(
-        frequencyPresets[i].value
-      );
-
-      // Return to the screen that opened the selector.
-      if (lcrFrequencyTarget == LCR_FREQ_MEASURE) {
-        returnToLCRMeasureScreen();
-      } else {
-        lcrUIState = LCR_UI_NORMAL;
-        lcrDisplayDirty = true;
-
-        drawLCRScreen();
-      }
-
-      return;
+      continue;
     }
+
+    uint32_t frequency =
+      frequencyPresets[i].value;
+
+    if (!isLCRFrequencyPresetEnabled(frequency))
+      return;
+
+    setLCRSelectedFrequency(frequency);
+
+    if (lcrFrequencyTarget == LCR_FREQ_MEASURE) {
+      returnToLCRMeasureScreen();
+    } else {
+      lcrUIState = LCR_UI_NORMAL;
+      lcrDisplayDirty = true;
+
+      drawLCRScreen();
+    }
+
+    return;
   }
 
   // Cancel closes the selector without changing the current frequency.
@@ -1752,6 +1783,47 @@ void drawLCRSweepSetup()
 }
 
 
+// Draw a rectangular selector button with a centered text label.
+// Selected controls use the highlight color, while disabled controls are
+// visually muted and cannot be selected by their touch handlers.
+void drawLCRSelectorButton(const LCRRect &rect,
+                           const char *label,
+                           bool selected,
+                           bool enabled = true)
+{
+  uint16_t color;
+
+  if (!enabled)
+    color = TFT_DARKGREY;
+  else if (selected)
+    color = HIGHCOLOR;
+  else
+    color = TXTCOLOR;
+
+  display.drawRect(
+    rect.x,
+    rect.y,
+    rect.w,
+    rect.h,
+    color
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(color, BGCOLOR);
+
+  int16_t textWidth = strlen(label) * 6;
+
+  int16_t textX =
+    rect.x + (rect.w - textWidth) / 2;
+
+  int16_t textY =
+    rect.y + (rect.h - 8) / 2;
+
+  display.setCursor(textX, textY);
+  display.print(label);
+}
+
+
 // Draw the Sweep-mode selector over the Sweep Setup screen.
 // The currently active mode is highlighted so the existing configuration
 // remains visible before the user makes a selection.
@@ -2114,38 +2186,6 @@ void drawMeasureSoftKeys()
 }
 
 
-// Draw a rectangular selector button with a centered text label.
-// The supplied rectangle is also used by touch detection, keeping visual
-// controls and touch targets synchronized.
-void drawLCRSelectorButton(const LCRRect &rect,
-                           const char *label,
-                           bool selected)
-{
-  uint16_t color = selected ? HIGHCOLOR : TXTCOLOR;
-
-  display.drawRect(
-    rect.x,
-    rect.y,
-    rect.w,
-    rect.h,
-    color
-  );
-
-  display.setTextSize(1);
-  display.setTextColor(color, BGCOLOR);
-
-  int16_t textWidth = strlen(label) * 6;
-  int16_t textX =
-    rect.x + (rect.w - textWidth) / 2;
-
-  int16_t textY =
-    rect.y + (rect.h - 8) / 2;
-
-  display.setCursor(textX, textY);
-  display.print(label);
-}
-
-
 // Return the frequency associated with the currently active selector target.
 // This lets the shared selector highlight the correct value for Measure,
 // Sweep Start, or Sweep Stop without duplicating selector code.
@@ -2161,6 +2201,28 @@ uint32_t getLCRSelectedFrequency()
     case LCR_FREQ_MEASURE:
     default:
       return lcrSettings.frequency;
+  }
+}
+
+
+
+// Determine whether a frequency preset is valid for the setting currently
+// being edited. Sweep Start must remain below Stop, and Sweep Stop must
+// remain above Start. Measure frequency has no Sweep-range restriction.
+bool isLCRFrequencyPresetEnabled(uint32_t frequency)
+{
+  switch (lcrFrequencyTarget) {
+    case LCR_FREQ_SWEEP_START:
+      return frequency <
+        lcrSweepSettings.stopFrequency;
+
+    case LCR_FREQ_SWEEP_STOP:
+      return frequency >
+        lcrSweepSettings.startFrequency;
+
+    case LCR_FREQ_MEASURE:
+    default:
+      return true;
   }
 }
 
@@ -2233,15 +2295,23 @@ void drawLCRFrequencySelector()
 
   display.print(title);
 
+  // Draw frequency presets using the validity rules for the setting currently
+  // being edited. Invalid Sweep limits remain visible but are disabled.
   for (uint8_t i = 0; i < FREQUENCY_PRESET_COUNT; i++) {
     bool selected =
       getLCRSelectedFrequency() ==
       frequencyPresets[i].value;
 
+    bool enabled =
+      isLCRFrequencyPresetEnabled(
+        frequencyPresets[i].value
+      );
+
     drawLCRSelectorButton(
       lcrLayout.frequencyPresets[i],
       frequencyPresets[i].label,
-      selected
+      selected,
+      enabled
     );
   }
 
