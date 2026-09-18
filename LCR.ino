@@ -1,3 +1,5 @@
+// LCR.ino
+//
 // LCR Instrument
 //
 // This module implements the LCR / Impedance Analyzer instrument.
@@ -20,25 +22,50 @@ constexpr int PHASE_Y = 80;
 constexpr int R_Y     = 100;
 constexpr int X_Y     = 120;
 
+// Controls the maximum refresh rate of dynamic LCR display values.
+// Measurement acquisition may occur faster, but TFT updates are limited
+// to reduce flicker and unnecessary SPI traffic.
+constexpr uint32_t LCR_DISPLAY_INTERVAL_MS = 150;
+
+// Stores the currently selected LCR analyzer tab
+// Measure is always the default tab when entering the instrument
+LCRTab lcrTab = LCR_TAB_MEASURE;
 
 LCRBackend lcrBackend = LCR_BACKEND_SIMULATION;
 
+// Indicates that the dynamic LCR display must be redrawn immediately.
+// This is set whenever the analyzer is entered or its screen changes.
+bool lcrDisplayDirty = true;
+
+// Stores the calculated screen regions used by the LCR interface
+LCRLayout lcrLayout;
+
+// Stores the current operating state of the Measure tab.
+// New LCR analyzer sessions begin in continuous LIVE measurement mode.
+LCRMeasureState lcrMeasureState = LCR_MEASURE_LIVE;
+
+// Stores the current LCR user-interface state.
+// The analyzer normally displays the active tab unless a selector is open.
+LCRUIState lcrUIState = LCR_UI_NORMAL;
+
+// Stores the active measurement configuration used by the LCR analyzer.
+// UI controls modify these values and the measurement backend reads them
+// whenever a new impedance measurement is requested.
+MeasurementSettings lcrSettings = {
+  1000,      // Frequency: 1 kHz
+  1000.0f    // Reference resistor: 1 kOhm
+};
+
+
+// Off-screen drawing buffer used for dynamic LCR measurement fields.
+// Rendering into RAM first allows the completed field to be transferred
+// to the TFT at once, reducing visible erase/redraw flicker.
+TFT_eSprite lcrValueSprite = TFT_eSprite(&display);
+
+// measurement objects
 MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings);
 MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings);
 
-void initializeLCR()
-{
-  display.fillScreen(BGCOLOR);
-
-  //
-  // TODO:
-  //
-  // Initialize AD9833
-  // Configure ADC
-  // Reset measurements
-  // Load calibration
-  //
-}
 
 
 // Generate simulated measurement data for GUI and workflow development
@@ -52,11 +79,16 @@ MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings)
   m.phaseDeg = phase;
   m.resistance = m.impedance * cos(radians(phase));
   m.reactance = m.impedance * sin(radians(phase));
-  m.capacitance = 10e-9;
+
+  // Sweep the simulated capacitance across the nF/uF boundary so automatic
+  // engineering-unit selection can be verified without measurement hardware.
+  float simulationPosition = (sin(millis() / 2500.0f) + 1.0f) / 2.0f;
+  m.capacitance = (500.0e-9f + simulationPosition * 1.0e-6f);
+
   m.inductance = 0.0f;
   m.esr = 2.5f;
   m.q = fabs(m.reactance) / m.resistance;
-  m.dissipation = 1.0f / m.q;
+  m.dissipation = 0.0012f;
 
   return m;
 }
@@ -99,14 +131,21 @@ MeasurementPoint measureImpedance(const MeasurementSettings &settings)
 }
 
 
-// Enter the LCR instrument.
-// Performs one-time initialization and draws the initial screen.
+
+// Enter the LCR analyzer and display the default Measure tab.
+// Each new analyzer session begins in LIVE mode with no selector open.
 void enterLCRMode()
 {
   instrumentMode = MODE_LCR;
+  lcrTab = LCR_TAB_MEASURE;
+  lcrMeasureState = LCR_MEASURE_LIVE;
+  lcrUIState = LCR_UI_NORMAL;
+  lcrDisplayDirty = true;
+
   initializeLCR();
   drawLCRScreen();
 }
+
 
 
 // Exit the LCR instrument and return to oscilloscope mode.
@@ -118,33 +157,75 @@ void exitLCRMode()
 }
 
 
+
 // Main LCR instrument task.
-//
-// Called once each pass through loop() while the instrument is in
-// LCR mode. This function coordinates measurement acquisition,
-// user input, and display updates.
+// LIVE mode continuously acquires and periodically displays measurements.
+// HOLD preserves the last measurement while leaving all UI controls active.
 void updateLCR()
 {
-  static MeasurementSettings settings = {
-    1000,      // frequency
-    1000.0f    // reference resistor
-  };
+  static MeasurementPoint measurement;
+  static uint32_t lastDisplayUpdate = 0;
+  static bool lastPressed = false;
 
-  MeasurementPoint measurement = measureImpedance(settings);
-  updateLCRDisplay(measurement);
+  uint32_t now = millis();
 
-  uint16_t x, y;
+  if (lcrMeasureState == LCR_MEASURE_LIVE && lcrUIState == LCR_UI_NORMAL) {
+    measurement = measureImpedance(lcrSettings);
 
-  if (readTouch(x, y)) {
+    if (lcrDisplayDirty ||
+        now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
 
-    // Temporary exit mechanism.
-    // Touch the title bar to return to the oscilloscope.
-    if (y < 20) {
-      exitLCRMode();
-      return;
+      lastDisplayUpdate = now;
+      lcrDisplayDirty = false;
+
+      updateLCRDisplay(measurement, lcrSettings);
     }
   }
+
+  //
+  // Touch handling code 
+  //
+  uint16_t x, y;
+  bool pressed = readTouch(x, y);
+
+  // Require release before accepting another touch.
+  if (!pressed) {
+    lastPressed = false;
+    return;
+  }
+
+  if (lastPressed)
+    return;
+
+  lastPressed = true;
+
+  // Back remains available regardless of active LCR UI state
+  if (pointInLCRRect(x, y, lcrLayout.header)) {
+    exitLCRMode();
+    return;
+  }
+
+  // Modal selectors consume touch input before the underlying tab.
+  if (lcrUIState == LCR_UI_FREQ_SELECT) {
+    handleLCRFrequencySelectorTouch(x, y);
+    return;
+  }
+
+  // Route modal reference-selector touches before the underlying
+  // Measure-screen controls are allowed to process them.
+  if (lcrUIState == LCR_UI_REF_SELECT) {
+    handleLCRReferenceSelectorTouch(x, y);
+    return;
+  }
+
+  if (lcrTab == LCR_TAB_MEASURE &&
+      pointInLCRRect(x, y, lcrLayout.footer)) {
+
+    handleMeasureSoftKeyTouch(x, y);
+    return;
+  }
 }
+
 
 
 // Clear a measurement value before drawing a new one.
@@ -157,79 +238,1148 @@ void clearValueField(int x, int y, int width = 120)
 }
 
 
-// Draw the static LCR instrument user interface.
+
+// Configure the reusable sprite used for dynamic LCR measurement fields.
+// The sprite is created at the largest dynamic-region size and reused for
+// both primary and secondary measurements to minimize RAM consumption.
+void initializeLCRValueSprite()
+{
+  // Remove an existing buffer before recreating it.
+  lcrValueSprite.deleteSprite();
+
+  int16_t spriteW = max(
+    lcrLayout.primary.w,
+    lcrLayout.secondary.w
+  );
+
+  int16_t spriteH = max(
+    lcrLayout.primary.h,
+    lcrLayout.secondary.h
+  );
+
+  lcrValueSprite.setColorDepth(16);
+  lcrValueSprite.createSprite(spriteW, spriteH);
+
+  lcrValueSprite.fillSprite(BGCOLOR);
+  lcrValueSprite.setTextColor(TXTCOLOR, BGCOLOR);
+}
+
+
+
+// Calculate only the major screen regions shared by every LCR analyzer tab.
+// Tab-specific and selector-specific geometry is calculated separately so
+// this function remains independent of individual instrument screens.
+void calculateLCRLayout()
+{
+  const int16_t screenW = display.width();
+  const int16_t screenH = display.height();
+
+  const int16_t headerH = screenH * 10 / 100;
+  const int16_t tabsH = screenH * 10 / 100;
+  const int16_t footerH = screenH * 12 / 100;
+
+  const int16_t contentY = headerH + tabsH;
+  const int16_t contentH =
+    screenH - headerH - tabsH - footerH;
+
+  const int16_t footerY = screenH - footerH;
+
+  lcrLayout.header = {
+    0,
+    0,
+    screenW,
+    headerH
+  };
+
+  lcrLayout.tabs = {
+    0,
+    headerH,
+    screenW,
+    tabsH
+  };
+
+  lcrLayout.content = {
+    0,
+    contentY,
+    screenW,
+    contentH
+  };
+
+  lcrLayout.footer = {
+    0,
+    footerY,
+    screenW,
+    footerH
+  };
+}
+
+
+
+// Divide the common content and footer regions into areas used by the
+// Measure tab, including primary/secondary measurements, context fields,
+// and the four Measure soft-key touch regions.
+void calculateMeasureLayout()
+{
+  const LCRRect &content = lcrLayout.content;
+  const LCRRect &footer = lcrLayout.footer;
+
+  const int16_t primaryH =
+    content.h * 42 / 100;
+
+  const int16_t secondaryH =
+    content.h * 25 / 100;
+
+  const int16_t secondaryY =
+    content.y + primaryH;
+
+  const int16_t contextY =
+    secondaryY + secondaryH;
+
+  const int16_t contextH =
+    content.h - primaryH - secondaryH;
+
+  lcrLayout.primary = {
+    content.x,
+    content.y,
+    content.w,
+    primaryH
+  };
+
+  lcrLayout.secondary = {
+    content.x,
+    secondaryY,
+    content.w,
+    secondaryH
+  };
+
+  lcrLayout.context = {
+    content.x,
+    contextY,
+    content.w,
+    contextH
+  };
+
+  const int16_t softKeyCount = 4;
+  const int16_t softKeyW =
+    footer.w / softKeyCount;
+
+  for (int16_t i = 0; i < softKeyCount; i++) {
+    int16_t x =
+      footer.x + i * softKeyW;
+
+    int16_t w = (i == softKeyCount - 1)
+      ? footer.w - softKeyW * i
+      : softKeyW;
+
+    lcrLayout.measureSoftKeys[i] = {
+      x,
+      footer.y,
+      w,
+      footer.h
+    };
+  }
+}
+
+
+// Calculate geometry shared by modal selectors.
+// Selectors replace the normal content and footer areas while leaving the
+// common analyzer header and tabs visible.
+void calculateSelectorLayout()
+{
+  const LCRRect &content = lcrLayout.content;
+  const LCRRect &footer = lcrLayout.footer;
+
+  const int16_t selectorH =
+    content.h + footer.h;
+
+  lcrLayout.selector = {
+    content.x,
+    content.y,
+    content.w,
+    selectorH
+  };
+
+  const int16_t cancelW =
+    lcrLayout.selector.w * 35 / 100;
+
+  const int16_t cancelH =
+    lcrLayout.selector.h * 16 / 100;
+
+  const int16_t cancelX =
+    lcrLayout.selector.x +
+    (lcrLayout.selector.w - cancelW) / 2;
+
+  const int16_t cancelY =
+    lcrLayout.selector.y +
+    lcrLayout.selector.h -
+    cancelH -
+    lcrLayout.selector.h * 5 / 100;
+
+  lcrLayout.selectorCancel = {
+    cancelX,
+    cancelY,
+    cancelW,
+    cancelH
+  };
+}
+
+
+
+// Calculate the four frequency-preset button regions.
+// Presets are arranged as a responsive two-column by two-row grid within
+// the common selector area.
+void calculateFrequencySelectorLayout()
+{
+  const LCRRect &selector = lcrLayout.selector;
+
+  const int16_t marginX =
+    selector.w * 12 / 100;
+
+  const int16_t top =
+    selector.y + selector.h * 22 / 100;
+
+  const int16_t gapX =
+    selector.w * 8 / 100;
+
+  const int16_t gapY =
+    selector.h * 8 / 100;
+
+  const int16_t buttonW =
+    (selector.w - marginX * 2 - gapX) / 2;
+
+  const int16_t buttonH =
+    selector.h * 18 / 100;
+
+  for (int16_t i = 0; i < 4; i++) {
+    int16_t column = i % 2;
+    int16_t row = i / 2;
+
+    int16_t x =
+      selector.x +
+      marginX +
+      column * (buttonW + gapX);
+
+    int16_t y =
+      top +
+      row * (buttonH + gapY);
+
+    lcrLayout.frequencyPresets[i] = {
+      x,
+      y,
+      buttonW,
+      buttonH
+    };
+  }
+}
+
+
+// Calculate the three reference-resistor preset button regions.
+// The presets are distributed evenly across one horizontal row within
+// the common selector area.
+void calculateReferenceSelectorLayout()
+{
+  const LCRRect &selector = lcrLayout.selector;
+
+  const int16_t marginX =
+    selector.w * 6 / 100;
+
+  const int16_t gap =
+    selector.w * 4 / 100;
+
+  const int16_t buttonW =
+    (selector.w - marginX * 2 - gap * 2) / 3;
+
+  const int16_t buttonH =
+    selector.h * 20 / 100;
+
+  const int16_t buttonY =
+    selector.y + selector.h * 35 / 100;
+
+  for (int16_t i = 0; i < 3; i++) {
+    int16_t x =
+      selector.x +
+      marginX +
+      i * (buttonW + gap);
+
+    lcrLayout.referencePresets[i] = {
+      x,
+      buttonY,
+      buttonW,
+      buttonH
+    };
+  }
+}
+
+
+
+// Initialize the LCR analyzer and calculate all currently supported UI
+// geometry before drawing the instrument screen.
+void initializeLCR()
+{
+  calculateLCRLayout();
+  calculateMeasureLayout();
+  calculateSelectorLayout();
+  calculateFrequencySelectorLayout();
+  calculateReferenceSelectorLayout();
+
+  initializeLCRValueSprite();
+
+  display.fillScreen(BGCOLOR);
+
+  //
+  // Future initialization:
+  //
+  // - Initialize AD9833
+  // - Configure ADC/DMA
+  // - Reset measurement state
+  // - Load calibration data
+  //
+}
+
+
+
+// Return true when a screen coordinate lies inside a rectangular UI region.
+// This allows the same calculated geometry to be shared by drawing and
+// touchscreen hit detection.
+bool pointInLCRRect(uint16_t x, uint16_t y, const LCRRect &rect)
+{
+  return x >= rect.x &&
+         x < rect.x + rect.w &&
+         y >= rect.y &&
+         y < rect.y + rect.h;
+}
+
+
+// value formatters
 //
-// Dynamic measurement values are updated separately by
-// updateLCRDisplay().
+
+// Format a raw measurement using the supplied engineering scale and unit.
+// This helper keeps engineering-prefix selection separate from the display
+// code so the same formatting can be reused throughout the analyzer.
+LCRFormattedValue formatEngineeringValue(float value,
+                                          float scale,
+                                          const char *unit,
+                                          uint8_t decimals)
+{
+  LCRFormattedValue result;
+  float scaledValue = value * scale;
+  snprintf( result.value, sizeof(result.value), "%.*f", decimals, scaledValue);
+  snprintf( result.unit, sizeof(result.unit), "%s", unit);
+
+  return result;
+}
+
+
+// Format capacitance using an appropriate engineering unit.
+// The selected unit keeps the displayed numeric value within a practical
+// range while the underlying measurement remains stored in farads.
+LCRFormattedValue formatCapacitance(float farads)
+{
+  float magnitude = fabs(farads);
+
+  if (magnitude < 1.0e-9f) {
+    return formatEngineeringValue( farads, 1.0e12f, "pF", 2);
+  }
+
+  if (magnitude < 1.0e-6f) {
+    return formatEngineeringValue( farads, 1.0e9f, "nF", 2);
+  }
+
+  if (magnitude < 1.0e-3f) {
+    return formatEngineeringValue( farads, 1.0e6f, "uF", 2);
+  }
+
+  return formatEngineeringValue( farads, 1.0f, "F", 3);
+}
+
+
+// Format inductance using an appropriate engineering unit.
+// Raw inductance remains stored in henries while the displayed value is
+// scaled to uH, mH, or H as appropriate.
+LCRFormattedValue formatInductance(float henries)
+{
+  float magnitude = fabs(henries);
+
+  if (magnitude < 1.0e-3f) {
+    return formatEngineeringValue( henries, 1.0e6f, "uH", 2);
+  }
+
+  if (magnitude < 1.0f) {
+    return formatEngineeringValue( henries, 1.0e3f, "mH", 2);
+  }
+
+  return formatEngineeringValue( henries, 1.0f, "H", 3);
+}
+
+
+// Format impedance or resistance using Ohm, kOhm, or MOhm.
+// This formatter can be reused for impedance magnitude, resistance,
+// reactance, ESR, and reference-resistor values.
+LCRFormattedValue formatImpedance(float ohms)
+{
+  float magnitude = fabs(ohms);
+
+  if (magnitude >= 1.0e6f) {
+    return formatEngineeringValue( ohms, 1.0e-6f, "MOhm", 2);
+  }
+
+  if (magnitude >= 1.0e3f) {
+    return formatEngineeringValue( ohms, 1.0e-3f, "kOhm", 2);
+  }
+
+  return formatEngineeringValue( ohms, 1.0f, "Ohm", 2);
+}
+
+
+// Format frequency using compact engineering notation.
+// Decimal precision decreases as the displayed magnitude increases,
+// providing roughly four significant digits without unnecessary zeros.
+LCRFormattedValue formatFrequency(uint32_t frequencyHz)
+{
+  if (frequencyHz >= 1000000UL) {
+    float frequencyMHz = frequencyHz * 1.0e-6f;
+
+    uint8_t decimals =
+      frequencyMHz < 10.0f ? 3 :
+      frequencyMHz < 100.0f ? 2 : 1;
+
+    return formatEngineeringValue( frequencyHz, 1.0e-6f, "MHz", decimals);
+  }
+
+  if (frequencyHz >= 1000UL) {
+    float frequencyKHz = frequencyHz * 1.0e-3f;
+
+    uint8_t decimals =
+      frequencyKHz < 10.0f ? 3 :
+      frequencyKHz < 100.0f ? 2 : 1;
+
+    return formatEngineeringValue( frequencyHz, 1.0e-3f, "kHz", decimals);
+  }
+
+  return formatEngineeringValue( frequencyHz, 1.0f, "Hz", 0);
+}
+
+
+//
+// Touch handlers
+//
+
+// Handle touches within the Measure-tab soft-key footer.
+// Only LIVE/HOLD is implemented during this milestone; the remaining
+// buttons are reserved for their upcoming Measure-control milestones.
+void handleMeasureSoftKeyTouch(uint16_t x, uint16_t y)
+{
+  // Open the frequency preset selector.
+  if (pointInLCRRect(x, y, lcrLayout.measureSoftKeys[0])) {
+    lcrUIState = LCR_UI_FREQ_SELECT;
+    drawLCRFrequencySelector();
+    return;
+  }
+
+  // Open the reference-resistor preset selector.
+  if (pointInLCRRect(x, y, lcrLayout.measureSoftKeys[1])) {
+    lcrUIState = LCR_UI_REF_SELECT;
+    drawLCRReferenceSelector();
+    return;
+  }
+
+  // LIVE / HOLD
+  if (pointInLCRRect(x, y, lcrLayout.measureSoftKeys[2])) {
+    if (lcrMeasureState == LCR_MEASURE_LIVE)
+      lcrMeasureState = LCR_MEASURE_HOLD;
+    else
+      lcrMeasureState = LCR_MEASURE_LIVE;
+
+    drawMeasureSoftKeys();
+
+    // Force an immediate measurement when returning to LIVE.
+    if (lcrMeasureState == LCR_MEASURE_LIVE)
+      lcrDisplayDirty = true;
+
+    return;
+  }
+
+  // More - implemented in a future milestone.
+  if (pointInLCRRect(x, y, lcrLayout.measureSoftKeys[3])) {
+    return;
+  }
+}
+
+
+// Handle touch input while the frequency selector is displayed.
+// Selecting a preset updates the shared measurement settings and returns
+// the analyzer to LIVE measurement; Cancel leaves all settings unchanged.
+void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
+{
+  const uint32_t frequencies[] = {
+    100,
+    1000,
+    10000,
+    100000
+  };
+
+  for (int16_t i = 0; i < 4; i++) {
+    if (pointInLCRRect(
+          x,
+          y,
+          lcrLayout.frequencyPresets[i])) {
+
+      lcrSettings.frequency = frequencies[i];
+
+      // A held measurement belongs to the old frequency, so changing
+      // frequency always resumes live acquisition.
+      lcrMeasureState = LCR_MEASURE_LIVE;
+
+      returnToLCRMeasureScreen();
+      return;
+    }
+  }
+
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.selectorCancel)) {
+
+    returnToLCRMeasureScreen();
+    return;
+  }
+}
+
+
+// Handle touch input while the reference-resistor selector is displayed.
+// Selecting a reference updates the shared measurement settings and resumes
+// LIVE acquisition; Cancel closes the selector without changing anything.
+void handleLCRReferenceSelectorTouch(uint16_t x, uint16_t y)
+{
+  const float references[] = {
+    100.0f,
+    1000.0f,
+    10000.0f
+  };
+
+  for (int16_t i = 0; i < 3; i++) {
+    if (pointInLCRRect(
+          x,
+          y,
+          lcrLayout.referencePresets[i])) {
+
+      lcrSettings.referenceResistance =
+        references[i];
+
+      // The existing held measurement was acquired using the old
+      // reference resistor, so resume acquisition after changing it.
+      lcrMeasureState = LCR_MEASURE_LIVE;
+
+      returnToLCRMeasureScreen();
+      return;
+    }
+  }
+
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.selectorCancel)) {
+
+    returnToLCRMeasureScreen();
+    return;
+  }
+}
+
+
+
+
+
+//
+// drawLCRScreen helpers
+//
+
+
+// text scaler for different sized fonts
+uint8_t lcrTextScale(uint8_t baseSize)
+{
+  int16_t scaleX = display.width() / 320;
+  int16_t scaleY = display.height() / 240;
+
+  int16_t scale = min(scaleX, scaleY);
+
+  if (scale < 1)
+    scale = 1;
+
+  return baseSize * scale;
+}
+
+
+// Draw text horizontally centered within an LCR layout region.
+// The caller supplies the vertical position because different measurement
+// fields may use different font sizes and vertical arrangements.
+void drawLCRCenteredText(const LCRRect &rect, int16_t y,
+                         const char *text, uint8_t textSize,
+                         uint16_t color)
+{
+  display.setTextSize(textSize);
+  display.setTextColor(color, BGCOLOR);
+
+  int16_t textWidth = strlen(text) * 6 * textSize;
+  int16_t textX = rect.x + (rect.w - textWidth) / 2;
+
+  display.setCursor(textX, y);
+  display.print(text);
+}
+
+
+
+// Draw a measurement value and its unit as one horizontally centered group.
+// The value may use a larger font than the unit while the combined pair
+// remains visually centered within the supplied layout region.
+void drawLCRCenteredMeasurement(const LCRRect &rect, int16_t y,
+                                const char *value, const char *unit,
+                                uint8_t valueSize, uint8_t unitSize,
+                                uint16_t color)
+{
+  int16_t valueWidth = strlen(value) * 6 * valueSize;
+  int16_t unitWidth = strlen(unit) * 6 * unitSize;
+
+  // Add a small gap between the numeric value and engineering unit.
+  int16_t gap = 4;
+
+  int16_t totalWidth = valueWidth + gap + unitWidth;
+  int16_t startX = rect.x + (rect.w - totalWidth) / 2;
+
+  display.setTextColor(color, BGCOLOR);
+
+  // Draw the numeric value.
+  display.setTextSize(valueSize);
+  display.setCursor(startX, y);
+  display.print(value);
+
+  // Align the smaller unit near the baseline of the numeric value.
+  int16_t unitY = y + (8 * valueSize) - (8 * unitSize);
+
+  display.setTextSize(unitSize);
+  display.setCursor(startX + valueWidth + gap, unitY);
+  display.print(unit);
+}
+
+
+// Draw a value and engineering unit as one centered group inside the
+// reusable sprite. The numeric value and unit may use different text sizes
+// while remaining visually centered as a single measurement.
+void drawLCRSpriteMeasurement(int16_t width, int16_t height,
+                              const char *value, const char *unit,
+                              uint8_t valueSize, uint8_t unitSize,
+                              uint16_t color)
+{
+  int16_t valueWidth = strlen(value) * 6 * valueSize;
+  int16_t unitWidth = strlen(unit) * 6 * unitSize;
+  int16_t gap = 4;
+
+  int16_t totalWidth = valueWidth + gap + unitWidth;
+  int16_t startX = (width - totalWidth) / 2;
+
+  int16_t valueHeight = 8 * valueSize;
+  int16_t unitHeight = 8 * unitSize;
+
+  int16_t valueY = (height - valueHeight) / 2;
+  int16_t unitY = valueY + valueHeight - unitHeight;
+
+  lcrValueSprite.setTextColor(color, BGCOLOR);
+
+  lcrValueSprite.setTextSize(valueSize);
+  lcrValueSprite.setCursor(startX, valueY);
+  lcrValueSprite.print(value);
+
+  lcrValueSprite.setTextSize(unitSize);
+  lcrValueSprite.setCursor(
+    startX + valueWidth + gap,
+    unitY
+  );
+  lcrValueSprite.print(unit);
+}
+
+
+
+// Render the primary measurement using automatically selected engineering
+// units. The completed value/unit pair is composed in the sprite and pushed
+// to the TFT in one operation to prevent visible refresh flicker.
+void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
+{
+  const LCRRect &r = lcrLayout.primary;
+
+  LCRFormattedValue formatted = formatCapacitance(m.capacitance);
+
+  lcrValueSprite.fillSprite(BGCOLOR);
+
+  drawLCRSpriteMeasurement( r.w, r.h, formatted.value, formatted.unit, 4, 2, TXTCOLOR);
+
+  lcrValueSprite.pushSprite( r.x, r.y, 0, 0, r.w, r.h);
+}
+
+
+
+// Render the secondary measurement as a horizontal label/value pair.
+// The complete field is composed in RAM and pushed to the TFT at once to
+// avoid visible clearing between successive display updates.
+void drawLCRSecondaryMeasurement(const MeasurementPoint &m)
+{
+  const LCRRect &r = lcrLayout.secondary;
+
+  char value[16];
+
+  snprintf(value, sizeof(value), "%.4f", m.dissipation);
+
+  const char *label = "D";
+
+  uint8_t labelSize = 1;
+  uint8_t valueSize = 2;
+
+  int16_t labelWidth = strlen(label) * 6 * labelSize;
+  int16_t valueWidth = strlen(value) * 6 * valueSize;
+  int16_t gap = 12;
+
+  int16_t totalWidth =
+    labelWidth + gap + valueWidth;
+
+  int16_t startX =
+    (r.w - totalWidth) / 2;
+
+  int16_t valueHeight = 8 * valueSize;
+
+  int16_t valueY =
+    (r.h - valueHeight) / 2;
+
+  int16_t labelY =
+    valueY + valueHeight - (8 * labelSize);
+
+  lcrValueSprite.fillSprite(BGCOLOR);
+  lcrValueSprite.setTextColor(TXTCOLOR, BGCOLOR);
+
+  lcrValueSprite.setTextSize(labelSize);
+  lcrValueSprite.setCursor(startX, labelY);
+  lcrValueSprite.print(label);
+
+  lcrValueSprite.setTextSize(valueSize);
+  lcrValueSprite.setCursor(
+    startX + labelWidth + gap,
+    valueY
+  );
+  lcrValueSprite.print(value);
+
+  lcrValueSprite.pushSprite( r.x, r.y, 0, 0, r.w, r.h);
+}
+
+
+
+// Update the dynamic measurement context fields shown beneath the main
+// measurement. Positions are derived from the context region so they remain
+// aligned with the static labels across different display resolutions.
+void drawLCRMeasurementContext(const MeasurementPoint &m,
+                               const MeasurementSettings &settings)
+{
+  const LCRRect &r = lcrLayout.context;
+
+  int16_t leftValueX = r.x + r.w * 22 / 100;
+  int16_t rightValueX = r.x + r.w * 72 / 100;
+
+  int16_t row1Y = r.y + r.h * 20 / 100;
+  int16_t row2Y = r.y + r.h * 60 / 100;
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  // Frequency
+  // Format the active measurement frequency using engineering units
+  // so the context display remains compact and easy to read.
+  LCRFormattedValue frequency = formatFrequency(m.frequency);
+  display.setCursor(leftValueX, row1Y);
+  display.print(frequency.value);
+  display.print(" ");
+  display.print(frequency.unit);
+
+  // Format the selected reference resistor using engineering units so values
+  // such as 1000 Ohm and 10000 Ohm display more readably as kOhm.
+  LCRFormattedValue reference = formatImpedance(settings.referenceResistance);
+  display.setCursor(rightValueX, row1Y);
+  display.print(reference.value);
+  display.print(" ");
+  display.print(reference.unit);
+
+  // Temporary excitation level.
+  display.setCursor(leftValueX, row2Y);
+  display.print("1.0 V");
+
+  // Temporary averaging setting.
+  display.setCursor(rightValueX, row2Y);
+  display.print("32");
+}
+
+
+// Draw the common LCR analyzer header.
+// The header provides a Back control and identifies the active instrument.
+// Its dimensions are derived entirely from the calculated screen layout.
+void drawLCRHeader()
+{
+  const LCRRect &r = lcrLayout.header;
+
+  display.fillRect(r.x, r.y, r.w, r.h, BGCOLOR);
+
+  // Bottom separator.
+  display.drawFastHLine( r.x, r.y + r.h - 1, r.w, GRIDCOLOR);
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  // Back control.
+  const char *backLabel = "< Back";
+  int16_t backY = r.y + (r.h - 8) / 2;
+
+  display.setCursor(r.x + 6, backY);
+  display.print(backLabel);
+
+  // Instrument title.
+  const char *title = "LCR ANALYZER";
+  int16_t titleWidth = strlen(title) * 6;
+  int16_t titleX = r.x + (r.w - titleWidth) / 2;
+  int16_t titleY = r.y + (r.h - 8) / 2;
+
+  display.setCursor(titleX, titleY);
+  display.print(title);
+}
+
+
+
+// Draw the four top-level LCR analyzer tabs.
+// Each tab receives an equal share of the available width, and the active
+// tab is highlighted using the existing GOscillo highlight color.
+void drawLCRTabs()
+{
+  const LCRRect &r = lcrLayout.tabs;
+
+  const char *tabLabels[] = {
+    "Measure",
+    "Sweep",
+    "Cal",
+    "Settings"
+  };
+
+  const int16_t tabCount = 4;
+  const int16_t tabW = r.w / tabCount;
+
+  display.fillRect(r.x, r.y, r.w, r.h, BGCOLOR);
+
+  for (int16_t i = 0; i < tabCount; i++) {
+    int16_t x = r.x + i * tabW;
+
+    // Let the last tab absorb any pixels left over by integer division.
+    int16_t w = (i == tabCount - 1)
+      ? r.w - (tabW * i)
+      : tabW;
+
+    bool selected = (i == static_cast<int16_t>(lcrTab));
+
+    uint16_t textColor = selected ? HIGHCOLOR : TXTCOLOR;
+
+    display.setTextSize(1);
+    display.setTextColor(textColor, BGCOLOR);
+
+    int16_t textWidth = strlen(tabLabels[i]) * 6;
+    int16_t textX = x + (w - textWidth) / 2;
+    int16_t textY = r.y + (r.h - 8) / 2;
+
+    display.setCursor(textX, textY);
+    display.print(tabLabels[i]);
+
+    // Vertical separator between adjacent tabs.
+    if (i < tabCount - 1) {
+      display.drawFastVLine( x + w - 1, r.y + 3, r.h - 6, GRIDCOLOR);
+    }
+  }
+
+  // Bottom separator.
+  display.drawFastHLine( r.x, r.y + r.h - 1, r.w, GRIDCOLOR);
+}
+
+
+// Draw the static portions of the Measure tab.
+// Measurement values themselves are not drawn here; they are refreshed
+// separately by updateLCRDisplay().
+void drawMeasureScreen()
+{
+  const LCRRect &context = lcrLayout.context;
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  int16_t leftX = context.x + context.w * 5 / 100;
+  int16_t rightX = context.x + context.w * 55 / 100;
+
+  int16_t row1Y = context.y + context.h * 20 / 100;
+  int16_t row2Y = context.y + context.h * 60 / 100;
+
+  display.setCursor(leftX, row1Y);
+  display.print("FREQ:");
+
+  display.setCursor(rightX, row1Y);
+  display.print("REF:");
+
+  display.setCursor(leftX, row2Y);
+  display.print("LEVEL:");
+
+  display.setCursor(rightX, row2Y);
+  display.print("AVG:");
+}
+
+
+// Draw the Measure-tab soft keys using the same calculated rectangles
+// used for touch detection. The third key reflects the current LIVE/HOLD
+// measurement state.
+void drawMeasureSoftKeys()
+{
+  const char *labels[] = {
+    "Freq",
+    "Ref",
+    lcrMeasureState == LCR_MEASURE_LIVE ? "LIVE" : "HOLD",
+    "More"
+  };
+
+  display.fillRect(
+    lcrLayout.footer.x,
+    lcrLayout.footer.y,
+    lcrLayout.footer.w,
+    lcrLayout.footer.h,
+    BGCOLOR
+  );
+
+  display.drawFastHLine(
+    lcrLayout.footer.x,
+    lcrLayout.footer.y,
+    lcrLayout.footer.w,
+    GRIDCOLOR
+  );
+
+  display.setTextSize(1);
+
+  for (int16_t i = 0; i < 4; i++) {
+    const LCRRect &r = lcrLayout.measureSoftKeys[i];
+
+    int16_t textWidth = strlen(labels[i]) * 6;
+    int16_t textX = r.x + (r.w - textWidth) / 2;
+    int16_t textY = r.y + (r.h - 8) / 2;
+
+    display.setTextColor(TXTCOLOR, BGCOLOR);
+    display.setCursor(textX, textY);
+    display.print(labels[i]);
+
+    if (i < 3) {
+      display.drawFastVLine( r.x + r.w - 1, r.y + 3, r.h - 6, GRIDCOLOR);
+    }
+  }
+}
+
+
+// Draw a rectangular selector button with a centered text label.
+// The supplied rectangle is also used by touch detection, keeping visual
+// controls and touch targets synchronized.
+void drawLCRSelectorButton(const LCRRect &rect,
+                           const char *label,
+                           bool selected)
+{
+  uint16_t color = selected ? HIGHCOLOR : TXTCOLOR;
+
+  display.drawRect(
+    rect.x,
+    rect.y,
+    rect.w,
+    rect.h,
+    color
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(color, BGCOLOR);
+
+  int16_t textWidth = strlen(label) * 6;
+  int16_t textX =
+    rect.x + (rect.w - textWidth) / 2;
+
+  int16_t textY =
+    rect.y + (rect.h - 8) / 2;
+
+  display.setCursor(textX, textY);
+  display.print(label);
+}
+
+
+// Draw the frequency preset selector over the normal Measure content.
+// The current frequency is highlighted and the underlying Measure controls
+// remain hidden until a preset is selected or the operation is cancelled.
+void drawLCRFrequencySelector()
+{
+  const LCRRect &r = lcrLayout.selector;
+
+  const char *labels[] = {
+    "100 Hz",
+    "1 kHz",
+    "10 kHz",
+    "100 kHz"
+  };
+
+  const uint32_t frequencies[] = {
+    100,
+    1000,
+    10000,
+    100000
+  };
+
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  const char *title = "Select Frequency";
+
+  int16_t titleWidth = strlen(title) * 6;
+
+  display.setCursor(
+    r.x + (r.w - titleWidth) / 2,
+    r.y + r.h * 7 / 100
+  );
+
+  display.print(title);
+
+  for (int16_t i = 0; i < 4; i++) {
+    bool selected =
+      lcrSettings.frequency == frequencies[i];
+
+    drawLCRSelectorButton(
+      lcrLayout.frequencyPresets[i],
+      labels[i],
+      selected
+    );
+  }
+
+  drawLCRSelectorButton(
+    lcrLayout.selectorCancel,
+    "Cancel",
+    false
+  );
+}
+
+
+// Draw the reference-resistor preset selector over the Measure screen.
+// The currently selected reference is highlighted, while the shared
+// selector geometry keeps drawing and touch targets synchronized.
+void drawLCRReferenceSelector()
+{
+  const LCRRect &r = lcrLayout.selector;
+
+  const char *labels[] = {
+    "100 Ohm",
+    "1 kOhm",
+    "10 kOhm"
+  };
+
+  const float references[] = {
+    100.0f,
+    1000.0f,
+    10000.0f
+  };
+
+  // Clear the Measure content and footer occupied by the selector.
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  // Draw selector title.
+  const char *title = "Select Reference";
+  int16_t titleWidth = strlen(title) * 6;
+
+  display.setCursor(
+    r.x + (r.w - titleWidth) / 2,
+    r.y + r.h * 7 / 100
+  );
+
+  display.print(title);
+
+  // Draw the three reference-resistor presets.
+  for (int16_t i = 0; i < 3; i++) {
+    bool selected =
+      lcrSettings.referenceResistance == references[i];
+
+    drawLCRSelectorButton(
+      lcrLayout.referencePresets[i],
+      labels[i],
+      selected
+    );
+  }
+
+  // Draw the common selector Cancel button.
+  drawLCRSelectorButton(
+    lcrLayout.selectorCancel,
+    "Cancel",
+    false
+  );
+}
+
+
+
+// Close any active Measure selector and restore the complete Measure screen.
+// The dynamic display is marked dirty so current measurement values are
+// restored immediately after the static interface is redrawn.
+void returnToLCRMeasureScreen()
+{
+  lcrUIState = LCR_UI_NORMAL;
+  lcrDisplayDirty = true;
+
+  drawLCRScreen();
+}
+
+
+// Draw the complete static LCR analyzer interface.
+// Common navigation is drawn first, followed by the static content and
+// soft keys belonging to the currently selected analyzer tab.
 void drawLCRScreen()
 {
   display.fillScreen(BGCOLOR);
 
-  display.setTextColor(TXTCOLOR, BGCOLOR);
+  drawLCRHeader();
+  drawLCRTabs();
 
-  display.setTextSize(2);
-  display.setCursor(60, 20);
-  display.print("LCR ANALYZER");
+  switch (lcrTab) {
+    case LCR_TAB_MEASURE:
+      drawMeasureScreen();
+      drawMeasureSoftKeys();
+      break;
 
-  display.setTextSize(1);
-
-  display.setCursor(LABEL_X, FREQ_Y);
-  display.print("Frequency");
-
-  display.setCursor(LABEL_X, Z_Y);
-  display.print("Impedance");
-
-  display.setCursor(LABEL_X, PHASE_Y);
-  display.print("Phase");
-
-  display.setCursor(LABEL_X,R_Y);
-  display.print("Resistance");
-
-  display.setCursor(LABEL_X,X_Y);
-  display.print("Reactance");
+    case LCR_TAB_SWEEP:
+    case LCR_TAB_CALIBRATION:
+    case LCR_TAB_SETTINGS:
+      break;
+  }
 }
 
 
-// Update the dynamic measurement fields on the LCR display.
-//
-// Only values that change during operation are drawn here.
-// The static screen layout is created once by drawLCRScreen().
-void updateLCRDisplay(const MeasurementPoint &m)
+
+// Update all dynamic fields on the Measure tab.
+// Static labels and navigation remain untouched so continuous measurement
+// updates do not require redrawing the complete interface.
+void updateLCRDisplay(const MeasurementPoint &m,
+                      const MeasurementSettings &settings)
 {
-  display.setTextColor(TXTCOLOR, BGCOLOR);
-
-  // Frequency
-  clearValueField(VALUE_X, FREQ_Y);
-
-  display.setCursor(VALUE_X, FREQ_Y);
-  display.print(m.frequency);
-  display.print(" Hz");
-
-  // Impedance
-  clearValueField(VALUE_X, Z_Y);
-
-  display.setCursor(VALUE_X, Z_Y);
-  display.print(m.impedance, 2);
-  display.print(" Ohm");
-
-  // Phase
-  clearValueField(VALUE_X, PHASE_Y);
-
-  display.setCursor(VALUE_X, PHASE_Y);
-  display.print(m.phaseDeg, 2);
-  display.print(" deg");
-
-  // Resistance
-  clearValueField(VALUE_X, R_Y);
-
-  display.setCursor(VALUE_X, R_Y);
-  display.print(m.resistance, 2);
-
-  // Reactance
-  clearValueField(VALUE_X, X_Y);
-
-  display.setCursor(VALUE_X, X_Y);
-  display.print(m.reactance, 2);
+  drawLCRPrimaryMeasurement(m);
+  drawLCRSecondaryMeasurement(m);
+  drawLCRMeasurementContext(m, settings);
 }
 
 

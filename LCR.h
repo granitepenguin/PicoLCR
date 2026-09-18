@@ -1,7 +1,4 @@
-#pragma once
-
-#include <Arduino.h>
-
+// LCR.h
 // ====================================================================
 // LCR Instrument Interface
 //
@@ -16,6 +13,10 @@
 //    Public API
 //
 // ====================================================================
+
+#pragma once
+
+#include <Arduino.h>
 
 
 // Results from a single impedance measurement.
@@ -55,9 +56,120 @@ struct MeasurementPoint
 struct MeasurementSettings
 {
   uint32_t frequency;          // Test frequency (Hz)
-
   float referenceResistance;   // Selected reference resistor (Ohms)
 };
+
+// Stores the active measurement configuration for the LCR analyzer.
+// These settings are shared by measurement acquisition and UI controls
+// such as the frequency and reference-resistor selectors.
+extern MeasurementSettings lcrSettings;
+
+// Holds a numeric measurement formatted for display.
+// The value and engineering unit are kept separate so the renderer can
+// use different font sizes while treating them as one measurement.
+struct LCRFormattedValue
+{
+  char value[16];
+  char unit[8];
+};
+
+
+
+// LCR tab displays
+//
+// enumberation of all the major LCR tabs
+enum LCRTab
+{
+  LCR_TAB_MEASURE,
+  LCR_TAB_SWEEP,
+  LCR_TAB_CALIBRATION,
+  LCR_TAB_SETTINGS
+};
+
+extern LCRTab lcrTab;
+
+
+// Identifies the operating state of the LCR Measure tab.
+// LIVE continuously acquires measurements while HOLD preserves the
+// most recently acquired measurement on the display.
+enum LCRMeasureState
+{
+  LCR_MEASURE_LIVE,
+  LCR_MEASURE_HOLD
+};
+
+extern LCRMeasureState lcrMeasureState;
+
+
+// Identifies the current LCR user-interface state.
+// NORMAL displays the active analyzer tab, while selector states temporarily
+// replace the tab content with a modal control.
+enum LCRUIState
+{
+  LCR_UI_NORMAL,
+  LCR_UI_FREQ_SELECT,
+  LCR_UI_REF_SELECT
+};
+
+extern LCRUIState lcrUIState;
+
+
+// Defines a rectangular region of the LCR user interface
+// The same geometry is used for both drawing and touch detection
+struct LCRRect
+{
+  int16_t x;
+  int16_t y;
+  int16_t w;
+  int16_t h;
+};
+
+
+// Defines the major screen regions used by the LCR analyzer
+// Common regions are shared by every tab, while measurement-specific
+// regions subdivide the content area for the Measure display
+struct LCRLayout
+{
+  LCRRect header;
+  LCRRect tabs;
+  LCRRect content;
+  LCRRect footer;
+
+  // Content subdivisions
+  LCRRect primary;
+  LCRRect secondary;
+  LCRRect context;
+
+  LCRRect measureSoftKeys[4];
+
+  LCRRect selector;
+  LCRRect frequencyPresets[4];
+  LCRRect referencePresets[3];
+  LCRRect selectorCancel;
+};
+
+extern LCRLayout lcrLayout;
+
+
+//
+// screen geometry functions
+//
+
+// Calculate the common screen regions shared by every LCR analyzer tab.
+void calculateLCRLayout();
+
+// Calculate regions specific to the Measure tab.
+void calculateMeasureLayout();
+
+// Calculate geometry shared by modal selector screens.
+void calculateSelectorLayout();
+
+// Calculate button geometry for the frequency selector.
+void calculateFrequencySelectorLayout();
+
+// Calculate button geometry for the reference-resistor selector.
+void calculateReferenceSelectorLayout();
+
 
 
 // Measurement backend.
@@ -94,5 +206,12 @@ void updateLCR();
 // Draw the static LCR instrument user interface.
 void drawLCRScreen();
 
-// Update the dynamic measurement fields on the display.
-void updateLCRDisplay(const MeasurementPoint &m);
+// Update the dynamic Measure-tab fields from the latest measurement
+void updateLCRDisplay(const MeasurementPoint &m,
+                      const MeasurementSettings &settings);
+
+// Format raw SI measurements into human-readable engineering units.
+LCRFormattedValue formatCapacitance(float farads);
+LCRFormattedValue formatInductance(float henries);
+LCRFormattedValue formatImpedance(float ohms);
+LCRFormattedValue formatFrequency(uint32_t frequencyHz);
