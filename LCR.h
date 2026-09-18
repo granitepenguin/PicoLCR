@@ -121,12 +121,16 @@ extern SweepSettings lcrSweepSettings;
 
 // Stores the runtime state of an active LCR frequency sweep.
 // Configuration remains in SweepSettings while this structure tracks
-// progress through the currently executing sweep.
+// progress and timing through the currently executing sweep.
 struct SweepExecution
 {
   uint32_t totalPoints;
   uint32_t currentPoint;
   uint32_t currentFrequency;
+
+  uint32_t startTime;
+  uint32_t lastPointTime;
+
   bool active;
 };
 
@@ -248,6 +252,10 @@ struct LCRLayout
   LCRRect sweepSetupRows[5];
   LCRRect sweepModePresets[2];
   LCRRect sweepButton;
+  LCRRect sweepProgress;
+  LCRRect sweepCancelButton;
+  LCRRect sweepResultsSetupButton;
+  LCRRect sweepResultsSweepButton;
 
   LCRRect footer;
 
