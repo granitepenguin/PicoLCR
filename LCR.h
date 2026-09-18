@@ -151,7 +151,8 @@ enum LCRUIState
 {
   LCR_UI_NORMAL,
   LCR_UI_FREQ_SELECT,
-  LCR_UI_REF_SELECT
+  LCR_UI_REF_SELECT,
+  LCR_UI_SWEEP_MODE_SELECT
 };
 
 extern LCRUIState lcrUIState;
@@ -204,6 +205,7 @@ struct LCRLayout
 
   // Sweep setup tab
   LCRRect sweepSetupRows[5];
+  LCRRect sweepModePresets[2];
 
   LCRRect footer;
 
@@ -241,6 +243,9 @@ void calculateFrequencySelectorLayout();
 
 // Calculate button geometry for the reference-resistor selector.
 void calculateReferenceSelectorLayout();
+
+// Calculate button geometry for the Sweep-mode selector.
+void calculateSweepModeSelectorLayout();
 
 
 

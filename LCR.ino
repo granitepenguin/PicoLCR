@@ -355,6 +355,11 @@ void updateLCR()
     return;
   }
 
+  if (lcrUIState == LCR_UI_SWEEP_MODE_SELECT) {
+    handleLCRSweepModeSelectorTouch(x, y);
+    return;
+  }
+
   //
   // Sweep Setup controls
   //
@@ -760,6 +765,18 @@ void calculateReferenceSelectorLayout()
 }
 
 
+// Calculate Sweep-mode selector geometry using the shared selector grid.
+// The two available modes are automatically positioned within the common
+// modal selector region.
+void calculateSweepModeSelectorLayout()
+{
+  calculateSelectorButtonGrid(
+    lcrLayout.sweepModePresets,
+    2
+  );
+}
+
+
 
 // Initialize the LCR analyzer and calculate all currently supported UI
 // geometry before drawing the instrument screen.
@@ -771,6 +788,7 @@ void initializeLCR()
   calculateSelectorLayout();
   calculateFrequencySelectorLayout();
   calculateReferenceSelectorLayout();
+  calculateSweepModeSelectorLayout();
 
   initializeLCRValueSprite();
 
@@ -1085,6 +1103,7 @@ void handleLCRReferenceSelectorTouch(uint16_t x, uint16_t y)
 // Mode and Step are added in subsequent Sweep configuration milestones.
 void handleLCRSweepSetupTouch(uint16_t x, uint16_t y)
 {
+  // Open the Sweep-Start selector.
   if (pointInLCRRect(
         x,
         y,
@@ -1100,6 +1119,7 @@ void handleLCRSweepSetupTouch(uint16_t x, uint16_t y)
     return;
   }
 
+  // Open the Sweep-Stop selector.
   if (pointInLCRRect(
         x,
         y,
@@ -1112,6 +1132,68 @@ void handleLCRSweepSetupTouch(uint16_t x, uint16_t y)
       LCR_UI_FREQ_SELECT;
 
     drawLCRFrequencySelector();
+    return;
+  }
+
+  // Open the Sweep-mode selector.
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.sweepSetupRows[2])) {
+
+    lcrUIState =
+      LCR_UI_SWEEP_MODE_SELECT;
+
+    drawLCRSweepModeSelector();
+    return;
+  }
+}
+
+
+// Handle touch input while the Sweep-mode selector is displayed.
+// Selecting a mode updates the active Sweep configuration and returns to
+// Sweep Setup; Cancel returns without modifying the current mode.
+void handleLCRSweepModeSelectorTouch(uint16_t x, uint16_t y)
+{
+  // Linear
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.sweepModePresets[0])) {
+
+    lcrSweepSettings.mode =
+      LCR_SWEEP_LINEAR;
+
+    lcrUIState = LCR_UI_NORMAL;
+
+    drawLCRScreen();
+    return;
+  }
+
+  // Logarithmic
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.sweepModePresets[1])) {
+
+    lcrSweepSettings.mode =
+      LCR_SWEEP_LOG;
+
+    lcrUIState = LCR_UI_NORMAL;
+
+    drawLCRScreen();
+    return;
+  }
+
+  // Cancel
+  if (pointInLCRRect(
+        x,
+        y,
+        lcrLayout.selectorCancel)) {
+
+    lcrUIState = LCR_UI_NORMAL;
+
+    drawLCRScreen();
     return;
   }
 }
@@ -1467,6 +1549,54 @@ void drawLCRSweepSetup()
   }
 }
 
+
+// Draw the Sweep-mode selector over the Sweep Setup screen.
+// The currently active mode is highlighted so the existing configuration
+// remains visible before the user makes a selection.
+void drawLCRSweepModeSelector()
+{
+  const LCRRect &r = lcrLayout.selector;
+
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  const char *title = "Select Sweep Mode";
+
+  int16_t titleWidth = strlen(title) * 6;
+
+  display.setCursor(
+    r.x + (r.w - titleWidth) / 2,
+    r.y + r.h * 7 / 100
+  );
+
+  display.print(title);
+
+  drawLCRSelectorButton(
+    lcrLayout.sweepModePresets[0],
+    "Linear",
+    lcrSweepSettings.mode == LCR_SWEEP_LINEAR
+  );
+
+  drawLCRSelectorButton(
+    lcrLayout.sweepModePresets[1],
+    "Log",
+    lcrSweepSettings.mode == LCR_SWEEP_LOG
+  );
+
+  drawLCRSelectorButton(
+    lcrLayout.selectorCancel,
+    "Cancel",
+    false
+  );
+}
 
 
 // Draw the Sweep Setup footer.
