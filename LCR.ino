@@ -110,6 +110,12 @@ SweepSettings lcrSweepSettings = {
   10                   // Logarithmic density: 10 points/decade
 };
 
+// Stores the results of the most recently completed or active sweep.
+// The point count identifies how many entries currently contain valid data.
+SweepPoint lcrSweepPoints[LCR_MAX_SWEEP_POINTS];
+
+uint16_t lcrSweepPointCount = 0;
+
 // Off-screen drawing buffer used for dynamic LCR measurement fields.
 // Rendering into RAM first allows the completed field to be transferred
 // to the TFT at once, reducing visible erase/redraw flicker.
@@ -197,6 +203,25 @@ const SweepDensityPreset sweepDensityPresets[] = {
 
 constexpr uint8_t SWEEP_DENSITY_PRESET_COUNT =
   sizeof(sweepDensityPresets) / sizeof(sweepDensityPresets[0]);
+
+//
+// Convert a complete impedance measurement into the compact representation
+// retained by the Sweep engine. Acquisition-specific values that are not
+// required for Sweep plots are intentionally discarded.
+SweepPoint makeSweepPoint(const MeasurementPoint &measurement)
+{
+  SweepPoint point;
+
+  point.frequency = measurement.frequency;
+  point.impedance = measurement.impedance;
+  point.phaseDeg = measurement.phaseDeg;
+  point.resistance = measurement.resistance;
+  point.reactance = measurement.reactance;
+  point.esr = measurement.esr;
+  point.q = measurement.q;
+
+  return point;
+}
 
 
 // measurement objects

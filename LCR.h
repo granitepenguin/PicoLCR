@@ -48,6 +48,30 @@ struct MeasurementPoint
 };
 
 
+// Stores the measurement data retained for one frequency-sweep point.
+// This is intentionally smaller than MeasurementPoint so large sweeps can
+// be retained in RAM without storing intermediate acquisition values.
+struct SweepPoint
+{
+  uint32_t frequency;
+
+  float impedance;
+  float phaseDeg;
+
+  float resistance;
+  float reactance;
+
+  float esr;
+  float q;
+};
+
+// Maximum number of measurement points retained for one frequency sweep.
+// This accommodates the current full-range 100 Hz-step linear sweep while
+// bounding RAM usage for sweep-result storage.
+constexpr uint16_t LCR_MAX_SWEEP_POINTS = 1200;
+extern SweepPoint lcrSweepPoints[LCR_MAX_SWEEP_POINTS];
+extern uint16_t lcrSweepPointCount;
+
 // Measurement configuration.
 //
 // Defines the parameters required to perform a single measurement.
