@@ -91,6 +91,10 @@ MeasurementSettings lcrSettings = {
   1000.0f    // Reference resistor: 1 kOhm
 };
 
+// Stores the most recently acquired LCR measurement.
+// LIVE updates this value continuously while HOLD preserves it for display.
+MeasurementPoint lcrMeasurement = {};
+
 // Off-screen drawing buffer used for dynamic LCR measurement fields.
 // Rendering into RAM first allows the completed field to be transferred
 // to the TFT at once, reducing visible erase/redraw flicker.
@@ -243,7 +247,6 @@ void exitLCRMode()
 // HOLD preserves the last measurement while leaving all UI controls active.
 void updateLCR()
 {
-  static MeasurementPoint measurement;
   static uint32_t lastDisplayUpdate = 0;
   static bool lastPressed = false;
 
@@ -255,7 +258,7 @@ void updateLCR()
       lcrMeasureState == LCR_MEASURE_LIVE &&
       lcrUIState == LCR_UI_NORMAL) {
 
-    measurement = measureImpedance(lcrSettings);
+    lcrMeasurement = measureImpedance(lcrSettings);
 
     if (lcrDisplayDirty ||
         now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
@@ -263,7 +266,7 @@ void updateLCR()
       lastDisplayUpdate = now;
       lcrDisplayDirty = false;
 
-      updateLCRDisplay(measurement, lcrSettings);
+      updateLCRDisplay(lcrMeasurement, lcrSettings);
     }
   }
 
@@ -1572,16 +1575,27 @@ void drawLCRReferenceSelector()
 
 
 
-// Close any active Measure selector and restore the complete Measure screen.
-// The dynamic display is marked dirty so current measurement values are
-// restored immediately after the static interface is redrawn.
+// Close the active Measure selector and restore the Measure screen.
+// When HOLD is active, the preserved measurement is immediately redrawn;
+// LIVE instead marks the display dirty for the next acquisition cycle.
 void returnToLCRMeasureScreen()
 {
   lcrUIState = LCR_UI_NORMAL;
-  lcrDisplayDirty = true;
 
   drawLCRScreen();
+
+  if (lcrMeasureState == LCR_MEASURE_HOLD) {
+    updateLCRDisplay(
+      lcrMeasurement,
+      lcrSettings
+    );
+
+    lcrDisplayDirty = false;
+  } else {
+    lcrDisplayDirty = true;
+  }
 }
+
 
 
 // Draw the complete static LCR analyzer interface.

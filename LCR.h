@@ -64,6 +64,11 @@ struct MeasurementSettings
 // such as the frequency and reference-resistor selectors.
 extern MeasurementSettings lcrSettings;
 
+// Stores the most recently acquired LCR measurement.
+// Keeping the latest result as instrument state allows HOLD measurements
+// to be restored after temporary selector screens are closed.
+extern MeasurementPoint lcrMeasurement;
+
 // Holds a numeric measurement formatted for display.
 // The value and engineering unit are kept separate so the renderer can
 // use different font sizes while treating them as one measurement.
