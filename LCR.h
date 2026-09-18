@@ -64,6 +64,36 @@ struct MeasurementSettings
 // such as the frequency and reference-resistor selectors.
 extern MeasurementSettings lcrSettings;
 
+// Stores the most recently acquired LCR measurement.
+// Keeping the latest result as instrument state allows HOLD measurements
+// to be restored after temporary selector screens are closed.
+extern MeasurementPoint lcrMeasurement;
+
+
+// Identifies how measurement frequencies are distributed during a sweep.
+// LINEAR uses a fixed frequency step; LOG uses a logarithmic distribution.
+enum LCRSweepMode
+{
+  LCR_SWEEP_LINEAR,
+  LCR_SWEEP_LOG
+};
+
+// Stores the configuration used to perform an LCR frequency sweep.
+// Linear sweeps use stepFrequency; logarithmic sweeps use pointsPerDecade.
+struct SweepSettings
+{
+  uint32_t startFrequency;
+  uint32_t stopFrequency;
+
+  LCRSweepMode mode;
+
+  uint32_t stepFrequency;
+  uint16_t pointsPerDecade;
+};
+
+// Stores the active sweep configuration used by the LCR analyzer.
+extern SweepSettings lcrSweepSettings;
+
 // Holds a numeric measurement formatted for display.
 // The value and engineering unit are kept separate so the renderer can
 // use different font sizes while treating them as one measurement.
@@ -101,6 +131,19 @@ enum LCRMeasureState
 extern LCRMeasureState lcrMeasureState;
 
 
+// Identifies the current operating state of the Sweep tab.
+// A sweep begins in SETUP, transitions through RUNNING, and automatically
+// displays RESULTS when acquisition is complete.
+enum LCRSweepState
+{
+  LCR_SWEEP_SETUP,
+  LCR_SWEEP_RUNNING,
+  LCR_SWEEP_RESULTS
+};
+
+extern LCRSweepState lcrSweepState;
+
+
 // Identifies the current LCR user-interface state.
 // NORMAL displays the active analyzer tab, while selector states temporarily
 // replace the tab content with a modal control.
@@ -108,11 +151,25 @@ enum LCRUIState
 {
   LCR_UI_NORMAL,
   LCR_UI_FREQ_SELECT,
-  LCR_UI_REF_SELECT
+  LCR_UI_REF_SELECT,
+  LCR_UI_SWEEP_MODE_SELECT,
+  LCR_UI_SWEEP_STEP_SELECT,
+  LCR_UI_SWEEP_DENSITY_SELECT
 };
 
 extern LCRUIState lcrUIState;
 
+// Identifies which frequency setting is currently being edited.
+// The common frequency selector uses this target to update either the
+// Measure frequency or one of the Sweep frequency limits.
+enum LCRFrequencyTarget
+{
+  LCR_FREQ_MEASURE,
+  LCR_FREQ_SWEEP_START,
+  LCR_FREQ_SWEEP_STOP
+};
+
+extern LCRFrequencyTarget lcrFrequencyTarget;
 
 // Defines a rectangular region of the LCR user interface
 // The same geometry is used for both drawing and touch detection
@@ -135,20 +192,34 @@ constexpr uint8_t LCR_MAX_SELECTOR_BUTTONS = 8;
 struct LCRLayout
 {
   LCRRect header;
-  LCRRect tabs;
-  LCRRect content;
-  LCRRect footer;
 
+  LCRRect backButton;
+
+  LCRRect tabs;
+  LCRRect tabButtons[4];
+
+  // Measurement tab
+  LCRRect content;
   // Content subdivisions
   LCRRect primary;
   LCRRect secondary;
   LCRRect context;
 
+  // Sweep setup tab
+  LCRRect sweepSetupRows[5];
+  LCRRect sweepModePresets[2];
+
+  LCRRect footer;
+
+  // Submenus
   LCRRect measureSoftKeys[4];
 
+  // Softkey screen info
   LCRRect selector;
   LCRRect frequencyPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect referencePresets[LCR_MAX_SELECTOR_BUTTONS];
+  LCRRect sweepStepPresets[LCR_MAX_SELECTOR_BUTTONS];
+  LCRRect sweepDensityPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect selectorCancel;
 };
 
@@ -165,6 +236,9 @@ void calculateLCRLayout();
 // Calculate regions specific to the Measure tab.
 void calculateMeasureLayout();
 
+// Calculate interactive row geometry for the Sweep Setup screen.
+void calculateSweepLayout();
+
 // Calculate geometry shared by modal selector screens.
 void calculateSelectorLayout();
 
@@ -173,6 +247,16 @@ void calculateFrequencySelectorLayout();
 
 // Calculate button geometry for the reference-resistor selector.
 void calculateReferenceSelectorLayout();
+
+// Calculate button geometry for the Sweep-mode selector.
+void calculateSweepModeSelectorLayout();
+
+// Calculate button geometry for the linear Sweep-step selector.
+void calculateSweepStepSelectorLayout();
+
+// Calculate button geometry for the logarithmic Sweep-density selector.
+void calculateSweepDensitySelectorLayout();
+
 
 
 
