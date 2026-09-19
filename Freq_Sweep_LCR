@@ -1,0 +1,1359 @@
+// PicoLCR_Sweep_v3_2.ino  
+// -----------------------------------------------------------------------------
+// Sweep + Goertzel single-bin DFT impedance measurement.
+// Round-robin ADC -> FIFO -> DMA -> RAM capture path.
+//
+// 3.2 -- 
+//
+//   * CAPTURE PATH REWRITTEN. analogRead() is removed The ADC now "free-runs" in
+//     round-robin mode over ADC0/ADC1 with the FIFO feeding a DMA channel that
+//     writes straight into one interleaved buffer. CPU timing doesn't matter. 
+//
+//   * introduced proper adc overclocking with selectable profiles g1,g2,g3 etc or custom setting.
+//
+//   * SAMPLE RATE IS SCHEDULED PER POINT. New cfg.m_target holds samples per
+//     cycle per channel roughly constant by varying the ADC divisor with
+//     frequency, capped at the hardware ceiling.
+//
+//   * SINGLE INTERLEAVED BUFFER. DMA cannot scatter alternating samples into
+//     two arrays, so buf_total[]/buf_dut[] are replaced by buf_rr[] and the
+//     Goertzel / mean / saturation helpers take a stride and an offset. Same
+//     total RAM (16 kB), one fewer copy.
+//
+//   * CAPTURE INTEGRITY CHECKED PER RECORD. FIFO over/underflow and the ADC's
+//     post-capture AINSEL are both verified. An overflow slips channel parity
+//     for the whole remainder of the buffer, which would otherwise look like a
+//     180 degree phase bug rather than a dropped sample. See FLAG_ADC_ERR.
+//
+//   * 'y' COMMAND: channel-match self-test. Tie GP26 and GP27 to the same
+//     buffered node. Ideally just after the gain stage from the AD9833 This separates capture-path error from
+//     front-end error and is the test that validates the de-skew model.
+//
+// ==============================================
+// TOPOLOGY (2-wire, hard-coded R_sense):
+//
+//   AD9833 out --+-- R_sense --+-- DUT --+-- GND
+//                |             |
+//              ADC0          ADC1
+//            (V_total)      (V_DUT)
+//
+//   Z_DUT = R_sense * V_DUT / (V_total - V_DUT)      [complex]
+//
+// CAPTURE MEMORY LAYOUT:
+//   buf_rr[0] = ADC0, buf_rr[1] = ADC1, buf_rr[2] = ADC0, ...
+//   Channel A (V_total) is stride 2 offset 0. Channel B (V_DUT) is offset 1.
+//   ADC1 is sampled ONE AGGREGATE PERIOD after its paired ADC0 sample.
+//
+// BUILD NOTES:
+//   Board:  Raspberry Pi Pico W  (arduino-pico core by Earle Philhower)
+//   CPU Speed: 192 MHz if the menu offers it. Otherwise setup() calls
+//              set_sys_clock_khz(192000) itself. If neither succeeds the code
+//              still runs -- it falls back to whatever clk_adc it ends up with
+//              and derates the rate ceiling accordingly. Check 'k' output.
+//
+// SERIAL COMMANDS (115200 baud):
+//   f<Hz>   excitation frequency (live mode)      m       toggle live monitor
+//   a<Hz>   sweep start                          b<Hz>   sweep stop
+//   p<Hz>   sweep step                           S       run sweep (q aborts)
+//   d       re-dump last sweep from RAM          r<Ohm>  set R_sense
+//   g<0|1|2> profile: fast / normal / precise
+//   n<cyc>  target cycles per capture            v<M>    averages per point
+//   c<spc>  target samples/cycle/channel         i<N>    record length floor
+//   j<N>    record length ceiling                x<ms>   per-point time budget
+//   e<ms>   settle after freq step               w       toggle Hann window
+//   y       channel-match / skew self-test       t       timing breakdown
+//   k       ADC + clock report                   u       raw dump of last capture
+//   o<1|2|3> CLK_ADC_DIV: pll_sys / half / third
+//                                                ?  settings    h  help
+// -----------------------------------------------------------------------------
+
+#include <Arduino.h>
+#include <SPI.h>
+#include <math.h>
+
+#include <pico/stdlib.h>
+#include <hardware/adc.h>
+#include <hardware/dma.h>
+#include <hardware/clocks.h>
+#include <hardware/vreg.h>
+#include <hardware/address_mapped.h>
+
+#include "AD9833_Driver.h"   // unchanged
+
+// ---- FIXED HARDWARE ---------------------------------------------------------
+// These pins are breadboard setup dependent. Check YOUR pinouts incase hardware is different. 
+static const uint8_t AD9833_FSYNC_PIN = 5;
+static const uint8_t ADC0_GPIO        = 26;   // V_total   -> ADC input 0
+static const uint8_t ADC1_GPIO        = 27;   // V_DUT     -> ADC input 1
+static const uint8_t ADC_CH_A         = 0;    // V_total
+static const uint8_t ADC_CH_B         = 1;    // V_DUT
+static const float   ADC_VREF         = 3.3f;
+static const float   ADC_FULLSCALE    = 4095.0f;
+
+// Target system clock. clk_adc is then sourced from PLL_SYS / 2 = 96 MHz, which
+// gives 96e6 / 96 = 1.000 MS/s aggregate exactly.
+//
+static const uint32_t TARGET_SYS_KHZ = 192000;
+
+// Bump the core regulator from the 1.10 V default. 192 MHz usually runs fine
+// without this, but we are overclocking clk_sys and clk_adc together and the
+// margin is cheap. Set to 0 to leave the regulator alone.
+#define PICOLCR_BUMP_VREG 1
+
+// Record length ceiling PER CHANNEL. The interleaved buffer is twice this.
+// 2 x 4000 x 2 bytes = 16 kB, same footprint as v2's two separate buffers.
+static const uint16_t N_ABS_MAX = 4000;
+
+// =============================================================================
+//                              TUNING BLOCK
+// =============================================================================
+// Everything that trades measurement time against accuracy lives here.
+//
+// m_target        Samples per cycle per channel. The ADC divisor is
+//                recomputed at every frequency point to hold this roughly
+//                constant, so fs_agg = 2 * m_target * f, clamped to the
+//                hardware ceiling (clk_adc / 96). Above the crossover
+//                frequency fs_agg pins at the ceiling and the achieved
+//                samples/cycle falls as fs_ch / f instead.
+//
+// target_cycles  Whole cycles of the excitation integrated per capture. Primary
+//                accuracy knob. Noise falls as sqrt(cycles) and the Goertzel
+//                noise bandwidth narrows as fs/n.
+//
+// n_min          Record length floor in samples per channel. Guards against a
+//                record too short for the Goertzel to integrate.
+//
+// n_max          Record length ceiling in samples per channel. Caps RAM and
+//                time at low frequency.
+//
+// averages       Repeat captures per frequency point, averaged in the Z domain.
+//                Noise falls as sqrt(averages). Prefer raising target_cycles
+//                first; raise averages when the limiter is drift or
+//                intermittent interference rather than white noise.
+//
+// window         Hann window. Still necessary while  the AD9833 crystal is
+//                asynchronous to the RP2040. Costs ~1.8 dB SNR, buys ~31 dB sidelobe suppression, and its
+//                coherent gain cancels in the V_DUT/V_Rsense ratio so it does
+//                not bias the result.
+//
+// settle_ms      Delay after a frequency change before capturing. The AD9833
+//                retunes within one MCLK, so this is for the analog
+//                front end.
+//
+// max_point_ms   Per-point capture time budget. Trims target_cycles when a low
+//                frequency point would otherwise dominate the sweep. 0 = off.
+//                n_min always wins over this.
+//
+// min_spc        Samples per cycle below which the point is flagged marginal.
+//                Note this is now normally satisfied by construction below the
+//                crossover frequency, so it mostly catches the high end.
+//
+// low_snr_counts Peak amplitude across R_sense, in ADC counts, below which the
+//                point is flagged. 20 counts is about 16 mV peak.
+// =============================================================================
+
+struct MeasCfg {
+  uint16_t m_target;         // samples per cycle per channel
+  uint16_t target_cycles;
+  uint16_t n_min;
+  uint16_t n_max;
+  uint8_t  averages;
+  bool     window;
+  uint16_t settle_ms;
+  uint16_t max_point_ms;
+  float    min_spc;
+  float    low_snr_counts;
+};
+
+static const MeasCfg PROFILE_FAST = {
+  /* m_target       */   32,
+  /* target_cycles  */    8,
+  /* n_min          */  256,
+  /* n_max          */ 2048,
+  /* averages       */    1,
+  /* window         */ true,
+  /* settle_ms      */    3,
+  /* max_point_ms   */   10,
+  /* min_spc        */  8.0f,
+  /* low_snr_counts */ 20.0f
+};
+
+static const MeasCfg PROFILE_NORMAL = {
+  /* m_target       */   50,
+  /* target_cycles  */   16,
+  /* n_min          */  512,
+  /* n_max          */ 4000,
+  /* averages       */    1,
+  /* window         */ true,
+  /* settle_ms      */    5,
+  /* max_point_ms   */   20,
+  /* min_spc        */  8.0f,
+  /* low_snr_counts */ 20.0f
+};
+
+static const MeasCfg PROFILE_PRECISE = {
+  /* m_target       */   64,
+  /* target_cycles  */   64,
+  /* n_min          */ 1024,
+  /* n_max          */ 4000,
+  /* averages       */    4,
+  /* window         */ true,
+  /* settle_ms      */   10,
+  /* max_point_ms   */   60,
+  /* min_spc        */  8.0f,
+  /* low_snr_counts */ 20.0f
+};
+
+static MeasCfg g_cfg = PROFILE_NORMAL;
+
+// ---- OTHER DEFAULTS ---------------------------------------------------------
+static const float    DEFAULT_R_SENSE = 9870.0f;  // measured value of the 10k resistor used in single configuration testing
+static const uint32_t DEFAULT_HZ      = 1000;
+
+// Sweep range for this build. Raise the stop once the front end is verified;
+// nothing in the capture path cares. 'a' / 'b' / 'p' change these at runtime.
+static const uint32_t SWEEP_START_HZ  = 1000;
+static const uint32_t SWEEP_STOP_HZ   = 10000;
+static const uint32_t SWEEP_STEP_HZ   = 1000;
+
+// Sign convention guard. VALIDATE ONCE: a 100 nF cap at 1 kHz must read close
+// to -90 deg. If it reads +90 deg, set this to -1.0f -- it flips the phase
+// convention and the de-skew rotation together, consistently.
+static const float PHASOR_CONJ = +1.0f;
+
+static const float HANN_COHERENT_GAIN = 0.5f;
+
+// ---- CAPTURE BUFFER ---------------------------------------------------------
+// Interleaved: even indices ADC0 (V_total), odd indices ADC1 (V_DUT).
+static uint16_t buf_rr[2 * N_ABS_MAX];
+
+// ---- SWEEP STORAGE ----------------------------------------------------------
+// CSV streams as the sweep runs, so this array is only for the 'd' re-dump.
+static const uint16_t MAX_SWEEP_POINTS = 256;
+
+struct MeasPoint {
+  uint32_t f_hz;
+  float    z_mag;      // ohms
+  float    phi_deg;    // signed, -180..+180
+  float    Rs;         // ohms
+  float    Xs;         // ohms
+  float    v_dut_mv;   // mV rms at f_exc
+  float    v_rs_mv;    // mV rms at f_exc
+  uint16_t n;          // samples per channel per capture
+  uint16_t cycles;     // whole cycles per capture
+  float    fs_hz;      // per-channel sample rate, programmed
+  float    fs_meas_hz; // per-channel sample rate, MEASURED
+  float    spc;        // achieved samples per cycle per channel
+  uint32_t period_cyc; // ADC clocks per conversion slot
+  float    skew_deg;   // inter-channel skew at this frequency
+  uint8_t  averages;
+  uint32_t cap_us;
+  uint32_t calc_us;
+  uint8_t  flags;
+};
+
+static const uint8_t FLAG_OK           = 0x00;
+static const uint8_t FLAG_LOW_SNR      = 0x01;  // V_Rsense too small to trust
+static const uint8_t FLAG_MARGINAL_FS  = 0x02;  // below cfg.min_spc
+static const uint8_t FLAG_SATURATE     = 0x04;  // ADC hit a rail
+static const uint8_t FLAG_NONPHYSICAL  = 0x08;  // Re(Z) < 0, impossible
+static const uint8_t FLAG_ADC_ERR      = 0x10;  // FIFO over/underflow or
+                                                // channel parity slip
+static const uint8_t FLAG_FS_MISMATCH  = 0x20;  // measured rate != programmed
+
+static MeasPoint g_sweep[MAX_SWEEP_POINTS];
+static uint16_t  g_sweep_count = 0;
+
+// ---- RUNTIME ----------------------------------------------------------------
+static float    g_rsense_ohms = DEFAULT_R_SENSE;
+static uint32_t g_freq_hz     = DEFAULT_HZ;
+static uint32_t g_sw_start    = SWEEP_START_HZ;
+static uint32_t g_sw_stop     = SWEEP_STOP_HZ;
+static uint32_t g_sw_step     = SWEEP_STEP_HZ;
+static bool     g_live        = true;
+static const char* g_profile_name = "normal";
+
+// ---- CAPTURE PATH STATE -----------------------------------------------------
+static uint32_t g_adc_clk_hz   = 0;      // measured, not assumed
+static float    g_fs_agg_max   = 0.0f;   // clk_adc / 96
+static uint32_t g_period_cyc   = 96;     // ADC clocks per conversion slot
+static float    g_fs_agg       = 0.0f;   // aggregate S/s, both channels
+static float    g_fs_hz        = 0.0f;   // per-channel S/s
+static float    g_skew_s       = 0.0f;   // ADC0 -> ADC1, seconds
+static int      g_dma_chan     = -1;
+static bool     g_sysclk_ok    = false;
+
+// CLK_ADC_DIV integer selection: 1 = pll_sys, 2 = pll_sys/2, 3 = pll_sys/3.
+static uint32_t g_adc_div_sel  = 2;
+
+// Measured, not programmed. Populated by every captureRoundRobin() call.
+static float    g_fs_agg_meas  = 0.0f;   // aggregate S/s actually achieved
+static float    g_fs_meas_ch   = 0.0f;   // per-channel equivalent
+static uint32_t g_cap_run_us   = 0;      // ADC run duration of last capture
+static uint16_t g_cap_n_last   = 0;      // n_per_ch of last capture
+
+AD9833_Driver dds(AD9833_FSYNC_PIN);
+
+// ---- COMPLEX HELPERS --------------------------------------------------------
+struct Phasor { float re, im; };
+
+static inline Phasor pSub(Phasor a, Phasor b)  { return { a.re - b.re, a.im - b.im }; }
+static inline Phasor pScale(Phasor a, float s) { return { a.re * s, a.im * s }; }
+static inline float  pMag(Phasor a)            { return sqrtf(a.re*a.re + a.im*a.im); }
+
+static inline Phasor pDiv(Phasor a, Phasor b) {
+  float d = b.re*b.re + b.im*b.im;
+  if (d <= 0.0f) return { 0.0f, 0.0f };
+  return { (a.re*b.re + a.im*b.im) / d,
+           (a.im*b.re - a.re*b.im) / d };
+}
+
+static inline Phasor pRotate(Phasor a, float theta) {
+  float c = cosf(theta), s = sinf(theta);
+  return { a.re*c - a.im*s, a.re*s + a.im*c };
+}
+
+static inline float counts_to_volts(float counts) {
+  return counts * (ADC_VREF / ADC_FULLSCALE);
+}
+
+// =============================================================================
+//                          CLOCK + CAPTURE PATH
+// =============================================================================
+
+// Try to get clk_sys to TARGET_SYS_KHZ. If the CPU Speed menu already did it,
+// this is a no-op. Returns true if we are within 1% of target.
+static bool ensureSysClock() {
+  uint32_t want_hz = TARGET_SYS_KHZ * 1000UL;
+  uint32_t have_hz = clock_get_hz(clk_sys);
+
+  if (have_hz >= want_hz - want_hz / 100 && have_hz <= want_hz + want_hz / 100) {
+    return true;
+  }
+
+#if PICOLCR_BUMP_VREG
+  vreg_set_voltage(VREG_VOLTAGE_1_15);
+  delay(2);   // let the regulator settle before asking the PLL to go faster
+#endif
+
+  // The 'true' argument makes this return false rather than hang if the PLL
+  // configuration is unreachable.
+  if (!set_sys_clock_khz(TARGET_SYS_KHZ, true)) return false;
+
+  return true;
+}
+
+// Re-source clk_adc from PLL_SYS / 2. Stock is PLL_USB at 48 MHz.
+//
+// CLK_ADC_DIV has a 2-bit integer field and no fractional part, so the only
+// available divisors are 1, 2 and 3. With clk_sys at 192 MHz, /2 lands on
+// 96 MHz. If clk_sys ended up somewhere else this still works, it just gives a
+// different clk_adc, which is why g_adc_clk_hz is read back rather than
+// assumed and g_fs_agg_max is derived from it.
+static void adcClockBoost(uint32_t div) {
+  if (div < 1) div = 1;
+  if (div > 3) div = 3;
+  g_adc_div_sel = div;
+
+  uint32_t pll = clock_get_hz(clk_sys);   // == pll_sys when CLK_SYS_DIV is 1
+
+  clock_configure(clk_adc,
+                  0,                      // clk_adc has no glitchless mux
+                  CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+                  pll,
+                  pll / div);
+
+  g_adc_clk_hz = clock_get_hz(clk_adc);
+
+  // Ceiling stays clk_adc / 96. NOT clamped to the datasheet 500 kS/s: that
+  // number assumes a 48 MHz clk_adc. Whether a given part honours a shorter
+  // conversion period is an empirical question -- see the fs_meas column in
+  // 'y' and FLAG_FS_MISMATCH.
+  g_fs_agg_max = (float)g_adc_clk_hz / 96.0f;
+}
+
+static void captureInit() {
+  adc_gpio_init(ADC0_GPIO);
+  adc_gpio_init(ADC1_GPIO);
+  adc_init();
+  adc_set_temp_sensor_enabled(false);
+  g_dma_chan = dma_claim_unused_channel(true);
+}
+
+// Program the aggregate conversion rate. Returns the ACTUAL rate achieved,
+// which is what the Goertzel must be told about.
+//
+// Sample period is (1 + div) clk_adc cycles, clamped by hardware to a minimum
+// of 96. div is written as an integer so FRAC stays zero -- a nonzero
+// fractional divisor dithers the conversion period, and period dither is
+// sampling jitter.
+static float captureSetRate(float fs_agg_target) {
+  if (fs_agg_target < 1.0f) fs_agg_target = 1.0f;
+
+  float d = (float)g_adc_clk_hz / fs_agg_target - 1.0f;
+  if (d < 95.0f)     d = 95.0f;        // 96-cycle conversion floor
+  if (d > 65535.0f)  d = 65535.0f;     // ADC DIV.INT is 16 bits
+
+  uint32_t di = (uint32_t)(d + 0.5f);
+  adc_set_clkdiv((float)di);
+
+  g_period_cyc = di + 1;
+  g_fs_agg     = (float)g_adc_clk_hz / (float)g_period_cyc;
+  g_fs_hz      = g_fs_agg * 0.5f;
+
+  // ADC1 is converted in the slot immediately after ADC0, so the skew is
+  // exactly one aggregate sample period. Exact, not estimated.
+  g_skew_s     = (float)g_period_cyc / (float)g_adc_clk_hz;
+
+  return g_fs_agg;
+}
+
+// One-shot round-robin capture of n_per_ch samples per channel into buf_rr.
+//
+// Ordering matters and is easy to get subtly wrong:
+//   1. stop the ADC and clear round robin BEFORE selecting the start channel,
+//      so AINSEL is not advancing while we set it
+//   2. drain the FIFO, so no stale sample lands at buf_rr[0]
+//   3. select ADC_CH_A, so buf_rr[0] is deterministically channel A
+//   4. arm DMA, THEN start conversions -- the other order drops samples
+//
+// Returns false on FIFO over/underflow or channel parity slip. A single
+// overflow shifts parity for the entire remainder of the buffer, which shows
+// up downstream as a ~180 degree phase error rather than as missing data, so
+// this return value is worth checking on every record.
+static bool captureRoundRobin(uint16_t n_per_ch) {
+  if (n_per_ch == 0 || n_per_ch > N_ABS_MAX) return false;
+  uint32_t total = (uint32_t)n_per_ch * 2u;   // always even
+
+  adc_run(false);
+  adc_set_round_robin(0);
+  adc_fifo_drain();
+  adc_select_input(ADC_CH_A);
+  adc_set_round_robin((1u << ADC_CH_A) | (1u << ADC_CH_B));
+
+  adc_fifo_setup(true,    // enable FIFO
+                 true,    // DREQ enable
+                 1,       // assert DREQ on every sample
+                 false,   // do NOT put the error bit in the FIFO
+                 false);  // do NOT byte-shift: keep all 12 bits
+
+  // Clear sticky over/underflow (write-1-clear) so the post-capture read
+  // reflects this record only.
+  hw_set_bits(&adc_hw->fcs, ADC_FCS_OVER_BITS | ADC_FCS_UNDER_BITS);
+
+  dma_channel_config c = dma_channel_get_default_config(g_dma_chan);
+  channel_config_set_transfer_data_size(&c, DMA_SIZE_16);
+  channel_config_set_read_increment(&c, false);   // FIFO is a fixed address
+  channel_config_set_write_increment(&c, true);
+  channel_config_set_dreq(&c, DREQ_ADC);
+  channel_config_set_high_priority(&c, true);
+
+  dma_channel_configure(g_dma_chan, &c,
+                        buf_rr,           // dst
+                        &adc_hw->fifo,    // src
+                        total,
+                        true);            // arm and start waiting on DREQ
+
+  // Time ONLY the run, not the setup. If the ADC cannot honour the programmed
+  // conversion period the DMA still completes and no error bit is raised, so
+  // the achieved rate is the only observable that tells us.
+  uint32_t t0 = time_us_32();
+  adc_run(true);
+  dma_channel_wait_for_finish_blocking(g_dma_chan);
+  uint32_t t1 = time_us_32();
+  adc_run(false);
+
+  g_cap_run_us = t1 - t0;
+  g_cap_n_last = n_per_ch;
+  if (g_cap_run_us > 0) {
+    g_fs_agg_meas = (float)total / ((float)g_cap_run_us * 1e-6f);
+    g_fs_meas_ch  = g_fs_agg_meas * 0.5f;
+  }
+
+  bool     ovf    = (adc_hw->fcs & (ADC_FCS_OVER_BITS | ADC_FCS_UNDER_BITS)) != 0;
+  uint32_t ainsel = (adc_hw->cs & ADC_CS_AINSEL_BITS) >> ADC_CS_AINSEL_LSB;
+
+  adc_fifo_drain();
+  adc_set_round_robin(0);
+
+  // total is even, so AINSEL should have wrapped back to channel A.
+  return !ovf && (ainsel == ADC_CH_A);
+}
+
+static void adcReport() {
+  Serial.println();
+  Serial.print(F("[clk] clk_sys = "));
+  Serial.print(clock_get_hz(clk_sys) / 1000000.0f, 2);
+  Serial.print(F(" MHz"));
+  if (!g_sysclk_ok) Serial.print(F("  (TARGET NOT REACHED)"));
+  Serial.println();
+
+  Serial.print(F("[clk] clk_adc = "));
+  Serial.print(g_adc_clk_hz / 1000000.0f, 2);
+  Serial.print(F(" MHz  ->  fs_agg_max = "));
+  Serial.print(g_fs_agg_max / 1000.0f, 1);
+  Serial.print(F(" kS/s aggregate, "));
+  Serial.print(g_fs_agg_max / 2000.0f, 1);
+  Serial.println(F(" kS/s per channel"));
+
+  Serial.print(F("[clk] CLK_ADC_DIV = "));
+  Serial.print(g_adc_div_sel);
+  Serial.print(F("   (o1/o2/o3 to change)   clk_peri = "));
+  Serial.print(clock_get_hz(clk_peri) / 1000000.0f, 2);
+  Serial.println(F(" MHz"));
+
+  if (g_fs_agg_meas > 0.0f) {
+    Serial.print(F("[adc] last capture: fs_agg measured "));
+    Serial.print(g_fs_agg_meas / 1000.0f, 1);
+    Serial.print(F(" kS/s vs programmed "));
+    Serial.print(g_fs_agg / 1000.0f, 1);
+    Serial.print(F(" kS/s  (ratio "));
+    Serial.print(g_fs_agg > 0.0f ? g_fs_agg_meas / g_fs_agg : 0.0f, 4);
+    Serial.println(F(")"));
+  }
+
+  if (g_adc_clk_hz < 90000000UL) {
+    Serial.println(F("[warn] clk_adc below 90 MHz. Round robin is splitting a"));
+    Serial.println(F("[warn] slower clock, so per-channel rate is halved."));
+    Serial.println(F("[warn] Set CPU Speed to 192 MHz in Tools, or lower b<Hz>."));
+  }
+
+  float f_cross = g_fs_agg_max / (2.0f * (float)g_cfg.m_target);
+  Serial.print(F("[adc] m_target = "));
+  Serial.print(g_cfg.m_target);
+  Serial.print(F(" samples/cycle/ch, held up to "));
+  Serial.print(f_cross / 1000.0f, 2);
+  Serial.println(F(" kHz"));
+  Serial.print(F("[adc] above that fs pins at the ceiling; spc falls to "));
+  Serial.print((g_fs_agg_max / 2.0f) / (float)g_sw_stop, 2);
+  Serial.print(F(" at "));
+  Serial.print(g_sw_stop / 1000.0f, 1);
+  Serial.println(F(" kHz"));
+
+  // Harmonic folding: at m samples/cycle, harmonics m-1 and m+1 alias onto the
+  // measurement bin. Worth knowing which ones before trusting the top end.
+  float m_at_stop = (g_fs_agg_max / 2.0f) / (float)g_sw_stop;
+  if (m_at_stop < 12.0f) {
+    Serial.print(F("[warn] at sweep stop, harmonics "));
+    Serial.print((int)(m_at_stop - 1.0f));
+    Serial.print(F(" and "));
+    Serial.print((int)(m_at_stop + 1.0f));
+    Serial.println(F(" fold onto the measurement bin."));
+    Serial.println(F("[warn] this is a bias, not noise -- averaging will not remove it."));
+  }
+
+  Serial.print(F("[adc] skew at 1 kHz = "));
+  captureSetRate(2.0f * (float)g_cfg.m_target * 1000.0f);
+  Serial.print(360.0f * 1000.0f * g_skew_s, 3);
+  Serial.print(F(" deg (period_cyc="));
+  Serial.print(g_period_cyc);
+  Serial.print(F(", fs_agg="));
+  Serial.print(g_fs_agg / 1000.0f, 2);
+  Serial.println(F(" kS/s)"));
+}
+
+// ---- STRIDED BUFFER HELPERS -------------------------------------------------
+// buf_rr is interleaved, so everything that reads it needs a stride and an
+// offset. The 0x0FFF mask is insurance: with err_in_fifo false the upper bits
+// are already zero, but a mask costs nothing.
+
+static float mean_of_s(const uint16_t* buf, uint16_t n, uint8_t stride, uint8_t off) {
+  uint32_t sum = 0;
+  for (uint16_t i = 0; i < n; i++) sum += (buf[off + (uint32_t)i * stride] & 0x0FFF);
+  return (float)sum / (float)n;
+}
+
+static bool saturated_s(const uint16_t* buf, uint16_t n, uint8_t stride, uint8_t off) {
+  for (uint16_t i = 0; i < n; i++) {
+    uint16_t v = buf[off + (uint32_t)i * stride] & 0x0FFF;
+    if (v <= 2 || v >= 4093) return true;
+  }
+  return false;
+}
+
+// ---- GOERTZEL ---------------------------------------------------------------
+// Second-order IIR form. One multiply-add per sample, two state variables, no
+// complex arithmetic in the loop, O(N) time and O(1) memory. f_hz need not
+// land on a bin centre.
+//
+//   s[i] = x[i] + 2*cos(w)*s[i-1] - s[i-2],   w = 2*pi*f/fs
+//   X    = exp(j*w)*s[N-1] - s[N-2]
+//   re   = cos(w)*s1 - s2
+//   im   = sin(w)*s1
+//
+// The Hann window is generated by a recursive cosine oscillator:
+//   c[k] = 2*cos(d)*c[k-1] - c[k-2],  c[0]=1, c[-1]=cos(d),  d = 2*pi/(n-1)
+// which yields cos(d*k) for one multiply-add per sample instead of a cosf()
+// call. Amplitude drifts well under 0.1% over 4000 points in float32, which is
+// irrelevant for a window shape.
+//
+// v3 change: reads a strided view of the interleaved capture buffer. Mean
+// removal still happens via the dc argument -- it matters more than it looks,
+// since both channels sit near a 1.65 V bias (~2048 counts) and Hann smears
+// bin-0 energy into neighbouring bins.
+static Phasor goertzel_s(const uint16_t* buf, uint16_t n,
+                         uint8_t stride, uint8_t off,
+                         float f_hz, float fs_hz, float dc, bool window)
+{
+  const float w     = 2.0f * (float)M_PI * f_hz / fs_hz;
+  const float cw    = cosf(w);
+  const float sw    = sinf(w);
+  const float coeff = 2.0f * cw;
+
+  float s1 = 0.0f, s2 = 0.0f;
+
+  const float d   = (n > 1) ? (2.0f * (float)M_PI / (float)(n - 1)) : 0.0f;
+  const float wk2 = 2.0f * cosf(d);
+  float c_prev = cosf(d);   // c[-1]
+  float c_cur  = 1.0f;      // c[0]
+
+  for (uint16_t i = 0; i < n; i++) {
+    float x = (float)(buf[off + (uint32_t)i * stride] & 0x0FFF) - dc;
+    if (window) {
+      x *= 0.5f * (1.0f - c_cur);
+      float c_next = wk2 * c_cur - c_prev;
+      c_prev = c_cur;
+      c_cur  = c_next;
+    }
+    float s0 = x + coeff * s1 - s2;
+    s2 = s1;
+    s1 = s0;
+  }
+
+  Phasor p = { cw * s1 - s2, sw * s1 };
+  p.im *= PHASOR_CONJ;
+  return p;
+}
+
+static inline float phasor_to_amp_counts(Phasor p, uint16_t n, bool window) {
+  float cg = window ? HANN_COHERENT_GAIN : 1.0f;
+  return 2.0f * pMag(p) / ((float)n * cg);
+}
+
+// ---- RECORD LENGTH ----------------------------------------------------------
+// Unchanged from v2 except that fs_hz is now a programmed value rather than a
+// measured one, so the answer is repeatable.
+// Precedence: n_min floor > time budget > n_max > target_cycles.
+static uint16_t chooseN(uint32_t f_hz, float fs_hz, uint16_t* cycles_out) {
+  if (cycles_out) *cycles_out = 0;
+  if (fs_hz <= 0.0f || f_hz == 0) return g_cfg.n_min;
+
+  float spc = fs_hz / (float)f_hz;          // samples per cycle per channel
+
+  uint32_t ceiling = g_cfg.n_max;
+  if (g_cfg.max_point_ms > 0) {
+    uint32_t n_budget = (uint32_t)(fs_hz * (float)g_cfg.max_point_ms * 1e-3f);
+    if (n_budget < ceiling) ceiling = n_budget;
+  }
+  if (ceiling > N_ABS_MAX)   ceiling = N_ABS_MAX;
+  if (ceiling < g_cfg.n_min) ceiling = g_cfg.n_min;   // floor wins over budget
+
+  uint32_t cycles = g_cfg.target_cycles;
+  uint32_t need   = (uint32_t)ceilf((float)g_cfg.n_min / spc);
+  if (need > cycles) cycles = need;
+
+  uint32_t max_cycles = (uint32_t)floorf((float)ceiling / spc);
+  if (max_cycles < 1) max_cycles = 1;
+  if (cycles > max_cycles) cycles = max_cycles;
+
+  long n = lroundf((float)cycles * spc);
+  if (n < 3)               n = 3;
+  if (n > (long)N_ABS_MAX) n = N_ABS_MAX;
+
+  if (cycles_out) *cycles_out = (uint16_t)cycles;
+  return (uint16_t)n;
+}
+
+// ---- ONE MEASUREMENT --------------------------------------------------------
+// Averaging is done on Z, not on the raw channel phasors. Each capture starts
+// at an arbitrary point in the AD9833's phase accumulator, so V_total and
+// V_DUT carry a random common phase that differs from one repeat to the next --
+// summing them across repeats would average them toward zero. Z is a ratio
+// taken within a single record, so it is invariant to that common phase and
+// can be summed safely.
+static MeasPoint measureAt(uint32_t f_hz) {
+  MeasPoint m;
+  memset(&m, 0, sizeof(m));
+  m.f_hz     = f_hz;
+  m.flags    = FLAG_OK;
+  m.averages = g_cfg.averages;
+
+  // Schedule the sample rate for this point BEFORE choosing the record length,
+  // since chooseN needs the fs it will actually run at.
+  float fs_want = 2.0f * (float)g_cfg.m_target * (float)f_hz;
+  if (fs_want > g_fs_agg_max) fs_want = g_fs_agg_max;
+  captureSetRate(fs_want);
+
+  uint16_t cycles = 0;
+  uint16_t n = chooseN(f_hz, g_fs_hz, &cycles);
+  m.n          = n;
+  m.cycles     = cycles;
+  m.fs_hz      = g_fs_hz;
+  m.period_cyc = g_period_cyc;
+  m.spc        = g_fs_hz / (float)f_hz;
+  m.skew_deg   = 360.0f * (float)f_hz * g_skew_s;
+
+  Phasor Zsum = { 0.0f, 0.0f };
+  float  amp_dut_sum = 0.0f, amp_rs_sum = 0.0f;
+  uint8_t reps = (g_cfg.averages < 1) ? 1 : g_cfg.averages;
+
+  for (uint8_t k = 0; k < reps; k++) {
+    uint32_t tc0 = micros();
+    bool cap_ok = captureRoundRobin(n);
+    m.cap_us += (micros() - tc0);
+    if (!cap_ok) m.flags |= FLAG_ADC_ERR;
+
+    // Programmed vs achieved rate. A mismatch here invalidates the Goertzel
+    // bin, so it must be visible rather than silently absorbed.
+    m.fs_meas_hz = g_fs_meas_ch;
+    if (g_fs_agg > 0.0f) {
+      float fr = g_fs_agg_meas / g_fs_agg;
+      if (fr < 0.97f || fr > 1.03f) m.flags |= FLAG_FS_MISMATCH;
+    }
+
+    uint32_t tm0 = micros();
+
+    if (saturated_s(buf_rr, n, 2, 0) || saturated_s(buf_rr, n, 2, 1)) {
+      m.flags |= FLAG_SATURATE;
+    }
+    if (m.spc < g_cfg.min_spc) m.flags |= FLAG_MARGINAL_FS;
+
+    float dc_tot = mean_of_s(buf_rr, n, 2, 0);
+    float dc_dut = mean_of_s(buf_rr, n, 2, 1);
+
+    Phasor Vtot = goertzel_s(buf_rr, n, 2, 0, (float)f_hz, g_fs_hz, dc_tot, g_cfg.window);
+    Phasor Vdut = goertzel_s(buf_rr, n, 2, 1, (float)f_hz, g_fs_hz, dc_dut, g_cfg.window);
+
+    // De-skew before the subtraction. ADC1 was converted g_skew_s later, so its
+    // recovered phase is inflated by +2*pi*f*skew. Rotate it back -- the two
+    // phasors must refer to the same instant for pSub to be meaningful.
+    //
+    // Getting this wrong is the single most likely bug in v3, and it has a
+    // clean signature: phase error small at low frequency and growing linearly
+    // with frequency. Fit phase error against f; the slope in deg/Hz divided by
+    // 360 is the residual delay in seconds. Landing near one aggregate sample
+    // period means this sign is inverted.
+    float theta = 2.0f * (float)M_PI * (float)f_hz * g_skew_s * PHASOR_CONJ;
+    Vdut = pRotate(Vdut, -theta);
+
+    Phasor Vrs = pSub(Vtot, Vdut);
+
+    amp_dut_sum += phasor_to_amp_counts(Vdut, n, g_cfg.window);
+    amp_rs_sum  += phasor_to_amp_counts(Vrs,  n, g_cfg.window);
+
+    Phasor Z = pScale(pDiv(Vdut, Vrs), g_rsense_ohms);
+    Zsum.re += Z.re;
+    Zsum.im += Z.im;
+
+    m.calc_us += (micros() - tm0);
+  }
+
+  float inv = 1.0f / (float)reps;
+  Phasor Z = pScale(Zsum, inv);
+  float amp_dut = amp_dut_sum * inv;
+  float amp_rs  = amp_rs_sum  * inv;
+
+  m.v_dut_mv = counts_to_volts(amp_dut / 1.41421356f) * 1000.0f;
+  m.v_rs_mv  = counts_to_volts(amp_rs  / 1.41421356f) * 1000.0f;
+  if (amp_rs < g_cfg.low_snr_counts) m.flags |= FLAG_LOW_SNR;
+
+  m.Rs      = Z.re;
+  m.Xs      = Z.im;
+  m.z_mag   = pMag(Z);
+  m.phi_deg = atan2f(Z.im, Z.re) * 180.0f / (float)M_PI;
+
+  // A passive two-terminal DUT must have Re(Z) >= 0. Negative means bad
+  // R_sense match (catastrophic cancellation in Vtot - Vdut), aliasing, or a
+  // broken de-skew correction.
+  if (Z.re < 0.0f) m.flags |= FLAG_NONPHYSICAL;
+
+  // TODO(cal): open/short compensation goes here, before decomposition.
+  //   Z_corr = (Z_meas - Z_short) / (1 - (Z_meas - Z_short)/Z_open)
+  // Store Z_open(f) and Z_short(f) from calibration sweeps on the same f grid.
+
+  return m;
+}
+
+// ---- CHANNEL-MATCH SELF TEST ------------------------------------------------
+// Tie GP26 and GP27 to the SAME buffered node, then run this.
+//
+// This is the test that validates the capture path independently of the analog
+// front end, and it is worth running before trusting any impedance number:
+//
+//   mag_B/mag_A     should be 1.000  -> anything else is channel gain mismatch
+//   raw phase diff  should equal the predicted skew, to the clock cycle
+//   corrected diff  should be 0.000  -> validates the de-skew code itself
+//
+// If the raw difference comes out with the opposite sign to predicted, flip
+// PHASOR_CONJ rather than negating the rotation by hand -- the flag flips the
+// phase convention and the de-skew together, consistently.
+static void channelMatchTest() {
+  static const uint32_t test_f[] = { 1000, 2000, 5000, 10000,20000,30000,40000,50000,60000,70000,80000,90000,100000,110000 };
+  const uint8_t nf = sizeof(test_f) / sizeof(test_f[0]);
+
+  Serial.println();
+  Serial.println(F("[match] tie GP26 and GP27 to the same node before trusting this"));
+  Serial.println(F("     f_hz     n  fs_prog  fs_meas  ratio   spc   magA   magB  B/A     raw_dphi pred_skew corrected"));
+
+  char line[248];
+  for (uint8_t i = 0; i < nf; i++) {
+    uint32_t f = test_f[i];
+
+    dds.setFrequencyHz(f);
+    delay(g_cfg.settle_ms > 5 ? g_cfg.settle_ms : 5);
+
+    float fs_want = 2.0f * (float)g_cfg.m_target * (float)f;
+    if (fs_want > g_fs_agg_max) fs_want = g_fs_agg_max;
+    captureSetRate(fs_want);
+
+    uint16_t cyc = 0;
+    uint16_t n = chooseN(f, g_fs_hz, &cyc);
+
+    bool ok = captureRoundRobin(n);
+
+    float dcA = mean_of_s(buf_rr, n, 2, 0);
+    float dcB = mean_of_s(buf_rr, n, 2, 1);
+    Phasor A = goertzel_s(buf_rr, n, 2, 0, (float)f, g_fs_hz, dcA, g_cfg.window);
+    Phasor B = goertzel_s(buf_rr, n, 2, 1, (float)f, g_fs_hz, dcB, g_cfg.window);
+
+    float magA = phasor_to_amp_counts(A, n, g_cfg.window);
+    float magB = phasor_to_amp_counts(B, n, g_cfg.window);
+
+    float phA = atan2f(A.im, A.re) * 180.0f / (float)M_PI;
+    float phB = atan2f(B.im, B.re) * 180.0f / (float)M_PI;
+    float raw = phB - phA;
+    while (raw > 180.0f)  raw -= 360.0f;
+    while (raw < -180.0f) raw += 360.0f;
+
+    float pred = 360.0f * (float)f * g_skew_s * PHASOR_CONJ;
+
+    float theta = 2.0f * (float)M_PI * (float)f * g_skew_s * PHASOR_CONJ;
+    Phasor Bc = pRotate(B, -theta);
+    float phBc = atan2f(Bc.im, Bc.re) * 180.0f / (float)M_PI;
+    float corr = phBc - phA;
+    while (corr > 180.0f)  corr -= 360.0f;
+    while (corr < -180.0f) corr += 360.0f;
+
+    float fs_ratio = (g_fs_agg > 0.0f) ? (g_fs_agg_meas / g_fs_agg) : 0.0f;
+
+    snprintf(line, sizeof(line),
+      "  %7lu %5u %8.0f %8.0f %6.4f %5.1f %6.0f %6.0f %6.4f %10.3f %9.3f %9.3f%s%s",
+      (unsigned long)f, (unsigned)n, g_fs_hz, g_fs_meas_ch, fs_ratio,
+      g_fs_hz / (float)f,
+      magA, magB, (magA > 0.0f ? magB / magA : 0.0f),
+      raw, pred, corr,
+      ok ? "" : "  ADC_ERR",
+      (fs_ratio < 0.97f || fs_ratio > 1.03f) ? "  FS_MISMATCH" : "");
+    Serial.println(line);
+  }
+
+  dds.setFrequencyHz(g_freq_hz);
+  delay(g_cfg.settle_ms);
+  Serial.println(F("[match] B/A ~1.000, corrected ~0.000, ratio ~1.0000."));
+  Serial.println(F("[match] ratio well below 1 means the ADC is NOT keeping up with"));
+  Serial.println(F("[match] the programmed divisor -- magnitudes collapse because"));
+  Serial.println(F("[match] Goertzel is then looking in the wrong bin. Try 'u'."));
+}
+
+// ---- RAW DUMP ---------------------------------------------------------------
+// Separates "the buffer holds a real tone we mis-binned" from "the buffer holds
+// a stuck value or junk". Those two look identical through Goertzel alone.
+static void dumpRaw() {
+  if (g_cap_n_last == 0) {
+    Serial.println(F("[err] no capture yet -- run 'y' or a measurement first"));
+    return;
+  }
+  uint16_t n = g_cap_n_last;
+  uint16_t mnA = 4095, mxA = 0, mnB = 4095, mxB = 0;
+  for (uint16_t i = 0; i < n; i++) {
+    uint16_t a = buf_rr[2u * i]      & 0x0FFF;
+    uint16_t b = buf_rr[2u * i + 1u] & 0x0FFF;
+    if (a < mnA) mnA = a;
+    if (a > mxA) mxA = a;
+    if (b < mnB) mnB = b;
+    if (b > mxB) mxB = b;
+  }
+
+  Serial.println();
+  Serial.print(F("[raw] n_per_ch="));      Serial.print(n);
+  Serial.print(F("  run_us="));            Serial.print(g_cap_run_us);
+  Serial.print(F("  period_cyc="));        Serial.print(g_period_cyc);
+  Serial.print(F("  clk_adc="));           Serial.print(g_adc_clk_hz / 1000000.0f, 2);
+  Serial.println(F(" MHz"));
+  Serial.print(F("[raw] fs_agg programmed "));
+  Serial.print(g_fs_agg / 1000.0f, 1);
+  Serial.print(F(" kS/s, measured "));
+  Serial.print(g_fs_agg_meas / 1000.0f, 1);
+  Serial.println(F(" kS/s"));
+  Serial.print(F("[raw] chA (V_total) min/max/pp = "));
+  Serial.print(mnA); Serial.print('/'); Serial.print(mxA); Serial.print('/');
+  Serial.println(mxA - mnA);
+  Serial.print(F("[raw] chB (V_DUT)   min/max/pp = "));
+  Serial.print(mnB); Serial.print('/'); Serial.print(mxB); Serial.print('/');
+  Serial.println(mxB - mnB);
+
+  uint16_t lim = (n < 32u) ? n : 32u;
+  Serial.print(F("[raw] first ")); Serial.print(lim);
+  Serial.println(F(" pairs as A,B:"));
+  for (uint16_t i = 0; i < lim; i++) {
+    Serial.print(buf_rr[2u * i]      & 0x0FFF); Serial.print(',');
+    Serial.print(buf_rr[2u * i + 1u] & 0x0FFF);
+    if ((i % 8u) == 7u) Serial.println();
+    else                Serial.print(F("   "));
+  }
+  Serial.println();
+  Serial.println(F("[raw] pp near zero on both channels = no signal reaching the ADC."));
+  Serial.println(F("[raw] healthy pp with tiny Goertzel magnitude = wrong bin, i.e. fs."));
+}
+
+// ---- CSV OUTPUT -------------------------------------------------------------
+static void printCsvHeader() {
+  Serial.println(F("# PicoLCR sweep v3 (round-robin ADC + DMA)"));
+  Serial.print  (F("# r_sense_ohm="));   Serial.println(g_rsense_ohms, 2);
+  Serial.print  (F("# clk_sys_hz="));    Serial.print(clock_get_hz(clk_sys));
+  Serial.print  (F(" clk_adc_hz="));     Serial.print(g_adc_clk_hz);
+  Serial.print  (F(" fs_agg_max="));     Serial.println(g_fs_agg_max, 0);
+  Serial.print  (F("# profile="));       Serial.println(g_profile_name);
+  Serial.print  (F("# m_target="));      Serial.print(g_cfg.m_target);
+  Serial.print  (F(" target_cycles=")); Serial.print(g_cfg.target_cycles);
+  Serial.print  (F(" n_min="));          Serial.print(g_cfg.n_min);
+  Serial.print  (F(" n_max="));          Serial.print(g_cfg.n_max);
+  Serial.print  (F(" averages="));       Serial.print(g_cfg.averages);
+  Serial.print  (F(" window="));         Serial.println(g_cfg.window ? F("hann") : F("none"));
+  Serial.print  (F("# settle_ms="));     Serial.print(g_cfg.settle_ms);
+  Serial.print  (F(" max_point_ms="));   Serial.print(g_cfg.max_point_ms);
+  Serial.print  (F(" min_spc="));        Serial.println(g_cfg.min_spc, 1);
+  Serial.print  (F("# start_hz="));      Serial.print(g_sw_start);
+  Serial.print  (F(" stop_hz="));        Serial.print(g_sw_stop);
+  Serial.print  (F(" step_hz="));        Serial.println(g_sw_step);
+  Serial.print  (F("# phasor_conj="));   Serial.println(PHASOR_CONJ, 0);
+  Serial.println(F("f_hz,z_mag_ohm,phase_deg,Rs_ohm,Xs_ohm,Cs_F,Ls_H,"
+                   "v_dut_mvrms,v_rs_mvrms,n_samples,cycles,integ_ms,"
+                   "fs_ch_hz,fs_meas_ch_hz,spc,period_cyc,skew_deg,"
+                   "averages,cap_us,calc_us,flags,ok"));
+}
+
+static void printCsvRow(const MeasPoint& m) {
+  float omega = 2.0f * (float)M_PI * (float)m.f_hz;
+  float Cs_F  = (m.Xs < 0.0f && omega > 0.0f) ? (-1.0f / (omega * m.Xs)) : 0.0f;
+  float Ls_H  = (m.Xs > 0.0f && omega > 0.0f) ? ( m.Xs /  omega        ) : 0.0f;
+  float integ_ms = (m.fs_hz > 0.0f) ? ((float)m.n / m.fs_hz * 1000.0f) : 0.0f;
+
+  // 'ok' is the single column to filter on in a spreadsheet: 1 means the
+  // capture was clean and Re(Z) was physical.
+  int ok = ((m.flags & (FLAG_ADC_ERR | FLAG_NONPHYSICAL | FLAG_SATURATE
+                        | FLAG_FS_MISMATCH)) == 0) ? 1 : 0;
+
+  char line[288];
+  snprintf(line, sizeof(line),
+    "%lu,%.4g,%.3f,%.4g,%.4g,%.6g,%.6g,%.2f,%.2f,%u,%u,%.3f,"
+    "%.0f,%.0f,%.2f,%lu,%.3f,%u,%lu,%lu,0x%02X,%d",
+    (unsigned long)m.f_hz,
+    m.z_mag, m.phi_deg, m.Rs, m.Xs,
+    Cs_F, Ls_H,
+    m.v_dut_mv, m.v_rs_mv,
+    (unsigned)m.n, (unsigned)m.cycles, integ_ms,
+    m.fs_hz, m.fs_meas_hz, m.spc, (unsigned long)m.period_cyc, m.skew_deg,
+    (unsigned)m.averages,
+    (unsigned long)m.cap_us, (unsigned long)m.calc_us,
+    m.flags, ok);
+  Serial.println(line);
+}
+
+static void dumpSweep() {
+  if (g_sweep_count == 0) { Serial.println(F("[err] no sweep in RAM, run S first")); return; }
+  printCsvHeader();
+  for (uint16_t i = 0; i < g_sweep_count; i++) printCsvRow(g_sweep[i]);
+  Serial.print(F("# points=")); Serial.println(g_sweep_count);
+}
+
+// ---- TIMING REPORT ----------------------------------------------------------
+// Measures the sweep start, midpoint and stop, then extrapolates the sweep
+// duration. Run this before committing to a profile change.
+static void timingReport() {
+  Serial.println();
+  Serial.println(F("[timing] measuring..."));
+
+  uint32_t f_mid = g_sw_start + (g_sw_stop - g_sw_start) / 2;
+
+  dds.setFrequencyHz(g_sw_start); delay(g_cfg.settle_ms);
+  uint32_t t0 = micros();
+  MeasPoint lo = measureAt(g_sw_start);
+  uint32_t lo_us = micros() - t0;
+
+  dds.setFrequencyHz(f_mid); delay(g_cfg.settle_ms);
+  t0 = micros();
+  MeasPoint mid = measureAt(f_mid);
+  uint32_t mid_us = micros() - t0;
+
+  dds.setFrequencyHz(g_sw_stop); delay(g_cfg.settle_ms);
+  t0 = micros();
+  MeasPoint hi = measureAt(g_sw_stop);
+  uint32_t hi_us = micros() - t0;
+
+  dds.setFrequencyHz(g_freq_hz); delay(g_cfg.settle_ms);
+
+  Serial.println(F("     f_hz     n  cyc    fs_ch   spc  integ_ms   cap_us  calc_us  total_us"));
+
+  char line[144];
+  const MeasPoint* pts[3] = { &lo, &mid, &hi };
+  uint32_t tot[3] = { lo_us, mid_us, hi_us };
+  for (uint8_t i = 0; i < 3; i++) {
+    const MeasPoint& m = *pts[i];
+    float integ_ms = (m.fs_hz > 0.0f) ? ((float)m.n / m.fs_hz * 1000.0f) : 0.0f;
+    snprintf(line, sizeof(line),
+      "  %7lu %5u %4u %8.0f %5.1f  %8.2f  %7lu %8lu  %8lu",
+      (unsigned long)m.f_hz, (unsigned)m.n, (unsigned)m.cycles,
+      m.fs_hz, m.spc, integ_ms,
+      (unsigned long)m.cap_us, (unsigned long)m.calc_us, (unsigned long)tot[i]);
+    Serial.println(line);
+  }
+
+  uint32_t n_pts  = (g_sw_step > 0) ? ((g_sw_stop - g_sw_start) / g_sw_step + 1) : 1;
+  float    avg_ms = (float)(lo_us + mid_us + hi_us) / 3000.0f + (float)g_cfg.settle_ms;
+  Serial.print(F("  estimated sweep: "));
+  Serial.print(n_pts);
+  Serial.print(F(" points x ~"));
+  Serial.print(avg_ms, 1);
+  Serial.print(F(" ms = ~"));
+  Serial.print(n_pts * avg_ms / 1000.0f, 1);
+  Serial.println(F(" s"));
+}
+
+// ---- SWEEP ------------------------------------------------------------------
+static void runSweep() {
+  if (g_sw_step == 0 || g_sw_stop < g_sw_start) {
+    Serial.println(F("[err] bad sweep range"));
+    return;
+  }
+
+  uint32_t n_pts = (g_sw_stop - g_sw_start) / g_sw_step + 1;
+  if (n_pts > MAX_SWEEP_POINTS) {
+    Serial.print(F("[warn] "));
+    Serial.print(n_pts);
+    Serial.print(F(" points requested, storing first "));
+    Serial.print(MAX_SWEEP_POINTS);
+    Serial.println(F(" (all points still stream to CSV)"));
+  }
+
+  g_sweep_count = 0;
+  Serial.println();
+  Serial.println(F("### SWEEP BEGIN"));
+  printCsvHeader();
+
+  uint16_t adc_err_count = 0;
+
+  uint32_t t0 = millis();
+  for (uint32_t f = g_sw_start; f <= g_sw_stop; f += g_sw_step) {
+    dds.setFrequencyHz(f);
+    delay(g_cfg.settle_ms);
+
+    MeasPoint m = measureAt(f);
+    if (m.flags & FLAG_ADC_ERR) adc_err_count++;
+
+    printCsvRow(m);                                   // stream first, store second
+    if (g_sweep_count < MAX_SWEEP_POINTS) g_sweep[g_sweep_count++] = m;
+
+    if (Serial.available() && Serial.peek() == 'q') {
+      Serial.read();
+      Serial.println(F("# aborted"));
+      break;
+    }
+  }
+
+  Serial.print(F("# points="));     Serial.println(g_sweep_count);
+  Serial.print(F("# elapsed_ms=")); Serial.println(millis() - t0);
+  if (adc_err_count) {
+    Serial.print(F("# WARNING adc_err_points=")); Serial.println(adc_err_count);
+    Serial.println(F("# FIFO overflow or parity slip. Those rows have ok=0."));
+  }
+  Serial.println(F("### SWEEP END"));
+  Serial.println();
+
+  dds.setFrequencyHz(g_freq_hz);
+  delay(g_cfg.settle_ms);
+}
+
+// ---- LIVE MONITOR -----------------------------------------------------------
+static void printLiveHeader() {
+  Serial.println();
+  Serial.println(F("    time |    f   |  V_DUT  V_Rs  |     |Z|     phase |   Rs       Xs    |   Cs/Ls   |    N  spc  flg"));
+  Serial.println(F("    (ms) |  (Hz)  |  (mV)   (mV)  |    (ohms)   (deg) |  (ohms)   (ohms) |  (val)    |"));
+  Serial.println(F("---------+--------+---------------+-------------------+------------------+-----------+----------------"));
+}
+
+static void printLiveRow(const MeasPoint& m) {
+  float omega = 2.0f * (float)M_PI * (float)m.f_hz;
+  char val[24];
+
+  if (m.Xs < 0.0f) {
+    float Cs_nF = (-1.0f / (omega * m.Xs)) * 1e9f;
+    if (Cs_nF >= 1.0f) snprintf(val, sizeof(val), "%7.2f nF", Cs_nF);
+    else               snprintf(val, sizeof(val), "%7.1f pF", Cs_nF * 1000.0f);
+  } else if (m.Xs > 0.0f) {
+    float Ls_mH = (m.Xs / omega) * 1e3f;
+    if (Ls_mH >= 1.0f) snprintf(val, sizeof(val), "%7.3f mH", Ls_mH);
+    else               snprintf(val, sizeof(val), "%7.1f uH", Ls_mH * 1000.0f);
+  } else {
+    snprintf(val, sizeof(val), "   --   ");
+  }
+
+  char line[224];
+  snprintf(line, sizeof(line),
+    "%8lu | %6lu | %6.1f %6.1f | %9.1f %6.1f | %8.1f %8.1f | %s | %4u %4.0f 0x%02X",
+    (unsigned long)millis(), (unsigned long)m.f_hz,
+    m.v_dut_mv, m.v_rs_mv, m.z_mag, m.phi_deg, m.Rs, m.Xs,
+    val, (unsigned)m.n, m.spc, m.flags);
+  Serial.println(line);
+}
+
+// ---- CLI --------------------------------------------------------------------
+static void printSettings() {
+  Serial.println();
+  Serial.print(F("[settings] f="));    Serial.print(g_freq_hz);      Serial.print(F(" Hz"));
+  Serial.print(F("  R_sense="));       Serial.print(g_rsense_ohms);  Serial.println(F(" ohms"));
+  Serial.print(F("  sweep "));         Serial.print(g_sw_start);
+  Serial.print(F(" -> "));             Serial.print(g_sw_stop);
+  Serial.print(F(" step "));           Serial.print(g_sw_step);      Serial.println(F(" Hz"));
+  Serial.print(F("  profile="));       Serial.print(g_profile_name);
+  Serial.print(F("  m_target="));      Serial.print(g_cfg.m_target);
+  Serial.print(F("  target_cycles=")); Serial.print(g_cfg.target_cycles);
+  Serial.print(F("  n=["));            Serial.print(g_cfg.n_min);
+  Serial.print(F(".."));               Serial.print(g_cfg.n_max);    Serial.println(F("]"));
+  Serial.print(F("  averages="));      Serial.print(g_cfg.averages);
+  Serial.print(F("  window="));        Serial.print(g_cfg.window ? F("hann") : F("none"));
+  Serial.print(F("  settle="));        Serial.print(g_cfg.settle_ms);
+  Serial.print(F(" ms  budget="));     Serial.print(g_cfg.max_point_ms);
+  Serial.println(F(" ms"));
+  Serial.print(F("  clk_adc="));       Serial.print(g_adc_clk_hz / 1e6f, 2);
+  Serial.print(F(" MHz  fs_agg_max=")); Serial.print(g_fs_agg_max / 1000.0f, 1);
+  Serial.print(F(" kS/s  live="));     Serial.println(g_live ? F("on") : F("off"));
+}
+
+static void printHelp() {
+  Serial.println();
+  Serial.println(F("Commands:"));
+  Serial.println(F("  f<Hz>    excitation frequency      m       toggle live monitor"));
+  Serial.println(F("  a<Hz>    sweep start               b<Hz>   sweep stop"));
+  Serial.println(F("  p<Hz>    sweep step                S       run sweep (q aborts)"));
+  Serial.println(F("  d        re-dump last sweep        r<Ohm>  set R_sense"));
+  Serial.println(F("  g<0|1|2> profile fast/normal/precise"));
+  Serial.println(F("  c<spc>   target samples/cycle/ch   n<cyc>  target cycles"));
+  Serial.println(F("  v<M>     averages per point        i<N>    record floor"));
+  Serial.println(F("  j<N>     record ceiling            x<ms>   per-point budget (0=off)"));
+  Serial.println(F("  e<ms>    settle time               w       toggle Hann window"));
+  Serial.println(F("  y        channel-match self test   t       timing breakdown"));
+  Serial.println(F("  k        ADC + clock report        u       raw dump of last capture"));
+  Serial.println(F("  o<1|2|3> CLK_ADC_DIV: pll_sys / half / third of clk_sys"));
+  Serial.println(F("  ?        settings                  h       help"));
+}
+
+static void applyProfile(int idx) {
+  switch (idx) {
+    case 0: g_cfg = PROFILE_FAST;    g_profile_name = "fast";    break;
+    case 1: g_cfg = PROFILE_NORMAL;  g_profile_name = "normal";  break;
+    case 2: g_cfg = PROFILE_PRECISE; g_profile_name = "precise"; break;
+    default: Serial.println(F("\n[err] profile must be 0, 1 or 2")); return;
+  }
+  Serial.print(F("\n[ok] profile = ")); Serial.println(g_profile_name);
+}
+
+// Any manual tweak invalidates the profile label.
+static inline void markCustom() { g_profile_name = "custom"; }
+
+static void handleSerial() {
+  static char line[32];
+  static uint8_t idx = 0;
+
+  while (Serial.available()) {
+    char ch = (char)Serial.read();
+    if (ch == '\r') continue;
+    if (ch != '\n' && idx < sizeof(line) - 1) { line[idx++] = ch; continue; }
+
+    line[idx] = '\0';
+    if (idx == 0) continue;
+    char cmd = line[0];
+    const char* arg = &line[1];
+    idx = 0;
+
+    switch (cmd) {
+      case 'f': case 'F': {
+        uint32_t hz = (uint32_t)atol(arg);
+        if (hz >= 1 && hz <= 1000000UL) {
+          g_freq_hz = hz;
+          dds.setFrequencyHz(g_freq_hz);
+          delay(g_cfg.settle_ms);
+          Serial.print(F("\n[ok] f = ")); Serial.print(g_freq_hz); Serial.println(F(" Hz"));
+        } else Serial.println(F("\n[err] frequency out of range"));
+        break;
+      }
+      case 'a': case 'A': g_sw_start = (uint32_t)atol(arg);
+        Serial.print(F("\n[ok] sweep start = ")); Serial.println(g_sw_start); break;
+      case 'b': case 'B': g_sw_stop = (uint32_t)atol(arg);
+        Serial.print(F("\n[ok] sweep stop = ")); Serial.println(g_sw_stop); break;
+      case 'p': case 'P': g_sw_step = (uint32_t)atol(arg);
+        Serial.print(F("\n[ok] sweep step = ")); Serial.println(g_sw_step); break;
+      case 'S': runSweep(); if (g_live) printLiveHeader(); break;
+      case 'd': case 'D': dumpSweep(); break;
+
+      case 'r': case 'R': {
+        float ohms = atof(arg);
+        if (ohms > 0.0f) { g_rsense_ohms = ohms;
+          Serial.print(F("\n[ok] R_sense = ")); Serial.println(g_rsense_ohms); }
+        else Serial.println(F("\n[err] R_sense must be > 0"));
+        break;
+      }
+
+      case 'g': case 'G': applyProfile(atoi(arg)); break;
+
+      case 'c': case 'C': {
+        int v = atoi(arg);
+        if (v >= 3 && v <= 512) { g_cfg.m_target = (uint16_t)v; markCustom();
+          Serial.print(F("\n[ok] m_target = ")); Serial.print(g_cfg.m_target);
+          Serial.print(F(" samples/cycle/ch, held up to "));
+          Serial.print(g_fs_agg_max / (2.0f * (float)v) / 1000.0f, 2);
+          Serial.println(F(" kHz")); }
+        else Serial.println(F("\n[err] m_target must be 3..512"));
+        break;
+      }
+
+      case 'n': {
+        int c = atoi(arg);
+        if (c >= 1 && c <= 4096) { g_cfg.target_cycles = (uint16_t)c; markCustom();
+          Serial.print(F("\n[ok] target_cycles = ")); Serial.println(g_cfg.target_cycles); }
+        else Serial.println(F("\n[err] cycles must be 1..4096"));
+        break;
+      }
+      case 'v': {
+        int a = atoi(arg);
+        if (a >= 1 && a <= 64) { g_cfg.averages = (uint8_t)a; markCustom();
+          Serial.print(F("\n[ok] averages = ")); Serial.println(g_cfg.averages); }
+        else Serial.println(F("\n[err] averages must be 1..64"));
+        break;
+      }
+      case 'i': {
+        int v = atoi(arg);
+        if (v >= 3 && v <= (int)N_ABS_MAX) { g_cfg.n_min = (uint16_t)v; markCustom();
+          if (g_cfg.n_max < g_cfg.n_min) g_cfg.n_max = g_cfg.n_min;
+          Serial.print(F("\n[ok] n_min = ")); Serial.println(g_cfg.n_min); }
+        else Serial.println(F("\n[err] n_min out of range"));
+        break;
+      }
+      case 'j': {
+        int v = atoi(arg);
+        if (v >= 3 && v <= (int)N_ABS_MAX) { g_cfg.n_max = (uint16_t)v; markCustom();
+          if (g_cfg.n_min > g_cfg.n_max) g_cfg.n_min = g_cfg.n_max;
+          Serial.print(F("\n[ok] n_max = ")); Serial.println(g_cfg.n_max); }
+        else Serial.println(F("\n[err] n_max out of range"));
+        break;
+      }
+      case 'x': {
+        int v = atoi(arg);
+        if (v >= 0 && v <= 10000) { g_cfg.max_point_ms = (uint16_t)v; markCustom();
+          Serial.print(F("\n[ok] max_point_ms = ")); Serial.println(g_cfg.max_point_ms); }
+        break;
+      }
+      case 'e': {
+        int v = atoi(arg);
+        if (v >= 0 && v <= 5000) { g_cfg.settle_ms = (uint16_t)v; markCustom();
+          Serial.print(F("\n[ok] settle_ms = ")); Serial.println(g_cfg.settle_ms); }
+        break;
+      }
+      case 'w': case 'W': g_cfg.window = !g_cfg.window; markCustom();
+        Serial.print(F("\n[ok] window = ")); Serial.println(g_cfg.window ? F("hann") : F("none")); break;
+
+      case 'y': case 'Y': channelMatchTest(); if (g_live) printLiveHeader(); break;
+      case 't': case 'T': timingReport();     if (g_live) printLiveHeader(); break;
+      case 'k': case 'K': adcReport();        if (g_live) printLiveHeader(); break;
+      case 'm': case 'M': g_live = !g_live;
+        Serial.print(F("\n[ok] live = ")); Serial.println(g_live ? F("on") : F("off"));
+        if (g_live) printLiveHeader();
+        break;
+      case 'o': case 'O': {
+        int v = atoi(arg);
+        if (v >= 1 && v <= 3) {
+          adcClockBoost((uint32_t)v);
+          Serial.print(F("\n[ok] CLK_ADC_DIV = "));  Serial.print(v);
+          Serial.print(F("  clk_adc = "));
+          Serial.print(g_adc_clk_hz / 1000000.0f, 2);
+          Serial.print(F(" MHz  fs_agg_max = "));
+          Serial.print(g_fs_agg_max / 1000.0f, 1);
+          Serial.print(F(" kS/s  ("));
+          Serial.print(g_fs_agg_max / 2000.0f, 1);
+          Serial.println(F(" kS/s per channel)"));
+          Serial.println(F("[hint] re-run 'y' and watch the ratio column."));
+        } else {
+          Serial.println(F("\n[err] divisor must be 1, 2 or 3"));
+        }
+        break;
+      }
+      case 'u': case 'U': dumpRaw(); if (g_live) printLiveHeader(); break;
+      case '?': printSettings(); break;
+      case 'h': case 'H': printHelp(); break;
+      default:
+        Serial.print(F("\n[err] unknown command: ")); Serial.println(line);
+    }
+  }
+}
+
+// ---- SETUP / LOOP -----------------------------------------------------------
+void setup() {
+  // Clock first, before anything derives a divider from it. USB CDC runs off
+  // PLL_USB so it survives a clk_sys change, but SPI dividers come from
+  // clk_peri which follows clk_sys -- the AD9833 driver calls beginTransaction()
+  // on every register write, so its baud is recomputed and stays correct.
+  g_sysclk_ok = ensureSysClock();
+
+  // Pin clk_peri to PLL_USB so changing clk_sys does not shift SPI or UART
+  // baud. Recommended in the RP2040 ADC overclocking writeups.
+  clock_configure(clk_peri, 0,
+                  CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+                  48 * 1000000, 48 * 1000000);
+
+  Serial.begin(115200);
+  while (!Serial && millis() < 2000) {}
+
+  Serial.println();
+  Serial.println(F("PicoLCR POC v6.1 (round-robin ADC + DMA + Goertzel) starting..."));
+
+  if (!g_sysclk_ok) {
+    Serial.print(F("[warn] could not reach "));
+    Serial.print(TARGET_SYS_KHZ / 1000);
+    Serial.println(F(" MHz clk_sys. Running derated -- see 'k'."));
+  }
+
+  adcClockBoost(g_adc_div_sel);
+  captureInit();
+
+  // NOTE: do not call analogRead() or analogReadResolution() anywhere in this
+  // sketch. The Arduino core's analogRead reconfigures the same ADC hardware
+  // (AINSEL, FIFO, divisor) and will fight captureRoundRobin().
+
+  if (!dds.begin(g_freq_hz)) {
+    Serial.println(F("AD9833 begin() FAILED"));
+    while (true) { delay(1000); }
+  }
+  Serial.println(F("AD9833 running."));
+
+  adcReport();
+  printSettings();
+  printHelp();
+  Serial.println();
+  Serial.println(F("[hint] first run: 'y' with GP26/GP27 tied together validates"));
+  Serial.println(F("[hint] the capture path before you trust any impedance."));
+  Serial.println(F("[hint] watch the new fs_meas / ratio columns. Then try 'o1'"));
+  Serial.println(F("[hint] for 2 MS/s aggregate and re-run 'y' to see if it holds."));
+  printLiveHeader();
+  delay(100);
+}
+
+void loop() {
+  static uint32_t last_ms = 0;
+  handleSerial();
+
+  if (!g_live) return;
+  if ((uint32_t)(millis() - last_ms) < 200) return;
+  last_ms = millis();
+
+  printLiveRow(measureAt(g_freq_hz));
+}
