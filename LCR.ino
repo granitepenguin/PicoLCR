@@ -1495,18 +1495,32 @@ void printLCRFrequency(uint32_t frequencyHz)
 //
 
 // Handle touches on the four top-level analyzer tabs.
-// Changing tabs closes any modal selector and redraws the newly selected
-// analyzer view while preserving instrument-level measurement settings.
+// Leaving the Measure tab resets measurement state to LIVE so returning
+// to Measure always resumes acquisition rather than restoring stale HOLD data.
 void handleLCRTabTouch(uint16_t x, uint16_t y)
 {
   for (uint8_t i = 0; i < 4; i++) {
-    if (!pointInLCRRect(x, y, lcrLayout.tabButtons[i]))
+    if (!pointInLCRRect(
+          x,
+          y,
+          lcrLayout.tabButtons[i])) {
+
       continue;
+    }
 
-    LCRTab newTab = static_cast<LCRTab>(i);
+    LCRTab newTab =
+      static_cast<LCRTab>(i);
 
+    // Ignore touches on the already active tab.
     if (newTab == lcrTab)
       return;
+
+    // HOLD data is only meaningful while remaining on the Measure tab.
+    // Leaving Measure resets it so the next visit begins with live data.
+    if (lcrTab == LCR_TAB_MEASURE) {
+      lcrMeasureState =
+        LCR_MEASURE_LIVE;
+    }
 
     lcrTab = newTab;
     lcrUIState = LCR_UI_NORMAL;
