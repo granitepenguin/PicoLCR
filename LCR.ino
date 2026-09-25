@@ -52,12 +52,15 @@ constexpr int16_t LCR_SELECTOR_CANCEL_WIDTH_PERCENT = 35;
 constexpr int16_t LCR_SELECTOR_CANCEL_HEIGHT_PERCENT = 16;
 constexpr int16_t LCR_SELECTOR_CANCEL_BOTTOM_PERCENT = 5;
 
+// Height of the Sweep Results plot-control strip as a percentage of the
+// content region. The strip remains large enough to be an obvious touch target.
+constexpr int16_t LCR_SWEEP_PLOT_CONTROL_PERCENT = 15;
 // Sweep Results plot margins within the common content region.
 // Space outside the plot rectangle is reserved for axis labels.
 constexpr int16_t LCR_SWEEP_PLOT_LEFT_PERCENT   = 16;
 constexpr int16_t LCR_SWEEP_PLOT_RIGHT_PERCENT  = 5;
-constexpr int16_t LCR_SWEEP_PLOT_TOP_PERCENT    = 10;
-constexpr int16_t LCR_SWEEP_PLOT_BOTTOM_PERCENT = 18;
+constexpr int16_t LCR_SWEEP_PLOT_TOP_PERCENT    = 8;
+constexpr int16_t LCR_SWEEP_PLOT_BOTTOM_PERCENT = 12;
 
 // Artificial interval between simulated Sweep measurements.
 // This makes progress and Cancel behavior observable during development.
@@ -321,6 +324,521 @@ SweepPlotRange padLCRSweepPlotRange(SweepPlotRange range)
 
   return range;
 }
+
+
+// Select a common engineering scale for the Sweep impedance axis.
+// The largest absolute value determines the scale used by every Y label.
+SweepAxisScale getLCRSweepImpedanceAxisScale(
+  const SweepPlotRange &range)
+{
+  float largest =
+    max(
+      fabsf(range.minimum),
+      fabsf(range.maximum)
+    );
+
+  if (largest >= 1000000.0f) {
+    return {
+      1000000.0f,
+      "MOhm"
+    };
+  }
+
+  if (largest >= 1000.0f) {
+    return {
+      1000.0f,
+      "kOhm"
+    };
+  }
+
+  return {
+    1.0f,
+    "Ohm"
+  };
+}
+
+
+// Format one Sweep-axis numeric value compactly.
+// Precision decreases as the displayed number becomes larger so labels
+// remain short enough for the limited graph margin.
+void formatLCRSweepAxisNumber(char *buffer,
+                              size_t bufferSize,
+                              float value)
+{
+  float magnitude =
+    fabsf(value);
+
+  if (magnitude >= 100.0f) {
+    snprintf(
+      buffer,
+      bufferSize,
+      "%.0f",
+      value
+    );
+  } else if (magnitude >= 10.0f) {
+    snprintf(
+      buffer,
+      bufferSize,
+      "%.1f",
+      value
+    );
+  } else {
+    snprintf(
+      buffer,
+      bufferSize,
+      "%.2f",
+      value
+    );
+  }
+}
+
+
+// Convert a Sweep frequency into an X coordinate within the Results plot.
+// Linear sweeps use linear frequency spacing, while logarithmic sweeps use
+// logarithmic spacing so the displayed axis matches the acquisition mode.
+int16_t calculateLCRSweepPlotX(uint32_t frequency)
+{
+  const LCRRect &plot =
+    lcrLayout.sweepPlot;
+
+  uint32_t start =
+    lcrSweepSettings.startFrequency;
+
+  uint32_t stop =
+    lcrSweepSettings.stopFrequency;
+
+  if (stop <= start)
+    return plot.x;
+
+  float position;
+
+  if (lcrSweepSettings.mode == LCR_SWEEP_LOG) {
+
+    if (frequency == 0 || start == 0)
+      return plot.x;
+
+    float logStart =
+      log10f(static_cast<float>(start));
+
+    float logStop =
+      log10f(static_cast<float>(stop));
+
+    float logFrequency =
+      log10f(static_cast<float>(frequency));
+
+    position =
+      (logFrequency - logStart) /
+      (logStop - logStart);
+
+  } else {
+
+    position =
+      static_cast<float>(frequency - start) /
+      static_cast<float>(stop - start);
+  }
+
+  position =
+    constrain(position, 0.0f, 1.0f);
+
+  return
+    plot.x +
+    static_cast<int16_t>(
+      position * (plot.w - 1)
+    );
+}
+
+
+// Convert an impedance magnitude into a Y coordinate within the Results plot.
+// Higher values appear toward the top of the display, so the normal numeric
+// range is inverted when converted to screen coordinates.
+int16_t calculateLCRSweepPlotY(float impedance,
+                               const SweepPlotRange &range)
+{
+  const LCRRect &plot =
+    lcrLayout.sweepPlot;
+
+  float span =
+    range.maximum - range.minimum;
+
+  if (span <= 0.0f)
+    return plot.y + plot.h / 2;
+
+  float position =
+    (impedance - range.minimum) / span;
+
+  position =
+    constrain(position, 0.0f, 1.0f);
+
+  return
+    plot.y +
+    plot.h - 1 -
+    static_cast<int16_t>(
+      position * (plot.h - 1)
+    );
+}
+
+
+
+// Draw the Sweep Results plot-control strip.
+// The outlined full-width control makes plot selection visibly interactive
+// while remaining separate from the graph's future cursor touch area.
+void drawLCRSweepPlotControl()
+{
+  const LCRRect &control =
+    lcrLayout.sweepPlotControl;
+
+  display.drawRect(
+    control.x,
+    control.y,
+    control.w,
+    control.h,
+    GRIDCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  const char *label = "Plot: |Z|";
+
+  display.setCursor(
+    control.x + 8,
+    control.y + (control.h - 8) / 2
+  );
+
+  display.print(label);
+
+  // Simple down-arrow indicator showing that the control is selectable.
+  const int16_t arrowX = control.x + control.w - 12;
+  const int16_t arrowY = control.y + control.h / 2 - 1;
+
+  display.drawLine(
+    arrowX - 3,
+    arrowY - 2,
+    arrowX,
+    arrowY + 1,
+    TXTCOLOR
+  );
+
+  display.drawLine(
+    arrowX,
+    arrowY + 1,
+    arrowX + 3,
+    arrowY - 2,
+    TXTCOLOR
+  );
+}
+
+
+
+// Draw compact labels around the Sweep impedance plot.
+// The Y axis uses one common engineering scale so numeric labels remain
+// short while the axis title identifies their shared impedance unit.
+void drawLCRSweepPlotLabels(const SweepPlotRange &range)
+{
+  const LCRRect &plot =
+    lcrLayout.sweepPlot;
+
+  char label[24];
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  //
+  // Determine the common Y-axis engineering scale.
+  //
+
+  SweepAxisScale scale = getLCRSweepImpedanceAxisScale(range);
+
+  //
+  // Y-axis unit.
+  //
+  // The plotted quantity is identified by the Results control strip, so only
+  // the common engineering unit needs to appear beside the graph.
+  //
+
+  snprintf(
+    label,
+    sizeof(label),
+    "(%s)",
+    scale.unit
+  );
+
+  display.setCursor(
+    plot.x,
+    plot.y - 10
+  );
+
+  display.print(label);
+
+  //
+  // Maximum Y value.
+  //
+
+  formatLCRSweepAxisNumber(
+    label,
+    sizeof(label),
+    range.maximum / scale.divisor
+  );
+
+  int16_t labelWidth = strlen(label) * 6;
+
+  display.setCursor( plot.x - labelWidth - 3, plot.y);
+
+  display.print(label);
+
+  //
+  // Midpoint Y value.
+  //
+
+  float midpoint = (range.minimum + range.maximum) / 2.0f;
+
+  formatLCRSweepAxisNumber(
+    label,
+    sizeof(label),
+    midpoint / scale.divisor
+  );
+
+  labelWidth = strlen(label) * 6;
+
+  display.setCursor( plot.x - labelWidth - 3, plot.y + plot.h / 2 - 4);
+
+  display.print(label);
+
+  //
+  // Minimum Y value.
+  //
+
+  formatLCRSweepAxisNumber(
+    label,
+    sizeof(label),
+    range.minimum / scale.divisor
+  );
+
+  labelWidth =
+    strlen(label) * 6;
+
+  display.setCursor(
+    plot.x - labelWidth - 3,
+    plot.y + plot.h - 8
+  );
+
+  display.print(label);
+
+  //
+  // Start frequency.
+  //
+
+  LCRFormattedValue startFrequency =
+    formatFrequency(
+      lcrSweepSettings.startFrequency
+    );
+
+  snprintf(
+    label,
+    sizeof(label),
+    "%s%s",
+    startFrequency.value,
+    startFrequency.unit
+  );
+
+  display.setCursor(
+    plot.x,
+    plot.y + plot.h + 4
+  );
+
+  display.print(label);
+
+  //
+  // Midpoint frequency.
+  //
+  // The center label represents the frequency at the visual midpoint of the
+  // active X axis. Linear axes use the arithmetic midpoint while Log axes use
+  // the geometric midpoint.
+  //
+
+  uint32_t midpointFrequency;
+
+  if (lcrSweepSettings.mode == LCR_SWEEP_LOG) {
+    midpointFrequency =
+      static_cast<uint32_t>(
+        roundf(
+          sqrtf(
+            static_cast<float>(
+              lcrSweepSettings.startFrequency
+            ) *
+            static_cast<float>(
+              lcrSweepSettings.stopFrequency
+            )
+          )
+        )
+      );
+  } else {
+    midpointFrequency =
+      lcrSweepSettings.startFrequency +
+      (lcrSweepSettings.stopFrequency -
+       lcrSweepSettings.startFrequency) / 2;
+  }
+
+  LCRFormattedValue middleFrequency =
+    formatFrequency(midpointFrequency);
+
+  snprintf(
+    label,
+    sizeof(label),
+    "%s%s",
+    middleFrequency.value,
+    middleFrequency.unit
+  );
+
+  labelWidth =
+    strlen(label) * 6;
+
+  display.setCursor(
+    plot.x +
+      (plot.w - labelWidth) / 2,
+    plot.y + plot.h + 4
+  );
+
+  display.print(label);
+
+  //
+  // Stop frequency.
+  //
+
+  LCRFormattedValue stopFrequency =
+    formatFrequency(
+      lcrSweepSettings.stopFrequency
+    );
+
+  snprintf(
+    label,
+    sizeof(label),
+    "%s%s",
+    stopFrequency.value,
+    stopFrequency.unit
+  );
+
+  labelWidth =
+    strlen(label) * 6;
+
+  display.setCursor(
+    plot.x + plot.w - labelWidth,
+    plot.y + plot.h + 4
+  );
+
+  display.print(label);
+}
+
+
+// Draw the retained Sweep impedance-magnitude results as a connected trace.
+// Plot scaling is derived automatically from the acquired data, while the
+// X-axis spacing follows the Linear or Log mode used for the Sweep.
+void drawLCRSweepPlot()
+{
+  const LCRRect &plot = lcrLayout.sweepPlot;
+
+  //
+  // Plot boundary
+  //
+
+  display.drawRect(
+    plot.x,
+    plot.y,
+    plot.w,
+    plot.h,
+    GRIDCOLOR
+  );
+
+  // Draw a single horizontal midpoint reference through the plot.
+  // Keeping the grid minimal provides a useful visual scale without
+  // overwhelming the trace on the small display.
+  const int16_t midpointY = plot.y + plot.h / 2;
+
+  display.drawFastHLine(
+    plot.x + 1,
+    midpointY,
+    plot.w - 2,
+    GRIDCOLOR
+  );
+
+  // Draw a single vertical midpoint reference through the plot.
+  // Together with the horizontal midpoint this creates a simple 2x2
+  // reference grid without overcrowding the Results display.
+  const int16_t midpointX =
+    plot.x + plot.w / 2;
+
+  display.drawFastVLine(
+    midpointX,
+    plot.y + 1,
+    plot.h - 2,
+    GRIDCOLOR
+  );
+
+  if (lcrSweepPointCount == 0)
+    return;
+
+  //
+  // Determine the displayed impedance range.
+  //
+
+  SweepPlotRange range = findLCRSweepImpedanceRange();
+  range = padLCRSweepPlotRange(range);
+
+  // Draw axis and quantity labels using the same range as the trace.
+  drawLCRSweepPlotLabels(range);
+
+  //
+  // Draw the |Z| trace.
+  //
+
+  int16_t previousX =
+    calculateLCRSweepPlotX(
+      lcrSweepPoints[0].frequency
+    );
+
+  int16_t previousY =
+    calculateLCRSweepPlotY(
+      lcrSweepPoints[0].impedance,
+      range
+    );
+
+  // A single-point result still gets a visible marker.
+  display.drawPixel(
+    previousX,
+    previousY,
+    HIGHCOLOR
+  );
+
+  for (uint16_t i = 1;
+       i < lcrSweepPointCount;
+       i++) {
+
+    int16_t x =
+      calculateLCRSweepPlotX(
+        lcrSweepPoints[i].frequency
+      );
+
+    int16_t y =
+      calculateLCRSweepPlotY(
+        lcrSweepPoints[i].impedance,
+        range
+      );
+
+    display.drawLine(
+      previousX,
+      previousY,
+      x,
+      y,
+      HIGHCOLOR
+    );
+
+    previousX = x;
+    previousY = y;
+  }
+}
+
+
+
 
 // Acquire and store one measurement at the requested Sweep frequency.
 // The normal measurement backend is used so this works with the simulation
@@ -1040,8 +1558,21 @@ void calculateSweepLayout()
     lcrLayout.footer.h
   };
 
-  // Calculate the Sweep Results graph area inside the common content region.
-  // Margins leave room around the plot for frequency and impedance labels.
+  // Calculate the Sweep Results control strip.
+  // The complete strip is touchable, providing a large target for changing
+  // the plotted quantity without interfering with future graph cursors.
+  const int16_t plotControlH =
+    content.h * LCR_SWEEP_PLOT_CONTROL_PERCENT / 100;
+
+  lcrLayout.sweepPlotControl = {
+    content.x,
+    content.y,
+    content.w,
+    plotControlH
+  };
+
+  // Calculate the Sweep Results graph below the control strip.
+  // Margins around the graph provide room for axis values and frequency labels.
   const int16_t plotLeft =
     content.w * LCR_SWEEP_PLOT_LEFT_PERCENT / 100;
 
@@ -1054,18 +1585,24 @@ void calculateSweepLayout()
   const int16_t plotBottom =
     content.h * LCR_SWEEP_PLOT_BOTTOM_PERCENT / 100;
 
+  const int16_t plotAreaY =
+    content.y + plotControlH;
+
+  const int16_t plotAreaH =
+    content.h - plotControlH;
+
   lcrLayout.sweepPlot = {
     static_cast<int16_t>(
       content.x + plotLeft
     ),
     static_cast<int16_t>(
-      content.y + plotTop
+      plotAreaY + plotTop
     ),
     static_cast<int16_t>(
       content.w - plotLeft - plotRight
     ),
     static_cast<int16_t>(
-      content.h - plotTop - plotBottom
+      plotAreaH - plotTop - plotBottom
     )
   };
 }
@@ -1594,6 +2131,22 @@ void printLCRFrequency(uint32_t frequencyHz)
   display.print(formatted.unit);
 }
 
+
+// Format an LCR value into a compact single-string axis label.
+// The existing engineering formatter supplies the numeric value and unit;
+// this helper combines them for use around Sweep plots.
+void makeLCRAxisLabel(char *buffer,
+                      size_t bufferSize,
+                      const LCRFormattedValue &formatted)
+{
+  snprintf(
+    buffer,
+    bufferSize,
+    "%s %s",
+    formatted.value,
+    formatted.unit
+  );
+}
 
 
 //
@@ -2889,32 +3442,14 @@ void drawLCRSweepResults()
     BGCOLOR
   );
 
-  // Draw the Sweep Results plot boundary.
-  // The actual trace and axis labels are added in the next plot step.
-  const LCRRect &plot = lcrLayout.sweepPlot;
-
-  display.drawRect(
-    plot.x,
-    plot.y,
-    plot.w,
-    plot.h,
-    GRIDCOLOR
-  );
-
   display.setTextSize(1);
   display.setTextColor(TXTCOLOR, BGCOLOR);
 
-  const char *label = "Sweep Complete";
+  // Draw the interactive plot-selection control above the Results graph.
+  drawLCRSweepPlotControl();
 
-  int16_t labelWidth = strlen(label) * 6;
-
-  display.setCursor(
-    content.x +
-      (content.w - labelWidth) / 2,
-    content.y + content.h / 2
-  );
-
-  display.print(label);
+  // Draw the completed Sweep impedance-magnitude trace.
+  drawLCRSweepPlot();
 
   // Footer separator.
   display.drawFastHLine(

@@ -72,6 +72,15 @@ struct SweepPlotRange
   float maximum;
 };
 
+// Defines the common engineering scale used by a Sweep plot axis.
+// All numeric labels on the axis use the same multiplier and unit so
+// individual tick labels can remain compact.
+struct SweepAxisScale
+{
+  float divisor;
+  const char *unit;
+};
+
 // Maximum number of measurement points retained for one frequency sweep.
 // This accommodates the current full-range 100 Hz-step linear sweep while
 // bounding RAM usage for sweep-result storage.
@@ -265,8 +274,16 @@ struct LCRLayout
   LCRRect sweepResultsSweepButton;
 
   // Sweep Results plot area.
+
+  // Sweep Results control/status strip.
+  // This provides a large touch target for selecting the plotted quantity
+  // while keeping the graph itself available for future cursor interaction.
+  LCRRect sweepPlotControl;
+
   // This rectangle contains the graph itself, excluding axis labels and footer.
   LCRRect sweepPlot;
+
+
 
   LCRRect footer;
 
