@@ -52,6 +52,13 @@ constexpr int16_t LCR_SELECTOR_CANCEL_WIDTH_PERCENT = 35;
 constexpr int16_t LCR_SELECTOR_CANCEL_HEIGHT_PERCENT = 16;
 constexpr int16_t LCR_SELECTOR_CANCEL_BOTTOM_PERCENT = 5;
 
+// Sweep Results plot margins within the common content region.
+// Space outside the plot rectangle is reserved for axis labels.
+constexpr int16_t LCR_SWEEP_PLOT_LEFT_PERCENT   = 16;
+constexpr int16_t LCR_SWEEP_PLOT_RIGHT_PERCENT  = 5;
+constexpr int16_t LCR_SWEEP_PLOT_TOP_PERCENT    = 10;
+constexpr int16_t LCR_SWEEP_PLOT_BOTTOM_PERCENT = 18;
+
 // Artificial interval between simulated Sweep measurements.
 // This makes progress and Cancel behavior observable during development.
 // Real hardware acquisition will determine its own measurement timing.
@@ -244,6 +251,76 @@ SweepPoint makeSweepPoint(const MeasurementPoint &measurement)
   return point;
 }
 
+
+// Find the minimum and maximum impedance magnitude in the retained Sweep.
+// A small range is expanded so constant or nearly constant measurements
+// still produce a usable vertical plot scale.
+SweepPlotRange findLCRSweepImpedanceRange()
+{
+  SweepPlotRange range = {
+    0.0f,
+    1.0f
+  };
+
+  if (lcrSweepPointCount == 0)
+    return range;
+
+  range.minimum = lcrSweepPoints[0].impedance;
+  range.maximum = lcrSweepPoints[0].impedance;
+
+  for (uint16_t i = 1;
+       i < lcrSweepPointCount;
+       i++) {
+
+    float impedance = lcrSweepPoints[i].impedance;
+
+    if (impedance < range.minimum)
+      range.minimum = impedance;
+
+    if (impedance > range.maximum)
+      range.maximum = impedance;
+  }
+
+  // Avoid a zero-height Y range.
+  float span = range.maximum - range.minimum;
+
+  if (span <= 0.0f) {
+    float padding = fabsf(range.maximum) * 0.05f;
+
+    if (padding < 1.0f)
+      padding = 1.0f;
+
+    range.minimum -= padding;
+    range.maximum += padding;
+  }
+
+  return range;
+}
+
+
+// Expand a Sweep plot range slightly beyond the measured values.
+// Padding prevents the highest and lowest samples from being drawn directly
+// against the graph border.
+SweepPlotRange padLCRSweepPlotRange(SweepPlotRange range)
+{
+  float span =
+    range.maximum - range.minimum;
+
+  if (span <= 0.0f)
+    return range;
+
+  float padding =
+    span * 0.08f;
+
+  range.minimum -= padding;
+  range.maximum += padding;
+
+  // Impedance magnitude cannot be negative.
+  if (range.minimum < 0.0f)
+    range.minimum = 0.0f;
+
+  return range;
+}
 
 // Acquire and store one measurement at the requested Sweep frequency.
 // The normal measurement backend is used so this works with the simulation
@@ -961,6 +1038,35 @@ void calculateSweepLayout()
       lcrLayout.footer.w - resultsButtonW
     ),
     lcrLayout.footer.h
+  };
+
+  // Calculate the Sweep Results graph area inside the common content region.
+  // Margins leave room around the plot for frequency and impedance labels.
+  const int16_t plotLeft =
+    content.w * LCR_SWEEP_PLOT_LEFT_PERCENT / 100;
+
+  const int16_t plotRight =
+    content.w * LCR_SWEEP_PLOT_RIGHT_PERCENT / 100;
+
+  const int16_t plotTop =
+    content.h * LCR_SWEEP_PLOT_TOP_PERCENT / 100;
+
+  const int16_t plotBottom =
+    content.h * LCR_SWEEP_PLOT_BOTTOM_PERCENT / 100;
+
+  lcrLayout.sweepPlot = {
+    static_cast<int16_t>(
+      content.x + plotLeft
+    ),
+    static_cast<int16_t>(
+      content.y + plotTop
+    ),
+    static_cast<int16_t>(
+      content.w - plotLeft - plotRight
+    ),
+    static_cast<int16_t>(
+      content.h - plotTop - plotBottom
+    )
   };
 }
 
@@ -2764,11 +2870,8 @@ void updateLCRSweepRunningDisplay()
 // the acquisition using the current configuration.
 void drawLCRSweepResults()
 {
-  const LCRRect &content =
-    lcrLayout.content;
-
-  const LCRRect &footer =
-    lcrLayout.footer;
+  const LCRRect &content = lcrLayout.content;
+  const LCRRect &footer = lcrLayout.footer;
 
   display.fillRect(
     content.x,
@@ -2786,13 +2889,24 @@ void drawLCRSweepResults()
     BGCOLOR
   );
 
+  // Draw the Sweep Results plot boundary.
+  // The actual trace and axis labels are added in the next plot step.
+  const LCRRect &plot = lcrLayout.sweepPlot;
+
+  display.drawRect(
+    plot.x,
+    plot.y,
+    plot.w,
+    plot.h,
+    GRIDCOLOR
+  );
+
   display.setTextSize(1);
   display.setTextColor(TXTCOLOR, BGCOLOR);
 
   const char *label = "Sweep Complete";
 
-  int16_t labelWidth =
-    strlen(label) * 6;
+  int16_t labelWidth = strlen(label) * 6;
 
   display.setCursor(
     content.x +
@@ -2821,8 +2935,7 @@ void drawLCRSweepResults()
   // Setup action.
   const char *setupLabel = "Setup";
 
-  int16_t setupWidth =
-    strlen(setupLabel) * 6;
+  int16_t setupWidth = strlen(setupLabel) * 6;
 
   display.setCursor(
     lcrLayout.sweepResultsSetupButton.x +
@@ -2835,8 +2948,7 @@ void drawLCRSweepResults()
   // Sweep action.
   const char *sweepLabel = "Sweep";
 
-  int16_t sweepWidth =
-    strlen(sweepLabel) * 6;
+  int16_t sweepWidth = strlen(sweepLabel) * 6;
 
   display.setCursor(
     lcrLayout.sweepResultsSweepButton.x +

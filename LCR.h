@@ -65,6 +65,13 @@ struct SweepPoint
   float q;
 };
 
+// Stores the minimum and maximum values used to scale one Sweep plot axis.
+struct SweepPlotRange
+{
+  float minimum;
+  float maximum;
+};
+
 // Maximum number of measurement points retained for one frequency sweep.
 // This accommodates the current full-range 100 Hz-step linear sweep while
 // bounding RAM usage for sweep-result storage.
@@ -256,6 +263,10 @@ struct LCRLayout
   LCRRect sweepCancelButton;
   LCRRect sweepResultsSetupButton;
   LCRRect sweepResultsSweepButton;
+
+  // Sweep Results plot area.
+  // This rectangle contains the graph itself, excluding axis labels and footer.
+  LCRRect sweepPlot;
 
   LCRRect footer;
 
