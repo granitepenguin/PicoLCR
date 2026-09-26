@@ -12,6 +12,20 @@
 //   Display updates
 //   Instrument state management
 
+#include "AD9833_Driver.h"
+
+// LCR excitation-generator hardware.
+// The AD9833 uses SPI0 independently from the TFT display bus.
+static const uint8_t AD9833_FSYNC_PIN = 3;  // GP3, physical pin 5
+static const uint8_t AD9833_SCK_PIN   = 6;  // GP6, physical pin 9
+static const uint8_t AD9833_DATA_PIN  = 7;  // GP7, physical pin 10
+
+// AD9833 excitation source for the LCR measurement hardware.
+AD9833_Driver lcrDDS(AD9833_FSYNC_PIN);
+
+// Tracks the frequency currently programmed into the physical generator.
+// Repeated measurements at the same frequency do not need to reprogram the DDS.
+uint32_t lcrGeneratorFrequency = 0;
 
 // screen locations for various output displays
 constexpr int LABEL_X = 20;
@@ -76,7 +90,9 @@ constexpr uint32_t LCR_DISPLAY_INTERVAL_MS = 150;
 // Measure is always the default tab when entering the instrument
 LCRTab lcrTab = LCR_TAB_MEASURE;
 
-LCRBackend lcrBackend = LCR_BACKEND_SIMULATION;
+// Pick whether we are simulating our using real hardware
+//LCRBackend lcrBackend = LCR_BACKEND_SIMULATION;
+LCRBackend lcrBackend = LCR_BACKEND_HARDWARE;
 
 // Indicates that the dynamic LCR display must be redrawn immediately.
 // This is set whenever the analyzer is entered or its screen changes.
@@ -1085,20 +1101,16 @@ MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings)
 }
 
 
-// Acquire a single measurement from the hardware measurement engine.
-// This function will eventually control the AD9833, ADC/DMA, and
-// impedance calculations.
+// Perform one measurement using the physical LCR hardware.
+// During this integration stage the AD9833 is driven at the requested
+// frequency while simulated data temporarily supplies the measurement result.
 MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
 {
-  MeasurementPoint m;
+  setLCRGeneratorFrequency(settings.frequency);
 
-  //
-  // Placeholder until hardware exists.
-  //
-
-  return m;
+  MeasurementPoint measurement = simulatedMeasurement(settings);
+  return measurement;
 }
-
 
 
 // Measurement engine interface.
@@ -1358,6 +1370,50 @@ void clearValueField(int x, int y, int width = 120)
   display.fillRect(x, y, width, 10, BGCOLOR);
 }
 
+
+// Initialize the AD9833 excitation source on the dedicated SPI0 bus.
+// The generator starts at 1 kHz so hardware operation can be verified
+// independently before integrating the LCR measurement backend.
+void initializeLCRGenerator()
+{
+  SPI.setSCK(AD9833_SCK_PIN);
+  SPI.setTX(AD9833_DATA_PIN);
+  SPI.setRX(NOPIN);
+
+  // Defaulting to 1kHz out of the generator, and setting the semaphore
+  // lcrGeneratorFrequency to match so we aren't constantly resetting ourselves
+  // on every pass.
+  lcrDDS.begin(1000);
+  lcrGeneratorFrequency = 1000;
+
+  Serial.println("LCR AD9833 initialized at 1 kHz");
+}
+
+
+// Set the physical LCR excitation frequency only when it actually changes.
+// Avoiding redundant AD9833 writes prevents unnecessary SPI traffic during
+// continuous single-frequency measurements.
+void setLCRGeneratorFrequency(uint32_t frequency)
+{
+  if (frequency == lcrGeneratorFrequency)
+    return;
+
+  lcrDDS.setFrequencyHz(frequency);
+  lcrGeneratorFrequency = frequency;
+}
+
+
+// Set the AD9833 frequency directly for hardware bring-up testing.
+// This diagnostic helper will be removed once the generator is controlled
+// exclusively through the LCR hardware measurement backend.
+void testLCRGeneratorFrequency(uint32_t frequency)
+{
+  lcrDDS.setFrequencyHz(frequency);
+
+  Serial.print("AD9833 frequency set to ");
+  Serial.print(frequency);
+  Serial.println(" Hz");
+}
 
 
 // Configure the reusable sprite used for dynamic LCR measurement fields.

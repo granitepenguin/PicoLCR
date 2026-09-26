@@ -226,6 +226,9 @@ void setup(){
   display.fillScreen(BGCOLOR);
 #endif
 
+// Initialize the LCR excitation generator after the existing display hardware.
+initializeLCRGenerator();
+
 //  Serial.begin(115200);
 //  delay(3000);
 //  Serial.println("core0:start....");
