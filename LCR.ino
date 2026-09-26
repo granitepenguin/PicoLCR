@@ -12,6 +12,16 @@
 //   Display updates
 //   Instrument state management
 
+#include "AD9833_Driver.h"
+
+// LCR excitation-generator hardware.
+// The AD9833 uses SPI0 independently from the TFT display bus.
+static const uint8_t AD9833_FSYNC_PIN = 3;  // GP3, physical pin 5
+static const uint8_t AD9833_SCK_PIN   = 6;  // GP6, physical pin 9
+static const uint8_t AD9833_DATA_PIN  = 7;  // GP7, physical pin 10
+
+// AD9833 excitation source for the LCR measurement hardware.
+AD9833_Driver lcrDDS(AD9833_FSYNC_PIN);
 
 // screen locations for various output displays
 constexpr int LABEL_X = 20;
@@ -1358,6 +1368,33 @@ void clearValueField(int x, int y, int width = 120)
   display.fillRect(x, y, width, 10, BGCOLOR);
 }
 
+
+// Initialize the AD9833 excitation source on the dedicated SPI0 bus.
+// The generator starts at 1 kHz so hardware operation can be verified
+// independently before integrating the LCR measurement backend.
+void initializeLCRGenerator()
+{
+  SPI.setSCK(AD9833_SCK_PIN);
+  SPI.setTX(AD9833_DATA_PIN);
+  SPI.setRX(NOPIN);
+
+  lcrDDS.begin(1000);
+
+  Serial.println("LCR AD9833 initialized at 1 kHz");
+}
+
+
+// Set the AD9833 frequency directly for hardware bring-up testing.
+// This diagnostic helper will be removed once the generator is controlled
+// exclusively through the LCR hardware measurement backend.
+void testLCRGeneratorFrequency(uint32_t frequency)
+{
+  lcrDDS.setFrequencyHz(frequency);
+
+  Serial.print("AD9833 frequency set to ");
+  Serial.print(frequency);
+  Serial.println(" Hz");
+}
 
 
 // Configure the reusable sprite used for dynamic LCR measurement fields.
