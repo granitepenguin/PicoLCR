@@ -1,3 +1,4 @@
+# RP2040 Pins
 | Pico physical pin | GPIO / supply   | Current function              | Interface / notes                     |
 | ----------------: | --------------- | ----------------------------- | ------------------------------------- |
 |             **1** | GP0             | PWM / pulse generator output  | Existing GOscillo                     |
@@ -40,3 +41,55 @@
 |            **38** | GND             | Ground                        | General ground                        |
 |            **39** | VSYS            | System supply                 | Board power                           |
 |            **40** | VBUS            | USB 5 V                       | USB supply                            |
+
+
+# LCR-specific wiring
+```
+RP2040 / Pico W                       LCR Hardware
+────────────────────────────────────────────────────────
+
+Pin 5    GP3   ──────────────────── AD9833 FSYNC
+
+Pin 9    GP6   / SPI0 SCK ───────── AD9833 SCLK
+Pin 10   GP7   / SPI0 TX  ───────── AD9833 SDATA
+
+Pin 31   GP26 / ADC0 ─────────────── V_total
+                                      │
+AD9833 VOUT ──────────────────────────┤
+                                      │
+                                   R_SENSE
+                                      │
+Pin 32   GP27 / ADC1 ─────────────── V_DUT
+                                      │
+                                     DUT
+                                      │
+Pin 33   AGND ────────────────────────┘
+
+Pin 36   3V3(OUT) ────────────────── AD9833 VCC
+
+Pin 33   AGND ─────┬──────────────── AD9833 AGND
+                   └──────────────── AD9833 DGND
+```
+
+# Bus organization
+```
+SPI0 — LCR
+────────────────
+GP6  SCK  → AD9833
+GP7  TX   → AD9833
+GP3  GPIO → FSYNC
+
+
+SPI1 — Display
+────────────────
+GP10 SCK  → TFT
+GP11 MOSI → TFT
+GP12 MISO → TFT
+GP13 CS   → TFT
+
+
+I2C — Touch
+────────────────
+GP4 SDA → FT6206
+GP5 SCL → FT6206
+```
