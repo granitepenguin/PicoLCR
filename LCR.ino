@@ -262,7 +262,6 @@ constexpr uint8_t SWEEP_PLOT_PRESET_COUNT =
   sizeof(sweepPlotPresets) /
   sizeof(sweepPlotPresets[0]);
 
-//
 // Convert a complete impedance measurement into the compact representation
 // retained by the Sweep engine. Acquisition-specific values that are not
 // required for Sweep plots are intentionally discarded.
@@ -282,40 +281,63 @@ SweepPoint makeSweepPoint(const MeasurementPoint &measurement)
 }
 
 
-// Find the minimum and maximum impedance magnitude in the retained Sweep.
-// A small range is expanded so constant or nearly constant measurements
-// still produce a usable vertical plot scale.
-SweepPlotRange findLCRSweepImpedanceRange()
+// Return the value from one SweepPoint that corresponds to the currently
+// selected Results plot type.
+float getLCRSweepPlotValue(const SweepPoint &point)
+{
+  switch (lcrSweepPlotType) {
+    case LCR_SWEEP_PLOT_PHASE:
+      return point.phaseDeg;
+
+    case LCR_SWEEP_PLOT_RESISTANCE:
+      return point.resistance;
+
+    case LCR_SWEEP_PLOT_REACTANCE:
+      return point.reactance;
+
+    case LCR_SWEEP_PLOT_ESR:
+      return point.esr;
+
+    case LCR_SWEEP_PLOT_Q:
+      return point.q;
+
+    case LCR_SWEEP_PLOT_IMPEDANCE:
+    default:
+      return point.impedance;
+  }
+}
+
+
+// Find the minimum and maximum values for the currently selected Sweep plot.
+// A zero-height range is expanded so constant measurements still produce
+// a usable vertical scale.
+SweepPlotRange findLCRSweepPlotRange()
 {
   SweepPlotRange range = { 0.0f, 1.0f };
 
   if (lcrSweepPointCount == 0)
     return range;
 
-  range.minimum = lcrSweepPoints[0].impedance;
-  range.maximum = lcrSweepPoints[0].impedance;
+  range.minimum = getLCRSweepPlotValue(lcrSweepPoints[0]);
+  range.maximum = range.minimum;
 
-  for (uint16_t i = 1;
-       i < lcrSweepPointCount;
-       i++) {
+  for (uint16_t i = 1; i < lcrSweepPointCount; i++) {
+    float value = getLCRSweepPlotValue(lcrSweepPoints[i]);
 
-    float impedance = lcrSweepPoints[i].impedance;
+    if (value < range.minimum)
+      range.minimum = value;
 
-    if (impedance < range.minimum)
-      range.minimum = impedance;
-
-    if (impedance > range.maximum)
-      range.maximum = impedance;
+    if (value > range.maximum)
+      range.maximum = value;
   }
 
-  // Avoid a zero-height Y range.
   float span = range.maximum - range.minimum;
 
   if (span <= 0.0f) {
     float padding = fabsf(range.maximum) * 0.05f;
 
-    if (padding < 1.0f)
-      padding = 1.0f;
+    if (padding < 0.01f)
+      padding = 0.01f;
 
     range.minimum -= padding;
     range.maximum += padding;
@@ -327,7 +349,7 @@ SweepPlotRange findLCRSweepImpedanceRange()
 
 // Expand a Sweep plot range slightly beyond the measured values.
 // Padding prevents the highest and lowest samples from being drawn directly
-// against the graph border.
+// against the graph border while preserving signed quantities such as X.
 SweepPlotRange padLCRSweepPlotRange(SweepPlotRange range)
 {
   float span = range.maximum - range.minimum;
@@ -340,39 +362,48 @@ SweepPlotRange padLCRSweepPlotRange(SweepPlotRange range)
   range.minimum -= padding;
   range.maximum += padding;
 
-  // Impedance magnitude cannot be negative.
-  if (range.minimum < 0.0f)
+  // Magnitude-only quantities cannot be negative.
+  if ((lcrSweepPlotType == LCR_SWEEP_PLOT_IMPEDANCE ||
+       lcrSweepPlotType == LCR_SWEEP_PLOT_ESR ||
+       lcrSweepPlotType == LCR_SWEEP_PLOT_Q) &&
+      range.minimum < 0.0f) {
+
     range.minimum = 0.0f;
+  }
 
   return range;
 }
 
 
-// Select a common engineering scale for the Sweep impedance axis.
-// The largest absolute value determines the scale used by every Y label.
-SweepAxisScale getLCRSweepImpedanceAxisScale(
-  const SweepPlotRange &range)
+// Select the engineering scale and unit appropriate for the active Sweep plot.
+// Resistance-like quantities use Ohm engineering prefixes, while Phase and Q
+// use their natural units without additional scaling.
+SweepAxisScale getLCRSweepAxisScale(const SweepPlotRange &range)
 {
-  float largest = max( fabsf(range.minimum), fabsf(range.maximum));
+  switch (lcrSweepPlotType) {
+    case LCR_SWEEP_PLOT_PHASE:
+      return { 1.0f, "deg" };
 
-  if (largest >= 1000000.0f) {
-    return {
-      1000000.0f,
-      "MOhm"
-    };
+    case LCR_SWEEP_PLOT_Q:
+      return { 1.0f, "" };
+
+    case LCR_SWEEP_PLOT_IMPEDANCE:
+    case LCR_SWEEP_PLOT_RESISTANCE:
+    case LCR_SWEEP_PLOT_REACTANCE:
+    case LCR_SWEEP_PLOT_ESR:
+    default:
+      break;
   }
 
-  if (largest >= 1000.0f) {
-    return {
-      1000.0f,
-      "kOhm"
-    };
-  }
+  float largest = max(fabsf(range.minimum), fabsf(range.maximum));
 
-  return {
-    1.0f,
-    "Ohm"
-  };
+  if (largest >= 1000000.0f)
+    return { 1000000.0f, "MOhm" };
+
+  if (largest >= 1000.0f)
+    return { 1000.0f, "kOhm" };
+
+  return { 1.0f, "Ohm" };
 }
 
 
@@ -450,31 +481,22 @@ int16_t calculateLCRSweepPlotX(uint32_t frequency)
 }
 
 
-// Convert an impedance magnitude into a Y coordinate within the Results plot.
-// Higher values appear toward the top of the display, so the normal numeric
-// range is inverted when converted to screen coordinates.
-int16_t calculateLCRSweepPlotY(float impedance,
-                               const SweepPlotRange &range)
+// Convert the selected Sweep value into a Y coordinate within the Results
+// plot. Higher values appear toward the top of the TFT coordinate system.
+int16_t calculateLCRSweepPlotY(float value, const SweepPlotRange &range)
 {
   const LCRRect &plot = lcrLayout.sweepPlot;
-
   float span = range.maximum - range.minimum;
 
   if (span <= 0.0f)
     return plot.y + plot.h / 2;
 
-  float position = (impedance - range.minimum) / span;
-
+  float position = (value - range.minimum) / span;
   position = constrain(position, 0.0f, 1.0f);
 
-  return
-    plot.y +
-    plot.h - 1 -
-    static_cast<int16_t>(
-      position * (plot.h - 1)
-    );
+  return plot.y + plot.h - 1 -
+         static_cast<int16_t>(position * (plot.h - 1));
 }
-
 
 
 // Return the short display label associated with the currently selected
@@ -557,34 +579,20 @@ void drawLCRSweepPlotLabels(const SweepPlotRange &range)
   //
   // Determine the common Y-axis engineering scale.
   //
-
-  SweepAxisScale scale = getLCRSweepImpedanceAxisScale(range);
+  SweepAxisScale scale = getLCRSweepAxisScale(range);
 
   //
   // Y-axis unit.
   //
-  // The plotted quantity is identified by the Results control strip, so only
-  // the common engineering unit needs to appear beside the graph.
-  //
-
-  snprintf(
-    label,
-    sizeof(label),
-    "(%s)",
-    scale.unit
-  );
-
-  display.setCursor(
-    plot.x,
-    plot.y - 10
-  );
-
-  display.print(label);
+  if (strlen(scale.unit) > 0) {
+    snprintf(label, sizeof(label), "(%s)", scale.unit);
+    display.setCursor(plot.x, plot.y - 10);
+    display.print(label);
+  }
 
   //
   // Maximum Y value.
   //
-
   formatLCRSweepAxisNumber(
     label,
     sizeof(label),
@@ -786,7 +794,7 @@ void drawLCRSweepPlot()
   // Determine the displayed impedance range.
   //
 
-  SweepPlotRange range = findLCRSweepImpedanceRange();
+  SweepPlotRange range = findLCRSweepPlotRange();
   range = padLCRSweepPlotRange(range);
 
   // Draw axis and quantity labels using the same range as the trace.
@@ -797,7 +805,8 @@ void drawLCRSweepPlot()
   //
 
   int16_t previousX = calculateLCRSweepPlotX( lcrSweepPoints[0].frequency);
-  int16_t previousY = calculateLCRSweepPlotY( lcrSweepPoints[0].impedance, range);
+  int16_t previousY =
+    calculateLCRSweepPlotY(getLCRSweepPlotValue(lcrSweepPoints[0]), range);
 
   // A single-point result still gets a visible marker.
   display.drawPixel(
@@ -811,7 +820,8 @@ void drawLCRSweepPlot()
        i++) {
 
     int16_t x = calculateLCRSweepPlotX( lcrSweepPoints[i].frequency);
-    int16_t y = calculateLCRSweepPlotY( lcrSweepPoints[i].impedance, range);
+    int16_t y =
+      calculateLCRSweepPlotY(getLCRSweepPlotValue(lcrSweepPoints[i]), range);
 
     display.drawLine(
       previousX,
@@ -825,8 +835,6 @@ void drawLCRSweepPlot()
     previousY = y;
   }
 }
-
-
 
 
 // Acquire and store one measurement at the requested Sweep frequency.
@@ -923,9 +931,7 @@ void updateLCRSweep()
   if (!lcrSweepExecution.active)
     return;
 
-  if (lcrSweepExecution.currentPoint >=
-      lcrSweepExecution.totalPoints) {
-
+  if (lcrSweepExecution.currentPoint >= lcrSweepExecution.totalPoints) {
     finishLCRSweep();
     return;
   }
@@ -2748,8 +2754,7 @@ void drawLCRSweepSetup()
   }
 
   // Derived measurement count.
-  const LCRRect &countRow =
-    lcrLayout.sweepSetupRows[4];
+  const LCRRect &countRow = lcrLayout.sweepSetupRows[4];
 
   y = countRow.y + (countRow.h - 8) / 2;
 
@@ -2760,17 +2765,9 @@ void drawLCRSweepSetup()
 
   // Display the number of measurements derived from the active Sweep mode.
   if (lcrSweepSettings.mode == LCR_SWEEP_LINEAR) {
-    display.print(
-      calculateLinearSweepPointCount(
-        lcrSweepSettings
-      )
-    );
+    display.print( calculateLinearSweepPointCount( lcrSweepSettings));
   } else {
-    display.print(
-      calculateLogSweepPointCount(
-        lcrSweepSettings
-      )
-    );
+    display.print( calculateLogSweepPointCount( lcrSweepSettings));
   }
 }
 
@@ -2792,13 +2789,7 @@ void drawLCRSelectorButton(const LCRRect &rect,
   else
     color = TXTCOLOR;
 
-  display.drawRect(
-    rect.x,
-    rect.y,
-    rect.w,
-    rect.h,
-    color
-  );
+  display.drawRect( rect.x, rect.y, rect.w, rect.h, color);
 
   display.setTextSize(1);
   display.setTextColor(color, BGCOLOR);
@@ -2817,16 +2808,9 @@ void drawLCRSelectorButton(const LCRRect &rect,
 // choices are generated from the shared Sweep plot preset table.
 void drawLCRSweepPlotSelector()
 {
-  const LCRRect &r =
-    lcrLayout.selector;
+  const LCRRect &r = lcrLayout.selector;
 
-  display.fillRect(
-    r.x,
-    r.y,
-    r.w,
-    r.h,
-    BGCOLOR
-  );
+  display.fillRect( r.x, r.y, r.w, r.h, BGCOLOR);
 
   display.setTextSize(1);
   display.setTextColor(TXTCOLOR, BGCOLOR);
@@ -2834,10 +2818,7 @@ void drawLCRSweepPlotSelector()
   const char *title = "Select Plot";
   int16_t titleWidth = strlen(title) * 6;
 
-  display.setCursor(
-    r.x + (r.w - titleWidth) / 2,
-    r.y + r.h * 7 / 100
-  );
+  display.setCursor( r.x + (r.w - titleWidth) / 2, r.y + r.h * 7 / 100);
 
   display.print(title);
 
@@ -2854,11 +2835,7 @@ void drawLCRSweepPlotSelector()
     );
   }
 
-  drawLCRSelectorButton(
-    lcrLayout.selectorCancel,
-    "Cancel",
-    false
-  );
+  drawLCRSelectorButton( lcrLayout.selectorCancel, "Cancel", false);
 }
 
 
@@ -2945,9 +2922,7 @@ void drawLCRSweepStepSelector()
        i < SWEEP_STEP_PRESET_COUNT;
        i++) {
 
-    bool selected =
-      lcrSweepSettings.stepFrequency ==
-      sweepStepPresets[i].value;
+    bool selected = lcrSweepSettings.stepFrequency == sweepStepPresets[i].value;
 
     drawLCRSelectorButton(
       lcrLayout.sweepStepPresets[i],
@@ -2956,11 +2931,7 @@ void drawLCRSweepStepSelector()
     );
   }
 
-  drawLCRSelectorButton(
-    lcrLayout.selectorCancel,
-    "Cancel",
-    false
-  );
+  drawLCRSelectorButton( lcrLayout.selectorCancel, "Cancel", false);
 }
 
 
@@ -2972,13 +2943,7 @@ void drawLCRSweepDensitySelector()
 {
   const LCRRect &r = lcrLayout.selector;
 
-  display.fillRect(
-    r.x,
-    r.y,
-    r.w,
-    r.h,
-    BGCOLOR
-  );
+  display.fillRect( r.x, r.y, r.w, r.h, BGCOLOR);
 
   display.setTextSize(1);
   display.setTextColor(TXTCOLOR, BGCOLOR);
@@ -3025,20 +2990,8 @@ void drawLCRSweepFooter()
 {
   const LCRRect &r = lcrLayout.footer;
 
-  display.fillRect(
-    r.x,
-    r.y,
-    r.w,
-    r.h,
-    BGCOLOR
-  );
-
-  display.drawFastHLine(
-    r.x,
-    r.y,
-    r.w,
-    GRIDCOLOR
-  );
+  display.fillRect( r.x, r.y, r.w, r.h, BGCOLOR);
+  display.drawFastHLine( r.x, r.y, r.w, GRIDCOLOR);
 
   const char *label = "Sweep";
 
@@ -3061,42 +3014,19 @@ void drawLCRSweepFooter()
 // Cancel footer remains static for the duration of acquisition.
 void drawLCRSweepRunning()
 {
-  const LCRRect &content =
-    lcrLayout.content;
+  const LCRRect &content = lcrLayout.content;
+  const LCRRect &footer = lcrLayout.footer;
 
-  const LCRRect &footer =
-    lcrLayout.footer;
-
-  display.fillRect(
-    content.x,
-    content.y,
-    content.w,
-    content.h,
-    BGCOLOR
-  );
-
-  display.fillRect(
-    footer.x,
-    footer.y,
-    footer.w,
-    footer.h,
-    BGCOLOR
-  );
-
-  display.drawFastHLine(
-    footer.x,
-    footer.y,
-    footer.w,
-    GRIDCOLOR
-  );
+  display.fillRect( content.x, content.y, content.w, content.h, BGCOLOR);
+  display.fillRect( footer.x, footer.y, footer.w, footer.h, BGCOLOR);
+  display.drawFastHLine( footer.x, footer.y, footer.w, GRIDCOLOR);
 
   display.setTextSize(1);
   display.setTextColor(TXTCOLOR, BGCOLOR);
 
   const char *cancelLabel = "Cancel";
 
-  int16_t cancelWidth =
-    strlen(cancelLabel) * 6;
+  int16_t cancelWidth = strlen(cancelLabel) * 6;
 
   display.setCursor(
     footer.x +
@@ -3119,17 +3049,10 @@ void updateLCRSweepRunningDisplay()
   if (lcrSweepExecution.totalPoints == 0)
     return;
 
-  const LCRRect &content =
-    lcrLayout.content;
-
-  const LCRRect &progress =
-    lcrLayout.sweepProgress;
-
-  uint32_t completed =
-    lcrSweepExecution.currentPoint;
-
-  uint32_t total =
-    lcrSweepExecution.totalPoints;
+  const LCRRect &content = lcrLayout.content;
+  const LCRRect &progress = lcrLayout.sweepProgress;
+  uint32_t completed = lcrSweepExecution.currentPoint;
+  uint32_t total = lcrSweepExecution.totalPoints;
 
   lcrSweepSprite.fillSprite(BGCOLOR);
 
@@ -3141,27 +3064,16 @@ void updateLCRSweepRunningDisplay()
   //
 
   const char *title = "Running Sweep";
-
-  int16_t titleWidth =
-    strlen(title) * 6;
-
-  lcrSweepSprite.setCursor(
-    (content.w - titleWidth) / 2,
-    content.h * 8 / 100
-  );
-
+  int16_t titleWidth = strlen(title) * 6;
+  lcrSweepSprite.setCursor( (content.w - titleWidth) / 2, content.h * 8 / 100);
   lcrSweepSprite.print(title);
 
   //
   // Progress bar
   //
 
-  int16_t progressX =
-    progress.x - content.x;
-
-  int16_t progressY =
-    progress.y - content.y;
-
+  int16_t progressX = progress.x - content.x;
+  int16_t progressY = progress.y - content.y;
   lcrSweepSprite.drawRect(
     progressX,
     progressY,
@@ -3170,8 +3082,7 @@ void updateLCRSweepRunningDisplay()
     TXTCOLOR
   );
 
-  int16_t innerW =
-    progress.w - 2;
+  int16_t innerW = progress.w - 2;
 
   int16_t fillW =
     static_cast<int16_t>(
@@ -3203,17 +3114,10 @@ void updateLCRSweepRunningDisplay()
     static_cast<unsigned long>(total)
   );
 
-  int16_t textTop =
-    progressY + progress.h + 12;
+  int16_t textTop = progressY + progress.h + 12;
+  int16_t width = strlen(buffer) * 6;
 
-  int16_t width =
-    strlen(buffer) * 6;
-
-  lcrSweepSprite.setCursor(
-    (content.w - width) / 2,
-    textTop
-  );
-
+  lcrSweepSprite.setCursor( (content.w - width) / 2, textTop);
   lcrSweepSprite.print(buffer);
 
   //
@@ -3235,39 +3139,23 @@ void updateLCRSweepRunningDisplay()
 
   width = strlen(buffer) * 6;
 
-  lcrSweepSprite.setCursor(
-    (content.w - width) / 2,
-    textTop + 20
-  );
-
+  lcrSweepSprite.setCursor( (content.w - width) / 2, textTop + 20);
   lcrSweepSprite.print(buffer);
 
   //
   // Estimated remaining time
   //
 
-  uint32_t elapsed =
-    millis() - lcrSweepExecution.startTime;
-
+  uint32_t elapsed = millis() - lcrSweepExecution.startTime;
   uint32_t remainingMs = 0;
 
-  if (completed > 0 &&
-      completed < total) {
-
-    uint32_t averagePointMs =
-      elapsed / completed;
-
-    remainingMs =
-      averagePointMs *
-      (total - completed);
+  if (completed > 0 && completed < total) {
+    uint32_t averagePointMs = elapsed / completed;
+    remainingMs = averagePointMs * (total - completed);
   }
 
   if (completed == 0) {
-    snprintf(
-      buffer,
-      sizeof(buffer),
-      "Remaining: --"
-    );
+    snprintf( buffer, sizeof(buffer), "Remaining: --");
   } else {
     snprintf(
       buffer,
@@ -3279,21 +3167,14 @@ void updateLCRSweepRunningDisplay()
 
   width = strlen(buffer) * 6;
 
-  lcrSweepSprite.setCursor(
-    (content.w - width) / 2,
-    textTop + 40
-  );
-
+  lcrSweepSprite.setCursor( (content.w - width) / 2, textTop + 40);
   lcrSweepSprite.print(buffer);
 
   //
   // Push the completed Running display to the TFT.
   //
 
-  lcrSweepSprite.pushSprite(
-    content.x,
-    content.y
-  );
+  lcrSweepSprite.pushSprite( content.x, content.y);
 }
 
 
