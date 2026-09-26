@@ -23,6 +23,10 @@ static const uint8_t AD9833_DATA_PIN  = 7;  // GP7, physical pin 10
 // AD9833 excitation source for the LCR measurement hardware.
 AD9833_Driver lcrDDS(AD9833_FSYNC_PIN);
 
+// Tracks the frequency currently programmed into the physical generator.
+// Repeated measurements at the same frequency do not need to reprogram the DDS.
+uint32_t lcrGeneratorFrequency = 0;
+
 // screen locations for various output displays
 constexpr int LABEL_X = 20;
 constexpr int VALUE_X = 120;
@@ -86,7 +90,9 @@ constexpr uint32_t LCR_DISPLAY_INTERVAL_MS = 150;
 // Measure is always the default tab when entering the instrument
 LCRTab lcrTab = LCR_TAB_MEASURE;
 
-LCRBackend lcrBackend = LCR_BACKEND_SIMULATION;
+// Pick whether we are simulating our using real hardware
+//LCRBackend lcrBackend = LCR_BACKEND_SIMULATION;
+LCRBackend lcrBackend = LCR_BACKEND_HARDWARE;
 
 // Indicates that the dynamic LCR display must be redrawn immediately.
 // This is set whenever the analyzer is entered or its screen changes.
@@ -1095,20 +1101,16 @@ MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings)
 }
 
 
-// Acquire a single measurement from the hardware measurement engine.
-// This function will eventually control the AD9833, ADC/DMA, and
-// impedance calculations.
+// Perform one measurement using the physical LCR hardware.
+// During this integration stage the AD9833 is driven at the requested
+// frequency while simulated data temporarily supplies the measurement result.
 MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
 {
-  MeasurementPoint m;
+  setLCRGeneratorFrequency(settings.frequency);
 
-  //
-  // Placeholder until hardware exists.
-  //
-
-  return m;
+  MeasurementPoint measurement = simulatedMeasurement(settings);
+  return measurement;
 }
-
 
 
 // Measurement engine interface.
@@ -1378,9 +1380,26 @@ void initializeLCRGenerator()
   SPI.setTX(AD9833_DATA_PIN);
   SPI.setRX(NOPIN);
 
+  // Defaulting to 1kHz out of the generator, and setting the semaphore
+  // lcrGeneratorFrequency to match so we aren't constantly resetting ourselves
+  // on every pass.
   lcrDDS.begin(1000);
+  lcrGeneratorFrequency = 1000;
 
   Serial.println("LCR AD9833 initialized at 1 kHz");
+}
+
+
+// Set the physical LCR excitation frequency only when it actually changes.
+// Avoiding redundant AD9833 writes prevents unnecessary SPI traffic during
+// continuous single-frequency measurements.
+void setLCRGeneratorFrequency(uint32_t frequency)
+{
+  if (frequency == lcrGeneratorFrequency)
+    return;
+
+  lcrDDS.setFrequencyHz(frequency);
+  lcrGeneratorFrequency = frequency;
 }
 
 

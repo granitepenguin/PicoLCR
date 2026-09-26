@@ -24,18 +24,16 @@ public:
     return true;
   }
 
-  // Change output frequency at runtime. Re-issues RESET briefly during the
-  // 28-bit load to avoid glitchy partial output, then releases.
+  // Change the output frequency at runtime without resetting the DDS.
+  // Both 14-bit halves of FREQ0 are written while B28 remains enabled,
+  // allowing continuous operation during normal frequency changes.
   void setFrequencyHz(uint32_t hz) {
-    // 28-bit tuning word: freq_word = hz * 2^28 / mclk
     uint64_t freq_word = ((uint64_t)hz << 28) / _mclk;
     uint16_t lsb14 = (uint16_t)(freq_word & 0x3FFF);
     uint16_t msb14 = (uint16_t)((freq_word >> 14) & 0x3FFF);
 
-    writeReg(CTRL_REG | CTRL_B28 | CTRL_RESET);
-    writeReg(FREQ0_W  | lsb14);
-    writeReg(FREQ0_W  | msb14);
-    writeReg(CTRL_REG | CTRL_B28);
+    writeReg(FREQ0_W | lsb14);
+    writeReg(FREQ0_W | msb14);
   }
 
   void stop() {

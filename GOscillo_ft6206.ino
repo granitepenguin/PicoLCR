@@ -229,11 +229,6 @@ void setup(){
 // Initialize the LCR excitation generator after the existing display hardware.
 initializeLCRGenerator();
 
-delay(10000);
-testLCRGeneratorFrequency(5000);
-delay(10000);
-testLCRGeneratorFrequency(10000);
-
 //  Serial.begin(115200);
 //  delay(3000);
 //  Serial.println("core0:start....");

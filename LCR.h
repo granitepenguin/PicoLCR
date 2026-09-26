@@ -386,6 +386,9 @@ void initializeLCR();
 // Initialize the AD9833 excitation generator used by the hardware backend.
 void initializeLCRGenerator();
 
+// Set the physical LCR excitation generator frequency.
+void setLCRGeneratorFrequency(uint32_t frequency);
+
 // Set the AD9833 frequency directly during initial hardware testing.
 void testLCRGeneratorFrequency(uint32_t frequency);
 
