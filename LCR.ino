@@ -97,6 +97,11 @@ LCRSweepState lcrSweepState = LCR_SWEEP_SETUP;
 // Impedance magnitude is the default Results view after startup.
 LCRSweepPlotType lcrSweepPlotType = LCR_SWEEP_PLOT_IMPEDANCE;
 
+// Stores the current Sweep Results inspection cursor.
+// No point is selected when a new Results view is first displayed.
+bool lcrSweepCursorActive = false;
+uint16_t lcrSweepCursorIndex = 0;
+
 // Identifies which setting will receive the next frequency selection.
 // Measure frequency is the default target when entering the analyzer.
 LCRFrequencyTarget lcrFrequencyTarget = LCR_FREQ_MEASURE;
@@ -441,6 +446,22 @@ void formatLCRSweepAxisNumber(char *buffer,
 }
 
 
+// Format the selected Sweep cursor value using the engineering scale currently
+// displayed on the Y axis.
+void formatLCRSweepCursorValue(char *buffer, size_t bufferSize,
+                               float value, const SweepAxisScale &scale)
+{
+  char number[16];
+
+  formatLCRSweepAxisNumber(number, sizeof(number), value / scale.divisor);
+
+  if (strlen(scale.unit) > 0)
+    snprintf(buffer, bufferSize, "%s%s", number, scale.unit);
+  else
+    snprintf(buffer, bufferSize, "%s", number);
+}
+
+
 // Convert a Sweep frequency into an X coordinate within the Results plot.
 // Linear sweeps use linear frequency spacing, while logarithmic sweeps use
 // logarithmic spacing so the displayed axis matches the acquisition mode.
@@ -481,6 +502,31 @@ int16_t calculateLCRSweepPlotX(uint32_t frequency)
 }
 
 
+// Find the retained SweepPoint whose plotted X coordinate is closest to the
+// requested screen position. This automatically follows Linear or Log spacing
+// because it uses the same X-coordinate calculation as the displayed trace.
+uint16_t findNearestLCRSweepPoint(int16_t touchX)
+{
+  if (lcrSweepPointCount == 0)
+    return 0;
+
+  uint16_t nearestIndex = 0;
+  int32_t nearestDistance = INT32_MAX;
+
+  for (uint16_t i = 0; i < lcrSweepPointCount; i++) {
+    int16_t pointX = calculateLCRSweepPlotX(lcrSweepPoints[i].frequency);
+    int32_t distance = abs(static_cast<int32_t>(touchX) - pointX);
+
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestIndex = i;
+    }
+  }
+
+  return nearestIndex;
+}
+
+
 // Convert the selected Sweep value into a Y coordinate within the Results
 // plot. Higher values appear toward the top of the TFT coordinate system.
 int16_t calculateLCRSweepPlotY(float value, const SweepPlotRange &range)
@@ -515,53 +561,65 @@ const char *getLCRSweepPlotLabel()
 }
 
 
-// Draw the Sweep Results plot-control strip.
-// The outlined full-width control makes plot selection visibly interactive
-// while remaining separate from the graph's future cursor touch area.
+// Draw the Sweep Results plot-control/status strip.
+// Without a cursor it identifies the selected plot quantity. When a point is
+// selected it also displays that point's frequency and measured plot value.
 void drawLCRSweepPlotControl()
 {
   const LCRRect &control = lcrLayout.sweepPlotControl;
 
-  display.drawRect(
-    control.x,
-    control.y,
-    control.w,
-    control.h,
-    GRIDCOLOR
-  );
+  display.fillRect(control.x, control.y, control.w, control.h, BGCOLOR);
+  display.drawRect(control.x, control.y, control.w, control.h, GRIDCOLOR);
 
   display.setTextSize(1);
   display.setTextColor(TXTCOLOR, BGCOLOR);
 
-  char label[24];
-  snprintf( label, sizeof(label), "Plot: %s", getLCRSweepPlotLabel());
+  char label[64];
 
-  display.setCursor(
-    control.x + 8,
-    control.y + (control.h - 8) / 2
-  );
+  if (lcrSweepCursorActive &&
+      lcrSweepCursorIndex < lcrSweepPointCount) {
+
+    const SweepPoint &point = lcrSweepPoints[lcrSweepCursorIndex];
+
+    SweepPlotRange range = findLCRSweepPlotRange();
+    range = padLCRSweepPlotRange(range);
+
+    SweepAxisScale scale = getLCRSweepAxisScale(range);
+
+    LCRFormattedValue frequency = formatFrequency(point.frequency);
+
+    char value[20];
+    formatLCRSweepCursorValue(
+      value,
+      sizeof(value),
+      getLCRSweepPlotValue(point),
+      scale
+    );
+
+    snprintf(
+      label,
+      sizeof(label),
+      "%s   %s%s   %s",
+      getLCRSweepPlotLabel(),
+      frequency.value,
+      frequency.unit,
+      value
+    );
+  } else {
+    snprintf(label, sizeof(label), "Plot: %s", getLCRSweepPlotLabel());
+  }
+
+  display.setCursor( control.x + 8, control.y + (control.h - 8) / 2);
 
   display.print(label);
 
-  // Simple down-arrow indicator showing that the control is selectable.
+  // Down-arrow indicator shows that this strip remains selectable even when
+  // cursor information is being displayed.
   const int16_t arrowX = control.x + control.w - 12;
   const int16_t arrowY = control.y + control.h / 2 - 1;
 
-  display.drawLine(
-    arrowX - 3,
-    arrowY - 2,
-    arrowX,
-    arrowY + 1,
-    TXTCOLOR
-  );
-
-  display.drawLine(
-    arrowX,
-    arrowY + 1,
-    arrowX + 3,
-    arrowY - 2,
-    TXTCOLOR
-  );
+  display.drawLine( arrowX - 3, arrowY - 2, arrowX, arrowY + 1, TXTCOLOR);
+  display.drawLine( arrowX, arrowY + 1, arrowX + 3, arrowY - 2, TXTCOLOR);
 }
 
 
@@ -801,7 +859,7 @@ void drawLCRSweepPlot()
   drawLCRSweepPlotLabels(range);
 
   //
-  // Draw the |Z| trace.
+  // Draw the trace.
   //
 
   int16_t previousX = calculateLCRSweepPlotX( lcrSweepPoints[0].frequency);
@@ -815,6 +873,7 @@ void drawLCRSweepPlot()
     HIGHCOLOR
   );
 
+  // Trace drawing loop
   for (uint16_t i = 1;
        i < lcrSweepPointCount;
        i++) {
@@ -823,16 +882,29 @@ void drawLCRSweepPlot()
     int16_t y =
       calculateLCRSweepPlotY(getLCRSweepPlotValue(lcrSweepPoints[i]), range);
 
-    display.drawLine(
-      previousX,
-      previousY,
-      x,
-      y,
-      HIGHCOLOR
-    );
+    display.drawLine( previousX, previousY, x, y, HIGHCOLOR);
 
     previousX = x;
     previousY = y;
+  }
+
+  //
+  // Results inspection cursor
+  //
+
+  if (lcrSweepCursorActive &&
+      lcrSweepCursorIndex < lcrSweepPointCount) {
+
+    int16_t cursorX = calculateLCRSweepPlotX(
+      lcrSweepPoints[lcrSweepCursorIndex].frequency
+    );
+
+    display.drawFastVLine(
+      cursorX,
+      plot.y + 1,
+      plot.h - 2,
+      TXTCOLOR
+    );
   }
 }
 
@@ -876,6 +948,8 @@ bool startLCRSweep()
   }
 
   lcrSweepPointCount = 0;
+  lcrSweepCursorActive = false;
+  lcrSweepCursorIndex = 0;
   lcrSweepExecution.totalPoints = totalPoints;
   lcrSweepExecution.currentPoint = 0;
   lcrSweepExecution.currentFrequency = lcrSweepSettings.startFrequency;
@@ -2302,26 +2376,33 @@ void handleLCRSweepResultsTouch(uint16_t x, uint16_t y)
 {
   // Open the plot selector when the Results control strip is touched.
   if (pointInLCRRect( x, y, lcrLayout.sweepPlotControl)) {
-
     lcrUIState = LCR_UI_SWEEP_PLOT_SELECT;
-
     drawLCRSweepPlotSelector();
+    return;
+  }
+
+  // Select the Sweep result nearest the touched horizontal graph position.
+  // Touching another location simply moves the existing inspection cursor.
+  if (pointInLCRRect(x, y, lcrLayout.sweepPlot)) {
+    if (lcrSweepPointCount == 0)
+      return;
+
+    lcrSweepCursorIndex = findNearestLCRSweepPoint(x);
+    lcrSweepCursorActive = true;
+    drawLCRSweepResults();
     return;
   }
 
   // Return to Sweep Setup without changing the current configuration.
   if (pointInLCRRect( x, y, lcrLayout.sweepResultsSetupButton)) {
-
     lcrSweepState = LCR_SWEEP_SETUP;
     lcrUIState = LCR_UI_NORMAL;
-
     drawLCRScreen();
     return;
   }
 
   // Run another Sweep using the current configuration.
   if (pointInLCRRect( x, y, lcrLayout.sweepResultsSweepButton)) {
-
     startLCRSweep();
     return;
   }

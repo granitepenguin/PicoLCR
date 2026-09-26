@@ -96,6 +96,12 @@ enum LCRSweepPlotType
 
 extern LCRSweepPlotType lcrSweepPlotType;
 
+// Tracks the currently inspected Sweep result.
+// The cursor index identifies one retained SweepPoint; cursorActive controls
+// whether the Results graph and status strip display the selected point.
+extern bool lcrSweepCursorActive;
+extern uint16_t lcrSweepCursorIndex;
+
 // Maximum number of measurement points retained for one frequency sweep.
 // This accommodates the current full-range 100 Hz-step linear sweep while
 // bounding RAM usage for sweep-result storage.
