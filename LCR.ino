@@ -93,6 +93,10 @@ LCRMeasureState lcrMeasureState = LCR_MEASURE_LIVE;
 // Entering the analyzer initializes Sweep in its configuration state.
 LCRSweepState lcrSweepState = LCR_SWEEP_SETUP;
 
+// Stores the quantity currently displayed on the Sweep Results graph.
+// Impedance magnitude is the default Results view after startup.
+LCRSweepPlotType lcrSweepPlotType = LCR_SWEEP_PLOT_IMPEDANCE;
+
 // Identifies which setting will receive the next frequency selection.
 // Measure frequency is the default target when entering the analyzer.
 LCRFrequencyTarget lcrFrequencyTarget = LCR_FREQ_MEASURE;
@@ -235,6 +239,29 @@ const SweepDensityPreset sweepDensityPresets[] = {
 constexpr uint8_t SWEEP_DENSITY_PRESET_COUNT =
   sizeof(sweepDensityPresets) / sizeof(sweepDensityPresets[0]);
 
+// Defines one selectable Sweep Results plot quantity.
+struct SweepPlotPreset
+{
+  const char *label;
+  LCRSweepPlotType type;
+};
+
+// Available quantities that can be displayed from retained Sweep results.
+// Adding another stored quantity later only requires extending this table
+// and teaching the plot-value helpers how to retrieve and scale it.
+const SweepPlotPreset sweepPlotPresets[] = {
+  { "|Z|",   LCR_SWEEP_PLOT_IMPEDANCE  },
+  { "Phase", LCR_SWEEP_PLOT_PHASE      },
+  { "R",     LCR_SWEEP_PLOT_RESISTANCE },
+  { "X",     LCR_SWEEP_PLOT_REACTANCE },
+  { "ESR",   LCR_SWEEP_PLOT_ESR        },
+  { "Q",     LCR_SWEEP_PLOT_Q          }
+};
+
+constexpr uint8_t SWEEP_PLOT_PRESET_COUNT =
+  sizeof(sweepPlotPresets) /
+  sizeof(sweepPlotPresets[0]);
+
 //
 // Convert a complete impedance measurement into the compact representation
 // retained by the Sweep engine. Acquisition-specific values that are not
@@ -260,10 +287,7 @@ SweepPoint makeSweepPoint(const MeasurementPoint &measurement)
 // still produce a usable vertical plot scale.
 SweepPlotRange findLCRSweepImpedanceRange()
 {
-  SweepPlotRange range = {
-    0.0f,
-    1.0f
-  };
+  SweepPlotRange range = { 0.0f, 1.0f };
 
   if (lcrSweepPointCount == 0)
     return range;
@@ -306,14 +330,12 @@ SweepPlotRange findLCRSweepImpedanceRange()
 // against the graph border.
 SweepPlotRange padLCRSweepPlotRange(SweepPlotRange range)
 {
-  float span =
-    range.maximum - range.minimum;
+  float span = range.maximum - range.minimum;
 
   if (span <= 0.0f)
     return range;
 
-  float padding =
-    span * 0.08f;
+  float padding = span * 0.08f;
 
   range.minimum -= padding;
   range.maximum += padding;
@@ -331,11 +353,7 @@ SweepPlotRange padLCRSweepPlotRange(SweepPlotRange range)
 SweepAxisScale getLCRSweepImpedanceAxisScale(
   const SweepPlotRange &range)
 {
-  float largest =
-    max(
-      fabsf(range.minimum),
-      fabsf(range.maximum)
-    );
+  float largest = max( fabsf(range.minimum), fabsf(range.maximum));
 
   if (largest >= 1000000.0f) {
     return {
@@ -365,8 +383,7 @@ void formatLCRSweepAxisNumber(char *buffer,
                               size_t bufferSize,
                               float value)
 {
-  float magnitude =
-    fabsf(value);
+  float magnitude = fabsf(value);
 
   if (magnitude >= 100.0f) {
     snprintf(
@@ -398,14 +415,9 @@ void formatLCRSweepAxisNumber(char *buffer,
 // logarithmic spacing so the displayed axis matches the acquisition mode.
 int16_t calculateLCRSweepPlotX(uint32_t frequency)
 {
-  const LCRRect &plot =
-    lcrLayout.sweepPlot;
-
-  uint32_t start =
-    lcrSweepSettings.startFrequency;
-
-  uint32_t stop =
-    lcrSweepSettings.stopFrequency;
+  const LCRRect &plot = lcrLayout.sweepPlot;
+  uint32_t start = lcrSweepSettings.startFrequency;
+  uint32_t stop = lcrSweepSettings.stopFrequency;
 
   if (stop <= start)
     return plot.x;
@@ -417,28 +429,18 @@ int16_t calculateLCRSweepPlotX(uint32_t frequency)
     if (frequency == 0 || start == 0)
       return plot.x;
 
-    float logStart =
-      log10f(static_cast<float>(start));
+    float logStart = log10f(static_cast<float>(start));
+    float logStop = log10f(static_cast<float>(stop));
+    float logFrequency = log10f(static_cast<float>(frequency));
 
-    float logStop =
-      log10f(static_cast<float>(stop));
-
-    float logFrequency =
-      log10f(static_cast<float>(frequency));
-
-    position =
-      (logFrequency - logStart) /
-      (logStop - logStart);
-
+    position = (logFrequency - logStart) / (logStop - logStart);
   } else {
-
     position =
       static_cast<float>(frequency - start) /
       static_cast<float>(stop - start);
   }
 
-  position =
-    constrain(position, 0.0f, 1.0f);
+  position = constrain(position, 0.0f, 1.0f);
 
   return
     plot.x +
@@ -454,20 +456,16 @@ int16_t calculateLCRSweepPlotX(uint32_t frequency)
 int16_t calculateLCRSweepPlotY(float impedance,
                                const SweepPlotRange &range)
 {
-  const LCRRect &plot =
-    lcrLayout.sweepPlot;
+  const LCRRect &plot = lcrLayout.sweepPlot;
 
-  float span =
-    range.maximum - range.minimum;
+  float span = range.maximum - range.minimum;
 
   if (span <= 0.0f)
     return plot.y + plot.h / 2;
 
-  float position =
-    (impedance - range.minimum) / span;
+  float position = (impedance - range.minimum) / span;
 
-  position =
-    constrain(position, 0.0f, 1.0f);
+  position = constrain(position, 0.0f, 1.0f);
 
   return
     plot.y +
@@ -479,13 +477,28 @@ int16_t calculateLCRSweepPlotY(float impedance,
 
 
 
+// Return the short display label associated with the currently selected
+// Sweep Results quantity.
+const char *getLCRSweepPlotLabel()
+{
+  for (uint8_t i = 0;
+       i < SWEEP_PLOT_PRESET_COUNT;
+       i++) {
+    if (sweepPlotPresets[i].type == lcrSweepPlotType) {
+      return sweepPlotPresets[i].label;
+    }
+  }
+
+  return "|Z|";
+}
+
+
 // Draw the Sweep Results plot-control strip.
 // The outlined full-width control makes plot selection visibly interactive
 // while remaining separate from the graph's future cursor touch area.
 void drawLCRSweepPlotControl()
 {
-  const LCRRect &control =
-    lcrLayout.sweepPlotControl;
+  const LCRRect &control = lcrLayout.sweepPlotControl;
 
   display.drawRect(
     control.x,
@@ -498,7 +511,8 @@ void drawLCRSweepPlotControl()
   display.setTextSize(1);
   display.setTextColor(TXTCOLOR, BGCOLOR);
 
-  const char *label = "Plot: |Z|";
+  char label[24];
+  snprintf( label, sizeof(label), "Plot: %s", getLCRSweepPlotLabel());
 
   display.setCursor(
     control.x + 8,
@@ -529,15 +543,12 @@ void drawLCRSweepPlotControl()
 }
 
 
-
 // Draw compact labels around the Sweep impedance plot.
 // The Y axis uses one common engineering scale so numeric labels remain
 // short while the axis title identifies their shared impedance unit.
 void drawLCRSweepPlotLabels(const SweepPlotRange &range)
 {
-  const LCRRect &plot =
-    lcrLayout.sweepPlot;
-
+  const LCRRect &plot = lcrLayout.sweepPlot;
   char label[24];
 
   display.setTextSize(1);
@@ -614,8 +625,7 @@ void drawLCRSweepPlotLabels(const SweepPlotRange &range)
     range.minimum / scale.divisor
   );
 
-  labelWidth =
-    strlen(label) * 6;
+  labelWidth = strlen(label) * 6;
 
   display.setCursor(
     plot.x - labelWidth - 3,
@@ -629,9 +639,7 @@ void drawLCRSweepPlotLabels(const SweepPlotRange &range)
   //
 
   LCRFormattedValue startFrequency =
-    formatFrequency(
-      lcrSweepSettings.startFrequency
-    );
+    formatFrequency( lcrSweepSettings.startFrequency);
 
   snprintf(
     label,
@@ -690,8 +698,7 @@ void drawLCRSweepPlotLabels(const SweepPlotRange &range)
     middleFrequency.unit
   );
 
-  labelWidth =
-    strlen(label) * 6;
+  labelWidth = strlen(label) * 6;
 
   display.setCursor(
     plot.x +
@@ -718,8 +725,7 @@ void drawLCRSweepPlotLabels(const SweepPlotRange &range)
     stopFrequency.unit
   );
 
-  labelWidth =
-    strlen(label) * 6;
+  labelWidth = strlen(label) * 6;
 
   display.setCursor(
     plot.x + plot.w - labelWidth,
@@ -764,8 +770,7 @@ void drawLCRSweepPlot()
   // Draw a single vertical midpoint reference through the plot.
   // Together with the horizontal midpoint this creates a simple 2x2
   // reference grid without overcrowding the Results display.
-  const int16_t midpointX =
-    plot.x + plot.w / 2;
+  const int16_t midpointX = plot.x + plot.w / 2;
 
   display.drawFastVLine(
     midpointX,
@@ -791,16 +796,8 @@ void drawLCRSweepPlot()
   // Draw the |Z| trace.
   //
 
-  int16_t previousX =
-    calculateLCRSweepPlotX(
-      lcrSweepPoints[0].frequency
-    );
-
-  int16_t previousY =
-    calculateLCRSweepPlotY(
-      lcrSweepPoints[0].impedance,
-      range
-    );
+  int16_t previousX = calculateLCRSweepPlotX( lcrSweepPoints[0].frequency);
+  int16_t previousY = calculateLCRSweepPlotY( lcrSweepPoints[0].impedance, range);
 
   // A single-point result still gets a visible marker.
   display.drawPixel(
@@ -813,16 +810,8 @@ void drawLCRSweepPlot()
        i < lcrSweepPointCount;
        i++) {
 
-    int16_t x =
-      calculateLCRSweepPlotX(
-        lcrSweepPoints[i].frequency
-      );
-
-    int16_t y =
-      calculateLCRSweepPlotY(
-        lcrSweepPoints[i].impedance,
-        range
-      );
+    int16_t x = calculateLCRSweepPlotX( lcrSweepPoints[i].frequency);
+    int16_t y = calculateLCRSweepPlotY( lcrSweepPoints[i].impedance, range);
 
     display.drawLine(
       previousX,
@@ -850,12 +839,8 @@ bool acquireLCRSweepPoint(uint32_t frequency)
 
   MeasurementSettings settings = lcrSettings;
   settings.frequency = frequency;
-
-  MeasurementPoint measurement =
-    measureImpedance(settings);
-
-  lcrSweepPoints[lcrSweepPointCount] =
-    makeSweepPoint(measurement);
+  MeasurementPoint measurement = measureImpedance(settings);
+  lcrSweepPoints[lcrSweepPointCount] = makeSweepPoint(measurement);
 
   lcrSweepPointCount++;
 
@@ -874,10 +859,7 @@ bool startLCRSweep()
     return false;
   }
 
-  uint32_t totalPoints =
-    calculateSweepPointCount(
-      lcrSweepSettings
-    );
+  uint32_t totalPoints = calculateSweepPointCount( lcrSweepSettings);
 
   if (totalPoints == 0 ||
       totalPoints > LCR_MAX_SWEEP_POINTS) {
@@ -886,24 +868,14 @@ bool startLCRSweep()
   }
 
   lcrSweepPointCount = 0;
-
-  lcrSweepExecution.totalPoints =
-    totalPoints;
-
+  lcrSweepExecution.totalPoints = totalPoints;
   lcrSweepExecution.currentPoint = 0;
-
-  lcrSweepExecution.currentFrequency =
-    lcrSweepSettings.startFrequency;
-
-  lcrSweepExecution.startTime =
-    millis();
+  lcrSweepExecution.currentFrequency = lcrSweepSettings.startFrequency;
+  lcrSweepExecution.startTime = millis();
 
   // Allow the first point to be acquired immediately.
-  lcrSweepExecution.lastPointTime =
-    millis() - LCR_SIM_SWEEP_POINT_INTERVAL_MS;
-
+  lcrSweepExecution.lastPointTime = millis() - LCR_SIM_SWEEP_POINT_INTERVAL_MS;
   lcrSweepExecution.active = true;
-
   lcrSweepState = LCR_SWEEP_RUNNING;
   lcrUIState = LCR_UI_NORMAL;
 
@@ -919,12 +891,8 @@ bool startLCRSweep()
 void finishLCRSweep()
 {
   lcrSweepExecution.active = false;
-
-  lcrSweepState =
-    LCR_SWEEP_RESULTS;
-
-  lcrUIState =
-    LCR_UI_NORMAL;
+  lcrSweepState = LCR_SWEEP_RESULTS;
+  lcrUIState = LCR_UI_NORMAL;
 
   drawLCRScreen();
 }
@@ -936,18 +904,12 @@ void finishLCRSweep()
 void cancelLCRSweep()
 {
   lcrSweepExecution.active = false;
-
   lcrSweepExecution.totalPoints = 0;
   lcrSweepExecution.currentPoint = 0;
   lcrSweepExecution.currentFrequency = 0;
-
   lcrSweepPointCount = 0;
-
-  lcrSweepState =
-    LCR_SWEEP_SETUP;
-
-  lcrUIState =
-    LCR_UI_NORMAL;
+  lcrSweepState = LCR_SWEEP_SETUP;
+  lcrUIState = LCR_UI_NORMAL;
 
   drawLCRScreen();
 }
@@ -988,8 +950,7 @@ void updateLCRSweep()
       lcrSweepExecution.currentPoint
     );
 
-  lcrSweepExecution.currentFrequency =
-    frequency;
+  lcrSweepExecution.currentFrequency = frequency;
 
   // Acquire and store one Sweep point.
   if (!acquireLCRSweepPoint(frequency)) {
@@ -1004,9 +965,7 @@ void updateLCRSweep()
   updateLCRSweepRunningDisplay();
 
   // Transition to Results after the final point has been displayed.
-  if (lcrSweepExecution.currentPoint >=
-      lcrSweepExecution.totalPoints) {
-
+  if (lcrSweepExecution.currentPoint >= lcrSweepExecution.totalPoints) {
     finishLCRSweep();
     return;
   }
@@ -1140,8 +1099,7 @@ void updateLCR()
       lcrMeasureState == LCR_MEASURE_LIVE &&
       lcrUIState == LCR_UI_NORMAL) {
 
-    lcrMeasurement =
-      measureImpedance(lcrSettings);
+    lcrMeasurement = measureImpedance(lcrSettings);
 
     if (lcrDisplayDirty ||
         now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
@@ -1230,6 +1188,11 @@ void updateLCR()
 
   if (lcrUIState == LCR_UI_SWEEP_DENSITY_SELECT) {
     handleLCRSweepDensitySelectorTouch(x, y);
+    return;
+  }
+
+  if (lcrUIState == LCR_UI_SWEEP_PLOT_SELECT) {
+    handleLCRSweepPlotSelectorTouch(x, y);
     return;
   }
 
@@ -1385,8 +1348,7 @@ void calculateLCRLayout()
   const int16_t footerH = screenH * LCR_FOOTER_HEIGHT_PERCENT / 100;
 
   const int16_t contentY = headerH + tabsH;
-  const int16_t contentH =
-    screenH - headerH - tabsH - footerH;
+  const int16_t contentH = screenH - headerH - tabsH - footerH;
 
   const int16_t footerY = screenH - footerH;
 
@@ -1413,23 +1375,16 @@ void calculateLCRLayout()
   const int16_t tabW = lcrLayout.tabs.w / tabCount;
 
   for (int16_t i = 0; i < tabCount; i++) {
-    int16_t x =
-      lcrLayout.tabs.x + i * tabW;
+    int16_t x = lcrLayout.tabs.x + i * tabW;
 
     int16_t w = (i == tabCount - 1)
       ? lcrLayout.tabs.w - tabW * i
       : tabW;
 
-    lcrLayout.tabButtons[i] = {
-      x,
-      lcrLayout.tabs.y,
-      w,
-      lcrLayout.tabs.h
-    };
+    lcrLayout.tabButtons[i] = { x, lcrLayout.tabs.y, w, lcrLayout.tabs.h };
   }
 
   lcrLayout.content = { 0, contentY, screenW, contentH };
-
   lcrLayout.footer = { 0, footerY, screenW, footerH };
 }
 
@@ -1445,52 +1400,25 @@ void calculateMeasureLayout()
 
   const int16_t primaryH = content.h * LCR_PRIMARY_HEIGHT_PERCENT / 100;
   const int16_t secondaryH = content.h * LCR_SECONDARY_HEIGHT_PERCENT / 100;
-
   const int16_t secondaryY = content.y + primaryH;
-
   const int16_t contextY = secondaryY + secondaryH;
-
   const int16_t contextH = content.h - primaryH - secondaryH;
 
-  lcrLayout.primary = {
-    content.x,
-    content.y,
-    content.w,
-    primaryH
-  };
-
-  lcrLayout.secondary = {
-    content.x,
-    secondaryY,
-    content.w,
-    secondaryH
-  };
-
-  lcrLayout.context = {
-    content.x,
-    contextY,
-    content.w,
-    contextH
-  };
+  lcrLayout.primary = { content.x, content.y, content.w, primaryH };
+  lcrLayout.secondary = { content.x, secondaryY, content.w, secondaryH };
+  lcrLayout.context = { content.x, contextY, content.w, contextH };
 
   const int16_t softKeyCount = 4;
-  const int16_t softKeyW =
-    footer.w / softKeyCount;
+  const int16_t softKeyW = footer.w / softKeyCount;
 
   for (int16_t i = 0; i < softKeyCount; i++) {
-    int16_t x =
-      footer.x + i * softKeyW;
+    int16_t x = footer.x + i * softKeyW;
 
     int16_t w = (i == softKeyCount - 1)
       ? footer.w - softKeyW * i
       : softKeyW;
 
-    lcrLayout.measureSoftKeys[i] = {
-      x,
-      footer.y,
-      w,
-      footer.h
-    };
+    lcrLayout.measureSoftKeys[i] = { x, footer.y, w, footer.h };
   }
 }
 
@@ -1506,20 +1434,15 @@ void calculateSweepLayout()
   const int16_t rowH = content.h / rowCount;
 
   for (int16_t i = 0; i < rowCount; i++) {
-    int16_t y =
-      content.y + i * rowH;
+    int16_t y = content.y + i * rowH;
 
     int16_t h = (i == rowCount - 1)
       ? content.h - rowH * i
       : rowH;
 
-    lcrLayout.sweepSetupRows[i] = {
-      content.x,
-      y,
-      content.w,
-      h
-    };
+    lcrLayout.sweepSetupRows[i] = { content.x, y, content.w, h };
   }
+
   // Use the complete Sweep footer as the Sweep action touch region.
   // Drawing and touch detection therefore share the same geometry.
   lcrLayout.sweepButton = lcrLayout.footer;
@@ -1537,8 +1460,7 @@ void calculateSweepLayout()
 
   // Divide the Sweep Results footer into Setup and Sweep actions.
   // These regions are shared by drawing and touch handling.
-  const int16_t resultsButtonW =
-    lcrLayout.footer.w / 2;
+  const int16_t resultsButtonW = lcrLayout.footer.w / 2;
 
   lcrLayout.sweepResultsSetupButton = {
     lcrLayout.footer.x,
@@ -1561,8 +1483,7 @@ void calculateSweepLayout()
   // Calculate the Sweep Results control strip.
   // The complete strip is touchable, providing a large target for changing
   // the plotted quantity without interfering with future graph cursors.
-  const int16_t plotControlH =
-    content.h * LCR_SWEEP_PLOT_CONTROL_PERCENT / 100;
+  const int16_t plotControlH = content.h * LCR_SWEEP_PLOT_CONTROL_PERCENT / 100;
 
   lcrLayout.sweepPlotControl = {
     content.x,
@@ -1573,23 +1494,12 @@ void calculateSweepLayout()
 
   // Calculate the Sweep Results graph below the control strip.
   // Margins around the graph provide room for axis values and frequency labels.
-  const int16_t plotLeft =
-    content.w * LCR_SWEEP_PLOT_LEFT_PERCENT / 100;
-
-  const int16_t plotRight =
-    content.w * LCR_SWEEP_PLOT_RIGHT_PERCENT / 100;
-
-  const int16_t plotTop =
-    content.h * LCR_SWEEP_PLOT_TOP_PERCENT / 100;
-
-  const int16_t plotBottom =
-    content.h * LCR_SWEEP_PLOT_BOTTOM_PERCENT / 100;
-
-  const int16_t plotAreaY =
-    content.y + plotControlH;
-
-  const int16_t plotAreaH =
-    content.h - plotControlH;
+  const int16_t plotLeft = content.w * LCR_SWEEP_PLOT_LEFT_PERCENT / 100;
+  const int16_t plotRight = content.w * LCR_SWEEP_PLOT_RIGHT_PERCENT / 100;
+  const int16_t plotTop = content.h * LCR_SWEEP_PLOT_TOP_PERCENT / 100;
+  const int16_t plotBottom = content.h * LCR_SWEEP_PLOT_BOTTOM_PERCENT / 100;
+  const int16_t plotAreaY = content.y + plotControlH;
+  const int16_t plotAreaH = content.h - plotControlH;
 
   lcrLayout.sweepPlot = {
     static_cast<int16_t>(
@@ -1751,8 +1661,7 @@ bool isLCRSweepConfigurationValid(const SweepSettings &settings)
       return false;
   }
 
-  uint32_t pointCount =
-    calculateSweepPointCount(settings);
+  uint32_t pointCount = calculateSweepPointCount(settings);
 
   if (pointCount == 0)
     return false;
@@ -1773,9 +1682,7 @@ void calculateSelectorLayout()
 {
   const LCRRect &content = lcrLayout.content;
   const LCRRect &footer = lcrLayout.footer;
-
-  const int16_t selectorH =
-    content.h + footer.h;
+  const int16_t selectorH = content.h + footer.h;
 
   lcrLayout.selector = {
     content.x,
@@ -1837,12 +1744,10 @@ void calculateSelectorButtonGrid(LCRRect *buttons, uint8_t count)
   uint8_t rows = (count + columns - 1) / columns;
 
   const int16_t marginX = selector.w * LCR_SELECTOR_MARGIN_PERCENT / 100;
-
   const int16_t gapX = selector.w * LCR_SELECTOR_GAP_X_PERCENT / 100;
-
   const int16_t gapY = selector.h * LCR_SELECTOR_GAP_Y_PERCENT / 100;
-
-  const int16_t gridTop = selector.y + selector.h * LCR_SELECTOR_TOP_PERCENT / 100;
+  const int16_t gridTop = selector.y + selector.h * 
+                            LCR_SELECTOR_TOP_PERCENT / 100;
 
   const int16_t gridBottom =
     lcrLayout.selectorCancel.y -
@@ -1855,23 +1760,15 @@ void calculateSelectorButtonGrid(LCRRect *buttons, uint8_t count)
      marginX * 2 -
      gapX * (columns - 1)) / columns;
 
-  const int16_t maxButtonH =
-    display.height() *
-    LCR_SELECTOR_BUTTON_HEIGHT_PERCENT / 100;
+  const int16_t maxButtonH = display.height() * 
+                              LCR_SELECTOR_BUTTON_HEIGHT_PERCENT / 100;
 
-  int16_t buttonH =
-    (availableGridH -
-     gapY * (rows - 1)) / rows;
+  int16_t buttonH = (availableGridH - gapY * (rows - 1)) / rows;
 
   buttonH = min(buttonH, maxButtonH);
 
-  const int16_t actualGridH =
-    rows * buttonH +
-    (rows - 1) * gapY;
-
-  const int16_t centeredGridTop =
-    gridTop +
-    (availableGridH - actualGridH) / 2;
+  const int16_t actualGridH = rows * buttonH + (rows - 1) * gapY;
+  const int16_t centeredGridTop = gridTop + (availableGridH - actualGridH) / 2;
 
   for (uint8_t i = 0; i < count; i++) {
     uint8_t row = i / columns;
@@ -1883,28 +1780,12 @@ void calculateSelectorButtonGrid(LCRRect *buttons, uint8_t count)
         static_cast<uint8_t>(count - row * columns)
       );
 
-    int16_t rowWidth =
-      itemsInRow * buttonW +
-      (itemsInRow - 1) * gapX;
+    int16_t rowWidth = itemsInRow * buttonW + (itemsInRow - 1) * gapX;
+    int16_t rowX = selector.x + (selector.w - rowWidth) / 2;
+    int16_t x = rowX + column * (buttonW + gapX);
+    int16_t y = centeredGridTop + row * (buttonH + gapY);
 
-    int16_t rowX =
-      selector.x +
-      (selector.w - rowWidth) / 2;
-
-    int16_t x =
-      rowX +
-      column * (buttonW + gapX);
-
-    int16_t y =
-      centeredGridTop +
-      row * (buttonH + gapY);
-
-    buttons[i] = {
-      x,
-      y,
-      buttonW,
-      buttonH
-    };
+    buttons[i] = { x, y, buttonW, buttonH };
   }
 }
 
@@ -1966,6 +1847,17 @@ void calculateSweepDensitySelectorLayout()
 }
 
 
+// Calculate Sweep Results plot-selector geometry using the common dynamic
+// selector grid and the number of available plot quantities.
+void calculateSweepPlotSelectorLayout()
+{
+  calculateSelectorButtonGrid(
+    lcrLayout.sweepPlotPresets,
+    SWEEP_PLOT_PRESET_COUNT
+  );
+}
+
+
 // Initialize the LCR analyzer and calculate all currently supported UI
 // geometry before drawing the instrument screen.
 void initializeLCR()
@@ -1979,6 +1871,7 @@ void initializeLCR()
   calculateSweepModeSelectorLayout();
   calculateSweepStepSelectorLayout();
   calculateSweepDensitySelectorLayout();
+  calculateSweepPlotSelectorLayout();
 
   initializeLCRValueSprite();
   initializeLCRSweepSprite();
@@ -2123,8 +2016,7 @@ LCRFormattedValue formatFrequency(uint32_t frequencyHz)
 // units. Frequency remains stored internally as integer Hz.
 void printLCRFrequency(uint32_t frequencyHz)
 {
-  LCRFormattedValue formatted =
-    formatFrequency(frequencyHz);
+  LCRFormattedValue formatted = formatFrequency(frequencyHz);
 
   display.print(formatted.value);
   display.print(" ");
@@ -2167,8 +2059,7 @@ void handleLCRTabTouch(uint16_t x, uint16_t y)
       continue;
     }
 
-    LCRTab newTab =
-      static_cast<LCRTab>(i);
+    LCRTab newTab = static_cast<LCRTab>(i);
 
     // Ignore touches on the already active tab.
     if (newTab == lcrTab)
@@ -2177,8 +2068,7 @@ void handleLCRTabTouch(uint16_t x, uint16_t y)
     // HOLD data is only meaningful while remaining on the Measure tab.
     // Leaving Measure resets it so the next visit begins with live data.
     if (lcrTab == LCR_TAB_MEASURE) {
-      lcrMeasureState =
-        LCR_MEASURE_LIVE;
+      lcrMeasureState = LCR_MEASURE_LIVE;
     }
 
     lcrTab = newTab;
@@ -2252,8 +2142,7 @@ void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
       continue;
     }
 
-    uint32_t frequency =
-      frequencyPresets[i].value;
+    uint32_t frequency = frequencyPresets[i].value;
 
     if (!isLCRFrequencyPresetEnabled(frequency))
       return;
@@ -2304,9 +2193,7 @@ void handleLCRReferenceSelectorTouch(uint16_t x, uint16_t y)
           y,
           lcrLayout.referencePresets[i])) {
 
-      lcrSettings.referenceResistance =
-        referencePresets[i].value;
-
+      lcrSettings.referenceResistance = referencePresets[i].value;
       lcrMeasureState = LCR_MEASURE_LIVE;
 
       returnToLCRMeasureScreen();
@@ -2314,11 +2201,7 @@ void handleLCRReferenceSelectorTouch(uint16_t x, uint16_t y)
     }
   }
 
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.selectorCancel)) {
-
+  if (pointInLCRRect( x, y, lcrLayout.selectorCancel)) {
     returnToLCRMeasureScreen();
     return;
   }
@@ -2331,45 +2214,26 @@ void handleLCRReferenceSelectorTouch(uint16_t x, uint16_t y)
 void handleLCRSweepSetupTouch(uint16_t x, uint16_t y)
 {
   // Open the Sweep-Start selector.
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.sweepSetupRows[0])) {
-
-    lcrFrequencyTarget =
-      LCR_FREQ_SWEEP_START;
-
-    lcrUIState =
-      LCR_UI_FREQ_SELECT;
+  if (pointInLCRRect( x, y, lcrLayout.sweepSetupRows[0])) {
+    lcrFrequencyTarget = LCR_FREQ_SWEEP_START;
+    lcrUIState = LCR_UI_FREQ_SELECT;
 
     drawLCRFrequencySelector();
     return;
   }
 
   // Open the Sweep-Stop selector.
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.sweepSetupRows[1])) {
-
-    lcrFrequencyTarget =
-      LCR_FREQ_SWEEP_STOP;
-
-    lcrUIState =
-      LCR_UI_FREQ_SELECT;
+  if (pointInLCRRect( x, y, lcrLayout.sweepSetupRows[1])) {
+    lcrFrequencyTarget = LCR_FREQ_SWEEP_STOP;
+    lcrUIState = LCR_UI_FREQ_SELECT;
 
     drawLCRFrequencySelector();
     return;
   }
 
   // Open the Sweep-mode selector.
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.sweepSetupRows[2])) {
-
-    lcrUIState =
-      LCR_UI_SWEEP_MODE_SELECT;
+  if (pointInLCRRect( x, y, lcrLayout.sweepSetupRows[2])) {
+    lcrUIState = LCR_UI_SWEEP_MODE_SELECT;
 
     drawLCRSweepModeSelector();
     return;
@@ -2377,19 +2241,13 @@ void handleLCRSweepSetupTouch(uint16_t x, uint16_t y)
 
   // Open the selector appropriate for the current Sweep mode.
   // Linear mode selects a frequency step; Log mode selects points per decade.
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.sweepSetupRows[3])) {
-
+  if (pointInLCRRect( x, y, lcrLayout.sweepSetupRows[3])) {
     if (lcrSweepSettings.mode == LCR_SWEEP_LINEAR) {
-      lcrUIState =
-        LCR_UI_SWEEP_STEP_SELECT;
+      lcrUIState = LCR_UI_SWEEP_STEP_SELECT;
 
       drawLCRSweepStepSelector();
     } else {
-      lcrUIState =
-        LCR_UI_SWEEP_DENSITY_SELECT;
+      lcrUIState = LCR_UI_SWEEP_DENSITY_SELECT;
 
       drawLCRSweepDensitySelector();
     }
@@ -2436,27 +2294,27 @@ void handleLCRSweepRunningTouch(uint16_t x, uint16_t y)
 // another acquisition immediately using the current settings.
 void handleLCRSweepResultsTouch(uint16_t x, uint16_t y)
 {
+  // Open the plot selector when the Results control strip is touched.
+  if (pointInLCRRect( x, y, lcrLayout.sweepPlotControl)) {
+
+    lcrUIState = LCR_UI_SWEEP_PLOT_SELECT;
+
+    drawLCRSweepPlotSelector();
+    return;
+  }
+
   // Return to Sweep Setup without changing the current configuration.
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.sweepResultsSetupButton)) {
+  if (pointInLCRRect( x, y, lcrLayout.sweepResultsSetupButton)) {
 
-    lcrSweepState =
-      LCR_SWEEP_SETUP;
-
-    lcrUIState =
-      LCR_UI_NORMAL;
+    lcrSweepState = LCR_SWEEP_SETUP;
+    lcrUIState = LCR_UI_NORMAL;
 
     drawLCRScreen();
     return;
   }
 
   // Run another Sweep using the current configuration.
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.sweepResultsSweepButton)) {
+  if (pointInLCRRect( x, y, lcrLayout.sweepResultsSweepButton)) {
 
     startLCRSweep();
     return;
@@ -2470,13 +2328,9 @@ void handleLCRSweepResultsTouch(uint16_t x, uint16_t y)
 void handleLCRSweepModeSelectorTouch(uint16_t x, uint16_t y)
 {
   // Linear
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.sweepModePresets[0])) {
+  if (pointInLCRRect( x, y, lcrLayout.sweepModePresets[0])) {
 
-    lcrSweepSettings.mode =
-      LCR_SWEEP_LINEAR;
+    lcrSweepSettings.mode = LCR_SWEEP_LINEAR;
 
     lcrUIState = LCR_UI_NORMAL;
 
@@ -2485,13 +2339,9 @@ void handleLCRSweepModeSelectorTouch(uint16_t x, uint16_t y)
   }
 
   // Logarithmic
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.sweepModePresets[1])) {
+  if (pointInLCRRect( x, y, lcrLayout.sweepModePresets[1])) {
 
-    lcrSweepSettings.mode =
-      LCR_SWEEP_LOG;
+    lcrSweepSettings.mode = LCR_SWEEP_LOG;
 
     lcrUIState = LCR_UI_NORMAL;
 
@@ -2500,11 +2350,7 @@ void handleLCRSweepModeSelectorTouch(uint16_t x, uint16_t y)
   }
 
   // Cancel
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.selectorCancel)) {
-
+  if (pointInLCRRect( x, y, lcrLayout.selectorCancel)) {
     lcrUIState = LCR_UI_NORMAL;
 
     drawLCRScreen();
@@ -2519,18 +2365,9 @@ void handleLCRSweepModeSelectorTouch(uint16_t x, uint16_t y)
 // Cancel returns without changing the current step.
 void handleLCRSweepStepSelectorTouch(uint16_t x, uint16_t y)
 {
-  for (uint8_t i = 0;
-       i < SWEEP_STEP_PRESET_COUNT;
-       i++) {
-
-    if (pointInLCRRect(
-          x,
-          y,
-          lcrLayout.sweepStepPresets[i])) {
-
-      lcrSweepSettings.stepFrequency =
-        sweepStepPresets[i].value;
-
+  for (uint8_t i = 0; i < SWEEP_STEP_PRESET_COUNT; i++) {
+    if (pointInLCRRect( x, y, lcrLayout.sweepStepPresets[i])) {
+      lcrSweepSettings.stepFrequency = sweepStepPresets[i].value;
       lcrUIState = LCR_UI_NORMAL;
 
       drawLCRScreen();
@@ -2538,11 +2375,7 @@ void handleLCRSweepStepSelectorTouch(uint16_t x, uint16_t y)
     }
   }
 
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.selectorCancel)) {
-
+  if (pointInLCRRect( x, y, lcrLayout.selectorCancel)) {
     lcrUIState = LCR_UI_NORMAL;
 
     drawLCRScreen();
@@ -2556,18 +2389,9 @@ void handleLCRSweepStepSelectorTouch(uint16_t x, uint16_t y)
 // Cancel returns without modifying the current density.
 void handleLCRSweepDensitySelectorTouch(uint16_t x, uint16_t y)
 {
-  for (uint8_t i = 0;
-       i < SWEEP_DENSITY_PRESET_COUNT;
-       i++) {
-
-    if (pointInLCRRect(
-          x,
-          y,
-          lcrLayout.sweepDensityPresets[i])) {
-
-      lcrSweepSettings.pointsPerDecade =
-        sweepDensityPresets[i].value;
-
+  for (uint8_t i = 0; i < SWEEP_DENSITY_PRESET_COUNT; i++) {
+    if (pointInLCRRect( x, y, lcrLayout.sweepDensityPresets[i])) {
+      lcrSweepSettings.pointsPerDecade = sweepDensityPresets[i].value;
       lcrUIState = LCR_UI_NORMAL;
 
       drawLCRScreen();
@@ -2575,11 +2399,32 @@ void handleLCRSweepDensitySelectorTouch(uint16_t x, uint16_t y)
     }
   }
 
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.selectorCancel)) {
+  if (pointInLCRRect( x, y, lcrLayout.selectorCancel)) {
+    lcrUIState = LCR_UI_NORMAL;
 
+    drawLCRScreen();
+    return;
+  }
+}
+
+
+// Handle touch input while the Sweep Results plot selector is displayed.
+// Selecting a quantity changes only the Results presentation; retained Sweep
+// measurements remain unchanged and are immediately redrawn using that data.
+void handleLCRSweepPlotSelectorTouch(uint16_t x, uint16_t y)
+{
+  for (uint8_t i = 0; i < SWEEP_PLOT_PRESET_COUNT; i++) {
+    if (pointInLCRRect( x, y, lcrLayout.sweepPlotPresets[i])) {
+      lcrSweepPlotType = sweepPlotPresets[i].type;
+      lcrUIState = LCR_UI_NORMAL;
+
+      drawLCRScreen();
+      return;
+    }
+  }
+
+  // Cancel returns to Results without changing the displayed quantity.
+  if (pointInLCRRect( x, y, lcrLayout.selectorCancel)) {
     lcrUIState = LCR_UI_NORMAL;
 
     drawLCRScreen();
@@ -2712,7 +2557,15 @@ void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
 
   lcrValueSprite.fillSprite(BGCOLOR);
 
-  drawLCRSpriteMeasurement( r.w, r.h, formatted.value, formatted.unit, 4, 2, TXTCOLOR);
+  drawLCRSpriteMeasurement( 
+      r.w,
+      r.h,
+      formatted.value,
+      formatted.unit,
+      4,
+      2,
+      TXTCOLOR
+    );
 
   lcrValueSprite.pushSprite( r.x, r.y, 0, 0, r.w, r.h);
 }
@@ -2739,19 +2592,11 @@ void drawLCRSecondaryMeasurement(const MeasurementPoint &m)
   int16_t valueWidth = strlen(value) * 6 * valueSize;
   int16_t gap = 12;
 
-  int16_t totalWidth =
-    labelWidth + gap + valueWidth;
-
-  int16_t startX =
-    (r.w - totalWidth) / 2;
-
+  int16_t totalWidth = labelWidth + gap + valueWidth;
+  int16_t startX = (r.w - totalWidth) / 2;
   int16_t valueHeight = 8 * valueSize;
-
-  int16_t valueY =
-    (r.h - valueHeight) / 2;
-
-  int16_t labelY =
-    valueY + valueHeight - (8 * labelSize);
+  int16_t valueY = (r.h - valueHeight) / 2;
+  int16_t labelY = valueY + valueHeight - (8 * labelSize);
 
   lcrValueSprite.fillSprite(BGCOLOR);
   lcrValueSprite.setTextColor(TXTCOLOR, BGCOLOR);
@@ -2839,30 +2684,21 @@ void drawLCRSweepSetup()
   display.setTextSize(1);
   display.setTextColor(TXTCOLOR, BGCOLOR);
 
-  const int16_t leftX =
-    r.x + r.w * 10 / 100;
-
-  const int16_t valueX =
-    r.x + r.w * 55 / 100;
+  const int16_t leftX = r.x + r.w * 10 / 100;
+  const int16_t valueX = r.x + r.w * 55 / 100;
 
   // Start frequency.
-  const LCRRect &startRow =
-    lcrLayout.sweepSetupRows[0];
-
-  int16_t y =
-    startRow.y + (startRow.h - 8) / 2;
+  const LCRRect &startRow = lcrLayout.sweepSetupRows[0];
+  int16_t y = startRow.y + (startRow.h - 8) / 2;
 
   display.setCursor(leftX, y);
   display.print("Start");
 
   display.setCursor(valueX, y);
-  printLCRFrequency(
-    lcrSweepSettings.startFrequency
-  );
+  printLCRFrequency( lcrSweepSettings.startFrequency);
 
   // Stop frequency.
-  const LCRRect &stopRow =
-    lcrLayout.sweepSetupRows[1];
+  const LCRRect &stopRow = lcrLayout.sweepSetupRows[1];
 
   y = stopRow.y + (stopRow.h - 8) / 2;
 
@@ -2870,13 +2706,10 @@ void drawLCRSweepSetup()
   display.print("Stop");
 
   display.setCursor(valueX, y);
-  printLCRFrequency(
-    lcrSweepSettings.stopFrequency
-  );
+  printLCRFrequency( lcrSweepSettings.stopFrequency);
 
   // Sweep mode.
-  const LCRRect &modeRow =
-    lcrLayout.sweepSetupRows[2];
+  const LCRRect &modeRow = lcrLayout.sweepSetupRows[2];
 
   y = modeRow.y + (modeRow.h - 8) / 2;
 
@@ -2891,8 +2724,7 @@ void drawLCRSweepSetup()
     display.print("Log");
 
   // Linear step or logarithmic density.
-  const LCRRect &stepRow =
-    lcrLayout.sweepSetupRows[3];
+  const LCRRect &stepRow = lcrLayout.sweepSetupRows[3];
 
   y = stepRow.y + (stepRow.h - 8) / 2;
 
@@ -2972,16 +2804,63 @@ void drawLCRSelectorButton(const LCRRect &rect,
   display.setTextColor(color, BGCOLOR);
 
   int16_t textWidth = strlen(label) * 6;
-
-  int16_t textX =
-    rect.x + (rect.w - textWidth) / 2;
-
-  int16_t textY =
-    rect.y + (rect.h - 8) / 2;
+  int16_t textX = rect.x + (rect.w - textWidth) / 2;
+  int16_t textY = rect.y + (rect.h - 8) / 2;
 
   display.setCursor(textX, textY);
   display.print(label);
 }
+
+
+// Draw the Sweep Results quantity selector.
+// The currently displayed quantity is highlighted and all available plot
+// choices are generated from the shared Sweep plot preset table.
+void drawLCRSweepPlotSelector()
+{
+  const LCRRect &r =
+    lcrLayout.selector;
+
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  const char *title = "Select Plot";
+  int16_t titleWidth = strlen(title) * 6;
+
+  display.setCursor(
+    r.x + (r.w - titleWidth) / 2,
+    r.y + r.h * 7 / 100
+  );
+
+  display.print(title);
+
+  for (uint8_t i = 0;
+       i < SWEEP_PLOT_PRESET_COUNT;
+       i++) {
+
+    bool selected = lcrSweepPlotType == sweepPlotPresets[i].type;
+
+    drawLCRSelectorButton(
+      lcrLayout.sweepPlotPresets[i],
+      sweepPlotPresets[i].label,
+      selected
+    );
+  }
+
+  drawLCRSelectorButton(
+    lcrLayout.selectorCancel,
+    "Cancel",
+    false
+  );
+}
+
 
 
 // Draw the Sweep-mode selector over the Sweep Setup screen.

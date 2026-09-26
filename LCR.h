@@ -81,6 +81,21 @@ struct SweepAxisScale
   const char *unit;
 };
 
+// Identifies which retained Sweep measurement is displayed on the Results
+// graph. Changing the plot type does not require another acquisition because
+// each SweepPoint already stores all supported result quantities.
+enum LCRSweepPlotType
+{
+  LCR_SWEEP_PLOT_IMPEDANCE,
+  LCR_SWEEP_PLOT_PHASE,
+  LCR_SWEEP_PLOT_RESISTANCE,
+  LCR_SWEEP_PLOT_REACTANCE,
+  LCR_SWEEP_PLOT_ESR,
+  LCR_SWEEP_PLOT_Q
+};
+
+extern LCRSweepPlotType lcrSweepPlotType;
+
 // Maximum number of measurement points retained for one frequency sweep.
 // This accommodates the current full-range 100 Hz-step linear sweep while
 // bounding RAM usage for sweep-result storage.
@@ -213,7 +228,8 @@ enum LCRUIState
   LCR_UI_REF_SELECT,
   LCR_UI_SWEEP_MODE_SELECT,
   LCR_UI_SWEEP_STEP_SELECT,
-  LCR_UI_SWEEP_DENSITY_SELECT
+  LCR_UI_SWEEP_DENSITY_SELECT,
+  LCR_UI_SWEEP_PLOT_SELECT
 };
 
 extern LCRUIState lcrUIState;
@@ -284,7 +300,6 @@ struct LCRLayout
   LCRRect sweepPlot;
 
 
-
   LCRRect footer;
 
   // Submenus
@@ -296,6 +311,7 @@ struct LCRLayout
   LCRRect referencePresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect sweepStepPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect sweepDensityPresets[LCR_MAX_SELECTOR_BUTTONS];
+  LCRRect sweepPlotPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect selectorCancel;
 };
 
@@ -333,6 +349,8 @@ void calculateSweepStepSelectorLayout();
 // Calculate button geometry for the logarithmic Sweep-density selector.
 void calculateSweepDensitySelectorLayout();
 
+// Calculate button geometry for the Sweep Results plot selector.
+void calculateSweepPlotSelectorLayout();
 
 
 
