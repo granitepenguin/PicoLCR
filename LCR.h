@@ -65,6 +65,43 @@ struct SweepPoint
   float q;
 };
 
+// Stores the minimum and maximum values used to scale one Sweep plot axis.
+struct SweepPlotRange
+{
+  float minimum;
+  float maximum;
+};
+
+// Defines the common engineering scale used by a Sweep plot axis.
+// All numeric labels on the axis use the same multiplier and unit so
+// individual tick labels can remain compact.
+struct SweepAxisScale
+{
+  float divisor;
+  const char *unit;
+};
+
+// Identifies which retained Sweep measurement is displayed on the Results
+// graph. Changing the plot type does not require another acquisition because
+// each SweepPoint already stores all supported result quantities.
+enum LCRSweepPlotType
+{
+  LCR_SWEEP_PLOT_IMPEDANCE,
+  LCR_SWEEP_PLOT_PHASE,
+  LCR_SWEEP_PLOT_RESISTANCE,
+  LCR_SWEEP_PLOT_REACTANCE,
+  LCR_SWEEP_PLOT_ESR,
+  LCR_SWEEP_PLOT_Q
+};
+
+extern LCRSweepPlotType lcrSweepPlotType;
+
+// Tracks the currently inspected Sweep result.
+// The cursor index identifies one retained SweepPoint; cursorActive controls
+// whether the Results graph and status strip display the selected point.
+extern bool lcrSweepCursorActive;
+extern uint16_t lcrSweepCursorIndex;
+
 // Maximum number of measurement points retained for one frequency sweep.
 // This accommodates the current full-range 100 Hz-step linear sweep while
 // bounding RAM usage for sweep-result storage.
@@ -197,7 +234,8 @@ enum LCRUIState
   LCR_UI_REF_SELECT,
   LCR_UI_SWEEP_MODE_SELECT,
   LCR_UI_SWEEP_STEP_SELECT,
-  LCR_UI_SWEEP_DENSITY_SELECT
+  LCR_UI_SWEEP_DENSITY_SELECT,
+  LCR_UI_SWEEP_PLOT_SELECT
 };
 
 extern LCRUIState lcrUIState;
@@ -257,6 +295,17 @@ struct LCRLayout
   LCRRect sweepResultsSetupButton;
   LCRRect sweepResultsSweepButton;
 
+  // Sweep Results plot area.
+
+  // Sweep Results control/status strip.
+  // This provides a large touch target for selecting the plotted quantity
+  // while keeping the graph itself available for future cursor interaction.
+  LCRRect sweepPlotControl;
+
+  // This rectangle contains the graph itself, excluding axis labels and footer.
+  LCRRect sweepPlot;
+
+
   LCRRect footer;
 
   // Submenus
@@ -268,6 +317,7 @@ struct LCRLayout
   LCRRect referencePresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect sweepStepPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect sweepDensityPresets[LCR_MAX_SELECTOR_BUTTONS];
+  LCRRect sweepPlotPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect selectorCancel;
 };
 
@@ -305,6 +355,8 @@ void calculateSweepStepSelectorLayout();
 // Calculate button geometry for the logarithmic Sweep-density selector.
 void calculateSweepDensitySelectorLayout();
 
+// Calculate button geometry for the Sweep Results plot selector.
+void calculateSweepPlotSelectorLayout();
 
 
 
