@@ -386,6 +386,15 @@ void initializeLCR();
 // Initialize the AD9833 excitation generator used by the hardware backend.
 void initializeLCRGenerator();
 
+// Initialize the raw ADC/DMA capture hardware used by the LCR backend.
+void initializeLCRCapture();
+
+// Acquire one raw interleaved ADC0/ADC1 diagnostic record.
+bool captureLCRRawTest();
+
+// Print a small portion of the raw diagnostic record to Serial.
+void printLCRRawTest();
+
 // Set the physical LCR excitation generator frequency.
 void setLCRGeneratorFrequency(uint32_t frequency);
 

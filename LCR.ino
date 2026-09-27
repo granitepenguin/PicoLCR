@@ -13,12 +13,29 @@
 //   Instrument state management
 
 #include "AD9833_Driver.h"
+#include <hardware/adc.h>
+#include <hardware/dma.h>
+
 
 // LCR excitation-generator hardware.
 // The AD9833 uses SPI0 independently from the TFT display bus.
 static const uint8_t AD9833_FSYNC_PIN = 3;  // GP3, physical pin 5
 static const uint8_t AD9833_SCK_PIN   = 6;  // GP6, physical pin 9
 static const uint8_t AD9833_DATA_PIN  = 7;  // GP7, physical pin 10
+
+// Raw dual-channel ADC capture used while integrating the LCR hardware.
+// Samples alternate ADC0/ADC1 in one DMA-filled buffer.
+static const uint8_t LCR_ADC_TOTAL_PIN = 26;  // GP26, physical pin 31
+static const uint8_t LCR_ADC_DUT_PIN   = 27;  // GP27, physical pin 32
+static const uint8_t LCR_ADC_CH_TOTAL  = 0;
+static const uint8_t LCR_ADC_CH_DUT    = 1;
+
+static const uint16_t LCR_TEST_SAMPLES_PER_CHANNEL = 256;
+static const uint16_t LCR_TEST_CAPTURE_SAMPLES =
+  LCR_TEST_SAMPLES_PER_CHANNEL * 2;
+
+uint16_t lcrTestCapture[LCR_TEST_CAPTURE_SAMPLES];
+int lcrAdcDmaChannel = -1;
 
 // AD9833 excitation source for the LCR measurement hardware.
 AD9833_Driver lcrDDS(AD9833_FSYNC_PIN);
@@ -1148,6 +1165,15 @@ void enterLCRMode()
   lcrDisplayDirty = true;
 
   initializeLCR();
+
+  // Temporary ADC/DMA hardware-integration test.
+  initializeLCRCapture();
+
+  if (captureLCRRawTest())
+    printLCRRawTest();
+  else
+    Serial.println("ERROR: LCR raw ADC capture failed");
+
   drawLCRScreen();
 }
 
@@ -1387,6 +1413,105 @@ void initializeLCRGenerator()
   lcrGeneratorFrequency = 1000;
 
   Serial.println("LCR AD9833 initialized at 1 kHz");
+}
+
+
+// Initialize the RP2040 ADC and DMA resources used by the LCR capture path.
+// ADC0 and ADC1 are sampled round-robin and transferred directly from the
+// ADC FIFO into an interleaved RAM buffer.
+void initializeLCRCapture()
+{
+  adc_init();
+
+  adc_gpio_init(LCR_ADC_TOTAL_PIN);
+  adc_gpio_init(LCR_ADC_DUT_PIN);
+
+  adc_set_round_robin((1u << LCR_ADC_CH_TOTAL) |
+                      (1u << LCR_ADC_CH_DUT));
+
+  adc_select_input(LCR_ADC_CH_TOTAL);
+
+  adc_fifo_setup(
+    true,   // Enable FIFO
+    true,   // Enable DMA request
+    1,      // DMA request when at least one sample is present
+    false,  // Do not set ERR bit in sample data
+    false   // Keep full 12-bit ADC samples
+  );
+
+  if (lcrAdcDmaChannel < 0)
+    lcrAdcDmaChannel = dma_claim_unused_channel(true);
+
+  Serial.print("LCR ADC DMA channel: ");
+  Serial.println(lcrAdcDmaChannel);
+}
+
+
+// Capture one interleaved ADC0/ADC1 record using the ADC FIFO and DMA.
+// This diagnostic capture verifies the hardware path before signal
+// processing and impedance calculations are integrated.
+bool captureLCRRawTest()
+{
+  if (lcrAdcDmaChannel < 0)
+    return false;
+
+  adc_run(false);
+  adc_fifo_drain();
+
+  adc_select_input(LCR_ADC_CH_TOTAL);
+
+  // For initial bring-up, run the ADC at a conservative fixed rate.
+  // The production backend will use the POC's per-frequency scheduling.
+  adc_set_clkdiv(480.0f);
+
+  dma_channel_config cfg =
+    dma_channel_get_default_config(lcrAdcDmaChannel);
+
+  channel_config_set_transfer_data_size(&cfg, DMA_SIZE_16);
+  channel_config_set_read_increment(&cfg, false);
+  channel_config_set_write_increment(&cfg, true);
+  channel_config_set_dreq(&cfg, DREQ_ADC);
+
+  dma_channel_configure(
+    lcrAdcDmaChannel,
+    &cfg,
+    lcrTestCapture,
+    &adc_hw->fifo,
+    LCR_TEST_CAPTURE_SAMPLES,
+    true
+  );
+
+  adc_run(true);
+
+  dma_channel_wait_for_finish_blocking(lcrAdcDmaChannel);
+
+  adc_run(false);
+  adc_fifo_drain();
+
+  return true;
+}
+
+
+// Print the first raw ADC sample pairs from the diagnostic capture.
+// Each row should contain ADC0/V_total followed by ADC1/V_DUT.
+void printLCRRawTest()
+{
+  Serial.println();
+  Serial.println("LCR raw ADC test");
+  Serial.println("pair,ADC0,ADC1");
+
+  for (uint16_t i = 0; i < 16; i++) {
+    uint16_t adc0 = lcrTestCapture[i * 2];
+    uint16_t adc1 = lcrTestCapture[i * 2 + 1];
+
+    Serial.print(i);
+    Serial.print(",");
+    Serial.print(adc0);
+    Serial.print(",");
+    Serial.println(adc1);
+  }
+
+  Serial.println();
 }
 
 
