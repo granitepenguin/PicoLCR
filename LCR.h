@@ -372,6 +372,16 @@ enum LCRBackend
 
 extern LCRBackend lcrBackend;
 
+// Summary statistics for one channel of an interleaved ADC capture.
+struct LCRCaptureStats
+{
+  uint16_t minimum;
+  uint16_t maximum;
+  float mean;
+  uint16_t peakToPeak;
+};
+
+
 
 //
 // Public API

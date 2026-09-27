@@ -1492,8 +1492,37 @@ bool captureLCRRawTest()
 }
 
 
-// Print the first raw ADC sample pairs from the diagnostic capture.
-// Each row should contain ADC0/V_total followed by ADC1/V_DUT.
+// Calculate statistics for one channel in the interleaved ADC test buffer.
+// Offset 0 selects ADC0 and offset 1 selects ADC1.
+LCRCaptureStats calculateLCRCaptureStats(uint8_t offset)
+{
+  LCRCaptureStats stats;
+  stats.minimum = 4095;
+  stats.maximum = 0;
+
+  uint32_t sum = 0;
+
+  for (uint16_t i = 0; i < LCR_TEST_SAMPLES_PER_CHANNEL; i++) {
+    uint16_t sample = lcrTestCapture[i * 2 + offset];
+
+    if (sample < stats.minimum)
+      stats.minimum = sample;
+
+    if (sample > stats.maximum)
+      stats.maximum = sample;
+
+    sum += sample;
+  }
+
+  stats.mean = static_cast<float>(sum) / LCR_TEST_SAMPLES_PER_CHANNEL;
+  stats.peakToPeak = stats.maximum - stats.minimum;
+
+  return stats;
+}
+
+
+// Print a small portion of the raw ADC record plus statistics calculated
+// across the complete 256-sample record for both channels.
 void printLCRRawTest()
 {
   Serial.println();
@@ -1509,6 +1538,38 @@ void printLCRRawTest()
     Serial.print(adc0);
     Serial.print(",");
     Serial.println(adc1);
+  }
+
+  LCRCaptureStats adc0Stats = calculateLCRCaptureStats(0);
+  LCRCaptureStats adc1Stats = calculateLCRCaptureStats(1);
+
+  Serial.println();
+  Serial.println("Full capture statistics");
+
+  Serial.print("ADC0  min: ");
+  Serial.print(adc0Stats.minimum);
+  Serial.print("  max: ");
+  Serial.print(adc0Stats.maximum);
+  Serial.print("  mean: ");
+  Serial.print(adc0Stats.mean, 1);
+  Serial.print("  p-p: ");
+  Serial.println(adc0Stats.peakToPeak);
+
+  Serial.print("ADC1  min: ");
+  Serial.print(adc1Stats.minimum);
+  Serial.print("  max: ");
+  Serial.print(adc1Stats.maximum);
+  Serial.print("  mean: ");
+  Serial.print(adc1Stats.mean, 1);
+  Serial.print("  p-p: ");
+  Serial.println(adc1Stats.peakToPeak);
+
+  if (adc0Stats.peakToPeak > 0) {
+    float amplitudeRatio =
+      static_cast<float>(adc1Stats.peakToPeak) / adc0Stats.peakToPeak;
+
+    Serial.print("ADC1 / ADC0 p-p ratio: ");
+    Serial.println(amplitudeRatio, 4);
   }
 
   Serial.println();
