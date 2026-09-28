@@ -382,6 +382,18 @@ struct LCRCaptureStats
 };
 
 
+// Describes the ADC sampling configuration for one LCR measurement point.
+// The plan is calculated from excitation frequency before DMA acquisition.
+struct LCRCapturePlan
+{
+  uint32_t frequency;
+  float aggregateSampleRate;
+  float channelSampleRate;
+  float samplesPerCycle;
+  float adcClockDiv;
+  uint16_t samplesPerChannel;
+};
+
 
 //
 // Public API
@@ -400,10 +412,12 @@ void initializeLCRGenerator();
 void initializeLCRCapture();
 
 // Acquire one raw interleaved ADC0/ADC1 diagnostic record.
-bool captureLCRRawTest();
+bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan);
 
 // Print a small portion of the raw diagnostic record to Serial.
-void printLCRRawTest();
+void printLCRRawTest(const LCRCapturePlan &plan);
+
+LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency);
 
 // Set the physical LCR excitation generator frequency.
 void setLCRGeneratorFrequency(uint32_t frequency);

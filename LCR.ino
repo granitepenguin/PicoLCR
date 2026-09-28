@@ -30,12 +30,18 @@ static const uint8_t LCR_ADC_DUT_PIN   = 27;  // GP27, physical pin 32
 static const uint8_t LCR_ADC_CH_TOTAL  = 0;
 static const uint8_t LCR_ADC_CH_DUT    = 1;
 
-static const uint16_t LCR_TEST_SAMPLES_PER_CHANNEL = 256;
-static const uint16_t LCR_TEST_CAPTURE_SAMPLES =
-  LCR_TEST_SAMPLES_PER_CHANNEL * 2;
-
-uint16_t lcrTestCapture[LCR_TEST_CAPTURE_SAMPLES];
 int lcrAdcDmaChannel = -1;
+
+// Initial LCR acquisition parameters derived from the POC Normal profile.
+static const uint16_t LCR_TARGET_SAMPLES_PER_CYCLE = 50;
+static const uint16_t LCR_TARGET_CYCLES = 16;
+static const uint16_t LCR_CAPTURE_MIN_SAMPLES = 512;
+static const uint16_t LCR_CAPTURE_MAX_SAMPLES = 4000;
+static const uint16_t LCR_MAX_POINT_MS = 20;
+static const uint16_t LCR_CAPTURE_BUFFER_SAMPLES =
+  LCR_CAPTURE_MAX_SAMPLES * 2;
+
+uint16_t lcrCaptureBuffer[LCR_CAPTURE_BUFFER_SAMPLES];
 
 // AD9833 excitation source for the LCR measurement hardware.
 AD9833_Driver lcrDDS(AD9833_FSYNC_PIN);
@@ -1166,13 +1172,15 @@ void enterLCRMode()
 
   initializeLCR();
 
-  // Temporary ADC/DMA hardware-integration test.
+  // Temporary frequency-scheduled ADC/DMA integration test.
   initializeLCRCapture();
 
-  if (captureLCRRawTest())
-    printLCRRawTest();
+  LCRCapturePlan testPlan;
+
+  if (captureLCRRawTest(lcrSettings.frequency, testPlan))
+    printLCRRawTest(testPlan);
   else
-    Serial.println("ERROR: LCR raw ADC capture failed");
+    Serial.println("ERROR: LCR scheduled ADC capture failed");
 
   drawLCRScreen();
 }
@@ -1447,25 +1455,76 @@ void initializeLCRCapture()
 }
 
 
-// Capture one interleaved ADC0/ADC1 record using the ADC FIFO and DMA.
-// This diagnostic capture verifies the hardware path before signal
-// processing and impedance calculations are integrated.
-bool captureLCRRawTest()
+// Calculate the ADC sample rate and record length for one excitation frequency.
+// The scheduler attempts to maintain a consistent number of samples per cycle
+// while respecting the ADC rate and per-point capture-time limits.
+LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency)
+{
+  LCRCapturePlan plan = {};
+  plan.frequency = frequency;
+
+  if (frequency == 0)
+    return plan;
+
+  // Two ADC conversions are required for every channel sample pair.
+  float targetAggregateRate =
+    2.0f * LCR_TARGET_SAMPLES_PER_CYCLE * frequency;
+
+  // RP2040 ADC conversion requires 96 ADC clock cycles.
+  float adcClock = static_cast<float>(clock_get_hz(clk_adc));
+  float maximumAggregateRate = adcClock / 96.0f;
+
+  plan.aggregateSampleRate = min(targetAggregateRate, maximumAggregateRate);
+  plan.channelSampleRate = plan.aggregateSampleRate / 2.0f;
+  plan.samplesPerCycle = plan.channelSampleRate / frequency;
+  plan.adcClockDiv = adcClock / plan.aggregateSampleRate;
+
+  uint32_t samples = static_cast<uint32_t>(
+    ceilf(LCR_TARGET_CYCLES * plan.samplesPerCycle)
+  );
+
+  if (samples < LCR_CAPTURE_MIN_SAMPLES)
+    samples = LCR_CAPTURE_MIN_SAMPLES;
+
+  if (samples > LCR_CAPTURE_MAX_SAMPLES)
+    samples = LCR_CAPTURE_MAX_SAMPLES;
+
+  // Limit the record length to the configured point-time budget.
+  uint32_t timeLimitedSamples = static_cast<uint32_t>(
+    plan.channelSampleRate * LCR_MAX_POINT_MS / 1000.0f
+  );
+
+  if (timeLimitedSamples >= LCR_CAPTURE_MIN_SAMPLES &&
+      samples > timeLimitedSamples) {
+    samples = timeLimitedSamples;
+  }
+
+  plan.samplesPerChannel = static_cast<uint16_t>(samples);
+
+  return plan;
+}
+
+
+// Capture one frequency-scheduled interleaved ADC0/ADC1 record through DMA.
+// The acquisition parameters are calculated from the requested excitation
+// frequency using the same scheduling model needed by the measurement backend.
+bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
 {
   if (lcrAdcDmaChannel < 0)
+    return false;
+
+  plan = calculateLCRCapturePlan(frequency);
+
+  if (plan.samplesPerChannel == 0 || plan.adcClockDiv <= 0.0f)
     return false;
 
   adc_run(false);
   adc_fifo_drain();
 
   adc_select_input(LCR_ADC_CH_TOTAL);
+  adc_set_clkdiv(plan.adcClockDiv);
 
-  // For initial bring-up, run the ADC at a conservative fixed rate.
-  // The production backend will use the POC's per-frequency scheduling.
-  adc_set_clkdiv(480.0f);
-
-  dma_channel_config cfg =
-    dma_channel_get_default_config(lcrAdcDmaChannel);
+  dma_channel_config cfg = dma_channel_get_default_config(lcrAdcDmaChannel);
 
   channel_config_set_transfer_data_size(&cfg, DMA_SIZE_16);
   channel_config_set_read_increment(&cfg, false);
@@ -1475,14 +1534,13 @@ bool captureLCRRawTest()
   dma_channel_configure(
     lcrAdcDmaChannel,
     &cfg,
-    lcrTestCapture,
+    lcrCaptureBuffer,
     &adc_hw->fifo,
-    LCR_TEST_CAPTURE_SAMPLES,
+    plan.samplesPerChannel * 2,
     true
   );
 
   adc_run(true);
-
   dma_channel_wait_for_finish_blocking(lcrAdcDmaChannel);
 
   adc_run(false);
@@ -1494,7 +1552,8 @@ bool captureLCRRawTest()
 
 // Calculate statistics for one channel in the interleaved ADC test buffer.
 // Offset 0 selects ADC0 and offset 1 selects ADC1.
-LCRCaptureStats calculateLCRCaptureStats(uint8_t offset)
+LCRCaptureStats calculateLCRCaptureStats(uint8_t offset,
+                                         uint16_t sampleCount)
 {
   LCRCaptureStats stats;
   stats.minimum = 4095;
@@ -1502,8 +1561,8 @@ LCRCaptureStats calculateLCRCaptureStats(uint8_t offset)
 
   uint32_t sum = 0;
 
-  for (uint16_t i = 0; i < LCR_TEST_SAMPLES_PER_CHANNEL; i++) {
-    uint16_t sample = lcrTestCapture[i * 2 + offset];
+  for (uint16_t i = 0; i < sampleCount; i++) {
+    uint16_t sample = lcrCaptureBuffer[i * 2 + offset];
 
     if (sample < stats.minimum)
       stats.minimum = sample;
@@ -1514,24 +1573,49 @@ LCRCaptureStats calculateLCRCaptureStats(uint8_t offset)
     sum += sample;
   }
 
-  stats.mean = static_cast<float>(sum) / LCR_TEST_SAMPLES_PER_CHANNEL;
+  stats.mean = static_cast<float>(sum) / sampleCount;
   stats.peakToPeak = stats.maximum - stats.minimum;
 
   return stats;
 }
 
 
-// Print a small portion of the raw ADC record plus statistics calculated
-// across the complete 256-sample record for both channels.
-void printLCRRawTest()
+// Print the scheduled acquisition parameters, a small portion of the raw
+// record, and statistics calculated across the complete DMA capture.
+void printLCRRawTest(const LCRCapturePlan &plan)
 {
   Serial.println();
-  Serial.println("LCR raw ADC test");
+  Serial.println("LCR scheduled ADC test");
+
+  Serial.print("Frequency: ");
+  Serial.print(plan.frequency);
+  Serial.println(" Hz");
+
+  Serial.print("Aggregate sample rate: ");
+  Serial.print(plan.aggregateSampleRate, 1);
+  Serial.println(" samples/s");
+
+  Serial.print("Channel sample rate: ");
+  Serial.print(plan.channelSampleRate, 1);
+  Serial.println(" samples/s");
+
+  Serial.print("Samples/cycle/channel: ");
+  Serial.println(plan.samplesPerCycle, 2);
+
+  Serial.print("ADC clock divisor: ");
+  Serial.println(plan.adcClockDiv, 3);
+
+  Serial.print("Samples/channel: ");
+  Serial.println(plan.samplesPerChannel);
+
+  Serial.println();
   Serial.println("pair,ADC0,ADC1");
 
-  for (uint16_t i = 0; i < 16; i++) {
-    uint16_t adc0 = lcrTestCapture[i * 2];
-    uint16_t adc1 = lcrTestCapture[i * 2 + 1];
+  uint16_t printCount = min<uint16_t>(16, plan.samplesPerChannel);
+
+  for (uint16_t i = 0; i < printCount; i++) {
+    uint16_t adc0 = lcrCaptureBuffer[i * 2];
+    uint16_t adc1 = lcrCaptureBuffer[i * 2 + 1];
 
     Serial.print(i);
     Serial.print(",");
@@ -1540,8 +1624,11 @@ void printLCRRawTest()
     Serial.println(adc1);
   }
 
-  LCRCaptureStats adc0Stats = calculateLCRCaptureStats(0);
-  LCRCaptureStats adc1Stats = calculateLCRCaptureStats(1);
+  LCRCaptureStats adc0Stats =
+    calculateLCRCaptureStats(0, plan.samplesPerChannel);
+
+  LCRCaptureStats adc1Stats =
+    calculateLCRCaptureStats(1, plan.samplesPerChannel);
 
   Serial.println();
   Serial.println("Full capture statistics");
@@ -1565,11 +1652,11 @@ void printLCRRawTest()
   Serial.println(adc1Stats.peakToPeak);
 
   if (adc0Stats.peakToPeak > 0) {
-    float amplitudeRatio =
+    float ratio =
       static_cast<float>(adc1Stats.peakToPeak) / adc0Stats.peakToPeak;
 
     Serial.print("ADC1 / ADC0 p-p ratio: ");
-    Serial.println(amplitudeRatio, 4);
+    Serial.println(ratio, 4);
   }
 
   Serial.println();
