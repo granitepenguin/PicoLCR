@@ -55,6 +55,9 @@ AD9833_Driver lcrDDS(AD9833_FSYNC_PIN);
 // Repeated measurements at the same frequency do not need to reprogram the DDS.
 uint32_t lcrGeneratorFrequency = 0;
 
+// Sense resistor currently installed in the LCR measurement network.
+static const float LCR_R_SENSE_OHMS = 2150.0f;
+
 // screen locations for various output displays
 constexpr int LABEL_X = 20;
 constexpr int VALUE_X = 120;
@@ -159,7 +162,7 @@ LCRUIState lcrUIState = LCR_UI_NORMAL;
 // whenever a new impedance measurement is requested.
 MeasurementSettings lcrSettings = {
   1000,      // Frequency: 1 kHz
-  1000.0f    // Reference resistor: 1 kOhm
+  2150.0f    // Reference resistor: 1 kOhm
 };
 
 // Stores the most recently acquired LCR measurement.
@@ -1129,14 +1132,58 @@ MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings)
 }
 
 
-// Perform one measurement using the physical LCR hardware.
-// During this integration stage the AD9833 is driven at the requested
-// frequency while simulated data temporarily supplies the measurement result.
+// Perform one physical LCR measurement using the AD9833 excitation source
+// and the dual-channel ADC/DMA/Goertzel impedance backend.
 MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
 {
+  MeasurementPoint measurement = {};
+
   setLCRGeneratorFrequency(settings.frequency);
 
-  MeasurementPoint measurement = simulatedMeasurement(settings);
+  // Allow the analog network to settle after an excitation-frequency change.
+  delay(2);
+
+  LCRPhasor impedance;
+
+  if (!measureLCRHardwareImpedance(
+        settings.frequency,
+        settings.referenceResistance,
+        impedance)) {
+    return measurement;
+  }
+  measurement.frequency = settings.frequency;
+  measurement.resistance = impedance.re;
+  measurement.reactance = impedance.im;
+  measurement.impedance = magnitudeLCRPhasor(impedance);
+  measurement.phaseDeg = phaseLCRPhasor(impedance);
+
+  // Series-equivalent quantities derived from complex impedance.
+  measurement.esr = measurement.resistance;
+
+  float omega = 2.0f * PI * settings.frequency;
+
+  if (measurement.reactance < 0.0f) {
+    measurement.capacitance = -1.0f / (omega * measurement.reactance);
+    measurement.inductance = 0.0f;
+  } else if (measurement.reactance > 0.0f) {
+    measurement.capacitance = 0.0f;
+    measurement.inductance = measurement.reactance / omega;
+  } else {
+    measurement.capacitance = 0.0f;
+    measurement.inductance = 0.0f;
+  }
+
+  if (fabsf(measurement.resistance) > 0.000001f)
+    measurement.q = fabsf(measurement.reactance / measurement.resistance);
+  else
+    measurement.q = 0.0f;
+
+  if (fabsf(measurement.reactance) > 0.000001f)
+    measurement.dissipation =
+      fabsf(measurement.resistance / measurement.reactance);
+  else
+    measurement.dissipation = 0.0f;
+
   return measurement;
 }
 
@@ -1176,19 +1223,7 @@ void enterLCRMode()
   lcrDisplayDirty = true;
 
   initializeLCR();
-
-  // Temporary frequency-scheduled ADC/DMA integration test.
   initializeLCRCapture();
-
-  LCRCapturePlan testPlan;
-
-  if (captureLCRRawTest(lcrSettings.frequency, testPlan)) {
-    printLCRRawTest(testPlan);
-    printLCRGoertzelTest(testPlan);
-  } else {
-    Serial.println("ERROR: LCR scheduled ADC capture failed");
-  }
-
   drawLCRScreen();
 }
 
@@ -1577,6 +1612,35 @@ LCRPhasor rotateLCRPhasor(const LCRPhasor &p, float theta)
 }
 
 
+// Subtract one complex phasor from another.
+LCRPhasor subtractLCRPhasor(const LCRPhasor &a, const LCRPhasor &b)
+{
+  return { a.re - b.re, a.im - b.im };
+}
+
+
+// Divide one complex phasor by another.
+LCRPhasor divideLCRPhasor(const LCRPhasor &a, const LCRPhasor &b)
+{
+  float denominator = b.re * b.re + b.im * b.im;
+
+  if (denominator <= 0.0f)
+    return { 0.0f, 0.0f };
+
+  return {
+    (a.re * b.re + a.im * b.im) / denominator,
+    (a.im * b.re - a.re * b.im) / denominator
+  };
+}
+
+
+// Scale a complex phasor by a real value.
+LCRPhasor scaleLCRPhasor(const LCRPhasor &p, float scale)
+{
+  return { p.re * scale, p.im * scale };
+}
+
+
 // Return the phase of a complex phasor in degrees.
 float phaseLCRPhasor(const LCRPhasor &p)
 {
@@ -1859,6 +1923,48 @@ void printLCRGoertzelTest(const LCRCapturePlan &plan)
   Serial.println(" deg");
 
   Serial.println();
+}
+
+
+// Acquire one hardware record and calculate complex DUT impedance from the
+// de-skewed Vtotal and Vdut phasors.
+bool measureLCRHardwareImpedance(uint32_t frequency, float senseResistance,
+                                 LCRPhasor &impedance)
+{
+  LCRCapturePlan plan;
+
+  if (!captureLCRRawTest(frequency, plan))
+    return false;
+
+  uint16_t n = plan.samplesPerChannel;
+
+  if (n == 0 || plan.channelSampleRate <= 0.0f)
+    return false;
+
+  float dcTotal = meanLCRCaptureChannel(n, 0);
+  float dcDut = meanLCRCaptureChannel(n, 1);
+
+  LCRPhasor vTotal =
+    calculateLCRGoertzel(n, 0, frequency, plan.channelSampleRate, dcTotal);
+
+  LCRPhasor vDut =
+    calculateLCRGoertzel(n, 1, frequency, plan.channelSampleRate, dcDut);
+
+  // ADC1 is sampled one aggregate conversion period after ADC0.
+  float skewSeconds = 1.0f / plan.aggregateSampleRate;
+  float skewRadians =
+    2.0f * PI * frequency * skewSeconds * LCR_PHASOR_CONJ;
+
+  vDut = rotateLCRPhasor(vDut, -skewRadians);
+
+  // V_sense is the complex voltage across the known reference resistor.
+  LCRPhasor vSense = subtractLCRPhasor(vTotal, vDut);
+
+  // Z_DUT = R_sense * V_DUT / V_sense
+  impedance =
+    scaleLCRPhasor(divideLCRPhasor(vDut, vSense), senseResistance);
+
+  return true;
 }
 
 
@@ -3168,7 +3274,7 @@ void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
 {
   const LCRRect &r = lcrLayout.primary;
 
-  LCRFormattedValue formatted = formatCapacitance(m.capacitance);
+  LCRFormattedValue formatted = formatImpedance(m.impedance);
 
   lcrValueSprite.fillSprite(BGCOLOR);
 

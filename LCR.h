@@ -409,6 +409,10 @@ struct LCRPhasor
 // Perform one impedance measurement using the currently selected backend.
 MeasurementPoint measureImpedance(const MeasurementSettings &settings);
 
+// Acquire one physical LCR measurement and return complex DUT impedance.
+bool measureLCRHardwareImpedance(uint32_t frequency, float senseResistance,
+                                 LCRPhasor &impedance);
+
 // Initialize the LCR instrument.
 void initializeLCR();
 
