@@ -43,6 +43,11 @@ static const uint16_t LCR_CAPTURE_BUFFER_SAMPLES =
 
 uint16_t lcrCaptureBuffer[LCR_CAPTURE_BUFFER_SAMPLES];
 
+// Goertzel processing configuration carried over from the current POC.
+static const float LCR_PHASOR_CONJ = 1.0f;
+static const float LCR_HANN_COHERENT_GAIN = 0.5f;
+static const bool LCR_USE_HANN_WINDOW = true;
+
 // AD9833 excitation source for the LCR measurement hardware.
 AD9833_Driver lcrDDS(AD9833_FSYNC_PIN);
 
@@ -1177,10 +1182,12 @@ void enterLCRMode()
 
   LCRCapturePlan testPlan;
 
-  if (captureLCRRawTest(lcrSettings.frequency, testPlan))
+  if (captureLCRRawTest(lcrSettings.frequency, testPlan)) {
     printLCRRawTest(testPlan);
-  else
+    printLCRGoertzelTest(testPlan);
+  } else {
     Serial.println("ERROR: LCR scheduled ADC capture failed");
+  }
 
   drawLCRScreen();
 }
@@ -1550,6 +1557,117 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
 }
 
 
+// Return the magnitude of a complex Goertzel phasor.
+float magnitudeLCRPhasor(const LCRPhasor &p)
+{
+  return sqrtf(p.re * p.re + p.im * p.im);
+}
+
+
+// Rotate a complex phasor by theta radians.
+LCRPhasor rotateLCRPhasor(const LCRPhasor &p, float theta)
+{
+  float c = cosf(theta);
+  float s = sinf(theta);
+
+  return {
+    p.re * c - p.im * s,
+    p.re * s + p.im * c
+  };
+}
+
+
+// Return the phase of a complex phasor in degrees.
+float phaseLCRPhasor(const LCRPhasor &p)
+{
+  return atan2f(p.im, p.re) * 180.0f / PI;
+}
+
+
+// Normalize a phase difference into the range -180 to +180 degrees.
+float normalizeLCRPhase(float phase)
+{
+  while (phase > 180.0f)
+    phase -= 360.0f;
+
+  while (phase < -180.0f)
+    phase += 360.0f;
+
+  return phase;
+}
+
+
+// Calculate the DC mean of one channel in the interleaved ADC capture buffer.
+float meanLCRCaptureChannel(uint16_t sampleCount, uint8_t offset)
+{
+  uint32_t sum = 0;
+
+  for (uint16_t i = 0; i < sampleCount; i++)
+    sum += lcrCaptureBuffer[i * 2 + offset] & 0x0FFF;
+
+  return static_cast<float>(sum) / sampleCount;
+}
+
+
+// Extract the complex amplitude at one frequency from a single channel of the
+// interleaved ADC buffer using the POC's single-bin Goertzel implementation.
+LCRPhasor calculateLCRGoertzel(uint16_t sampleCount, uint8_t offset,
+                               float frequency, float sampleRate, float dc)
+{
+  float w = 2.0f * PI * frequency / sampleRate;
+  float cw = cosf(w);
+  float sw = sinf(w);
+  float coeff = 2.0f * cw;
+
+  float s1 = 0.0f;
+  float s2 = 0.0f;
+
+  float d = (sampleCount > 1) ?
+            (2.0f * PI / static_cast<float>(sampleCount - 1)) : 0.0f;
+
+  float windowCoeff = 2.0f * cosf(d);
+  float windowPrevious = cosf(d);
+  float windowCurrent = 1.0f;
+
+  for (uint16_t i = 0; i < sampleCount; i++) {
+    float x = static_cast<float>(lcrCaptureBuffer[i * 2 + offset] & 0x0FFF) - dc;
+
+    if (LCR_USE_HANN_WINDOW) {
+      x *= 0.5f * (1.0f - windowCurrent);
+
+      float windowNext =
+        windowCoeff * windowCurrent - windowPrevious;
+
+      windowPrevious = windowCurrent;
+      windowCurrent = windowNext;
+    }
+
+    float s0 = x + coeff * s1 - s2;
+    s2 = s1;
+    s1 = s0;
+  }
+
+  LCRPhasor result = {
+    cw * s1 - s2,
+    sw * s1
+  };
+
+  result.im *= LCR_PHASOR_CONJ;
+
+  return result;
+}
+
+
+// Convert a Goertzel phasor into sinusoidal peak amplitude in ADC counts.
+float lcrPhasorAmplitude(const LCRPhasor &p, uint16_t sampleCount)
+{
+  float coherentGain = LCR_USE_HANN_WINDOW ? LCR_HANN_COHERENT_GAIN : 1.0f;
+
+  return 2.0f * magnitudeLCRPhasor(p) /
+         (static_cast<float>(sampleCount) * coherentGain);
+}
+
+
 // Calculate statistics for one channel in the interleaved ADC test buffer.
 // Offset 0 selects ADC0 and offset 1 selects ADC1.
 LCRCaptureStats calculateLCRCaptureStats(uint8_t offset,
@@ -1658,6 +1776,87 @@ void printLCRRawTest(const LCRCapturePlan &plan)
     Serial.print("ADC1 / ADC0 p-p ratio: ");
     Serial.println(ratio, 4);
   }
+
+  Serial.println();
+}
+
+
+// Process the most recent ADC capture through Goertzel and correct the known
+// ADC0-to-ADC1 round-robin sampling delay before comparing the two channels.
+void printLCRGoertzelTest(const LCRCapturePlan &plan)
+{
+  uint16_t n = plan.samplesPerChannel;
+
+  if (n == 0 || plan.channelSampleRate <= 0.0f)
+    return;
+
+  float dcTotal = meanLCRCaptureChannel(n, 0);
+  float dcDut = meanLCRCaptureChannel(n, 1);
+
+  LCRPhasor vTotal =
+    calculateLCRGoertzel(n, 0, plan.frequency, plan.channelSampleRate, dcTotal);
+
+  LCRPhasor vDut =
+    calculateLCRGoertzel(n, 1, plan.frequency, plan.channelSampleRate, dcDut);
+
+  float totalAmplitude = lcrPhasorAmplitude(vTotal, n);
+  float dutAmplitude = lcrPhasorAmplitude(vDut, n);
+
+  float totalPhase = phaseLCRPhasor(vTotal);
+  float dutPhaseRaw = phaseLCRPhasor(vDut);
+  float rawDifference = normalizeLCRPhase(dutPhaseRaw - totalPhase);
+
+  // ADC1 is sampled exactly one aggregate conversion period after ADC0.
+  float skewSeconds = 1.0f / plan.aggregateSampleRate;
+  float skewRadians = 2.0f * PI * plan.frequency *
+                      skewSeconds * LCR_PHASOR_CONJ;
+
+  LCRPhasor vDutCorrected = rotateLCRPhasor(vDut, -skewRadians);
+
+  float dutPhaseCorrected = phaseLCRPhasor(vDutCorrected);
+  float correctedDifference =
+    normalizeLCRPhase(dutPhaseCorrected - totalPhase);
+
+  Serial.println();
+  Serial.println("LCR Goertzel / de-skew test");
+
+  Serial.print("Vtotal amplitude: ");
+  Serial.print(totalAmplitude, 3);
+  Serial.println(" counts");
+
+  Serial.print("Vdut amplitude:   ");
+  Serial.print(dutAmplitude, 3);
+  Serial.println(" counts");
+
+  if (totalAmplitude > 0.0f) {
+    Serial.print("Vdut / Vtotal:    ");
+    Serial.println(dutAmplitude / totalAmplitude, 4);
+  }
+
+  Serial.print("Vtotal phase:      ");
+  Serial.print(totalPhase, 3);
+  Serial.println(" deg");
+
+  Serial.print("Vdut raw phase:    ");
+  Serial.print(dutPhaseRaw, 3);
+  Serial.println(" deg");
+
+  Serial.print("Raw difference:    ");
+  Serial.print(rawDifference, 3);
+  Serial.println(" deg");
+
+  Serial.print("Predicted skew:    ");
+  Serial.print(360.0f * plan.frequency * skewSeconds *
+               LCR_PHASOR_CONJ, 3);
+  Serial.println(" deg");
+
+  Serial.print("Corrected phase:   ");
+  Serial.print(dutPhaseCorrected, 3);
+  Serial.println(" deg");
+
+  Serial.print("Corrected diff:    ");
+  Serial.print(correctedDifference, 3);
+  Serial.println(" deg");
 
   Serial.println();
 }

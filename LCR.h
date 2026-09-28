@@ -394,6 +394,13 @@ struct LCRCapturePlan
   uint16_t samplesPerChannel;
 };
 
+// Complex single-frequency result returned by the Goertzel processor.
+struct LCRPhasor
+{
+  float re;
+  float im;
+};
+
 
 //
 // Public API
@@ -416,6 +423,9 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan);
 
 // Print a small portion of the raw diagnostic record to Serial.
 void printLCRRawTest(const LCRCapturePlan &plan);
+
+// Process the latest raw capture through Goertzel and ADC channel de-skew.
+void printLCRGoertzelTest(const LCRCapturePlan &plan);
 
 LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency);
 
