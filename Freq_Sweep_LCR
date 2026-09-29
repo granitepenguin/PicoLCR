@@ -82,7 +82,7 @@
 
 // ---- FIXED HARDWARE ---------------------------------------------------------
 // These pins are breadboard setup dependent. Check YOUR pinouts incase hardware is different. 
-static const uint8_t AD9833_FSYNC_PIN = 5;
+static const uint8_t AD9833_FSYNC_PIN = 3;
 static const uint8_t ADC0_GPIO        = 26;   // V_total   -> ADC input 0
 static const uint8_t ADC1_GPIO        = 27;   // V_DUT     -> ADC input 1
 static const uint8_t ADC_CH_A         = 0;    // V_total
@@ -270,8 +270,10 @@ static uint32_t g_freq_hz     = DEFAULT_HZ;
 static uint32_t g_sw_start    = SWEEP_START_HZ;
 static uint32_t g_sw_stop     = SWEEP_STOP_HZ;
 static uint32_t g_sw_step     = SWEEP_STEP_HZ;
-static bool     g_live        = true;
+static bool     g_live        = false;
 static const char* g_profile_name = "normal";
+// Maximum aggregate ADC rate validated by the channel-match test.
+static const float ADC_AGGREGATE_MAX_HZ = 250000.0f;
 
 // ---- CAPTURE PATH STATE -----------------------------------------------------
 static uint32_t g_adc_clk_hz   = 0;      // measured, not assumed
@@ -369,7 +371,8 @@ static void adcClockBoost(uint32_t div) {
   // number assumes a 48 MHz clk_adc. Whether a given part honours a shorter
   // conversion period is an empirical question -- see the fs_meas column in
   // 'y' and FLAG_FS_MISMATCH.
-  g_fs_agg_max = (float)g_adc_clk_hz / 96.0f;
+  // Limit scheduling to the aggregate rate validated by actual DMA timing.
+  g_fs_agg_max = ADC_AGGREGATE_MAX_HZ;
 }
 
 static void captureInit() {
@@ -380,15 +383,11 @@ static void captureInit() {
   g_dma_chan = dma_claim_unused_channel(true);
 }
 
-// Program the aggregate conversion rate. Returns the ACTUAL rate achieved,
-// which is what the Goertzel must be told about.
-//
-// Sample period is (1 + div) clk_adc cycles, clamped by hardware to a minimum
-// of 96. div is written as an integer so FRAC stays zero -- a nonzero
-// fractional divisor dithers the conversion period, and period dither is
-// sampling jitter.
+// Program the aggregate conversion rate. Returns the programmed rate used by
+// the DSP. DMA timing independently verifies that the ADC achieved this rate.
 static float captureSetRate(float fs_agg_target) {
   if (fs_agg_target < 1.0f) fs_agg_target = 1.0f;
+  if (fs_agg_target > g_fs_agg_max) fs_agg_target = g_fs_agg_max;
 
   float d = (float)g_adc_clk_hz / fs_agg_target - 1.0f;
   if (d < 95.0f)     d = 95.0f;        // 96-cycle conversion floor
@@ -401,9 +400,8 @@ static float captureSetRate(float fs_agg_target) {
   g_fs_agg     = (float)g_adc_clk_hz / (float)g_period_cyc;
   g_fs_hz      = g_fs_agg * 0.5f;
 
-  // ADC1 is converted in the slot immediately after ADC0, so the skew is
-  // exactly one aggregate sample period. Exact, not estimated.
-  g_skew_s     = (float)g_period_cyc / (float)g_adc_clk_hz;
+  // ADC1 is sampled one aggregate conversion period after ADC0.
+  g_skew_s = (float)g_period_cyc / (float)g_adc_clk_hz;
 
   return g_fs_agg;
 }
@@ -793,7 +791,7 @@ static void channelMatchTest() {
 
   Serial.println();
   Serial.println(F("[match] tie GP26 and GP27 to the same node before trusting this"));
-  Serial.println(F("     f_hz     n  fs_prog  fs_meas  ratio   spc   magA   magB  B/A     raw_dphi pred_skew corrected"));
+  Serial.println(F("     f_hz     n  fs_ch_prog fs_ch_meas ratio   spc   magA   magB  B/A     raw_dphi pred_skew corrected"));
 
   char line[248];
   for (uint8_t i = 0; i < nf; i++) {
@@ -837,7 +835,7 @@ static void channelMatchTest() {
     float fs_ratio = (g_fs_agg > 0.0f) ? (g_fs_agg_meas / g_fs_agg) : 0.0f;
 
     snprintf(line, sizeof(line),
-      "  %7lu %5u %8.0f %8.0f %6.4f %5.1f %6.0f %6.0f %6.4f %10.3f %9.3f %9.3f%s%s",
+      "  %7lu %5u %8.0f %10.0f %8.4f %5.1f %6.0f %6.0f %6.4f %10.3f %9.3f %9.3f%s%s",
       (unsigned long)f, (unsigned)n, g_fs_hz, g_fs_meas_ch, fs_ratio,
       g_fs_hz / (float)f,
       magA, magB, (magA > 0.0f ? magB / magA : 0.0f),
@@ -1341,8 +1339,8 @@ void setup() {
   Serial.println();
   Serial.println(F("[hint] first run: 'y' with GP26/GP27 tied together validates"));
   Serial.println(F("[hint] the capture path before you trust any impedance."));
-  Serial.println(F("[hint] watch the new fs_meas / ratio columns. Then try 'o1'"));
-  Serial.println(F("[hint] for 2 MS/s aggregate and re-run 'y' to see if it holds."));
+  Serial.println(F("[hint] fs_meas/fs_prog should stay near 1.000."));
+  Serial.println(F("[hint] B/A should be near 1.000 and corrected phase near 0."));
   printLiveHeader();
   delay(100);
 }

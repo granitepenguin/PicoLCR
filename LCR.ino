@@ -13,6 +13,9 @@
 //   Instrument state management
 
 #include "AD9833_Driver.h"
+#include <hardware/adc.h>
+#include <hardware/dma.h>
+
 
 // LCR excitation-generator hardware.
 // The AD9833 uses SPI0 independently from the TFT display bus.
@@ -20,12 +23,40 @@ static const uint8_t AD9833_FSYNC_PIN = 3;  // GP3, physical pin 5
 static const uint8_t AD9833_SCK_PIN   = 6;  // GP6, physical pin 9
 static const uint8_t AD9833_DATA_PIN  = 7;  // GP7, physical pin 10
 
+// Raw dual-channel ADC capture used while integrating the LCR hardware.
+// Samples alternate ADC0/ADC1 in one DMA-filled buffer.
+static const uint8_t LCR_ADC_TOTAL_PIN = 26;  // GP26, physical pin 31
+static const uint8_t LCR_ADC_DUT_PIN   = 27;  // GP27, physical pin 32
+static const uint8_t LCR_ADC_CH_TOTAL  = 0;
+static const uint8_t LCR_ADC_CH_DUT    = 1;
+
+int lcrAdcDmaChannel = -1;
+
+// Initial LCR acquisition parameters derived from the POC Normal profile.
+static const uint16_t LCR_TARGET_SAMPLES_PER_CYCLE = 50;
+static const uint16_t LCR_TARGET_CYCLES = 16;
+static const uint16_t LCR_CAPTURE_MIN_SAMPLES = 512;
+static const uint16_t LCR_CAPTURE_MAX_SAMPLES = 4000;
+static const uint16_t LCR_MAX_POINT_MS = 20;
+static const uint16_t LCR_CAPTURE_BUFFER_SAMPLES =
+  LCR_CAPTURE_MAX_SAMPLES * 2;
+
+uint16_t lcrCaptureBuffer[LCR_CAPTURE_BUFFER_SAMPLES];
+
+// Goertzel processing configuration carried over from the current POC.
+static const float LCR_PHASOR_CONJ = 1.0f;
+static const float LCR_HANN_COHERENT_GAIN = 0.5f;
+static const bool LCR_USE_HANN_WINDOW = true;
+
 // AD9833 excitation source for the LCR measurement hardware.
 AD9833_Driver lcrDDS(AD9833_FSYNC_PIN);
 
 // Tracks the frequency currently programmed into the physical generator.
 // Repeated measurements at the same frequency do not need to reprogram the DDS.
 uint32_t lcrGeneratorFrequency = 0;
+
+// Sense resistor currently installed in the LCR measurement network.
+static const float LCR_R_SENSE_OHMS = 2150.0f;
 
 // screen locations for various output displays
 constexpr int LABEL_X = 20;
@@ -131,7 +162,7 @@ LCRUIState lcrUIState = LCR_UI_NORMAL;
 // whenever a new impedance measurement is requested.
 MeasurementSettings lcrSettings = {
   1000,      // Frequency: 1 kHz
-  1000.0f    // Reference resistor: 1 kOhm
+  2150.0f    // Reference resistor: 1 kOhm
 };
 
 // Stores the most recently acquired LCR measurement.
@@ -1101,14 +1132,58 @@ MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings)
 }
 
 
-// Perform one measurement using the physical LCR hardware.
-// During this integration stage the AD9833 is driven at the requested
-// frequency while simulated data temporarily supplies the measurement result.
+// Perform one physical LCR measurement using the AD9833 excitation source
+// and the dual-channel ADC/DMA/Goertzel impedance backend.
 MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
 {
+  MeasurementPoint measurement = {};
+
   setLCRGeneratorFrequency(settings.frequency);
 
-  MeasurementPoint measurement = simulatedMeasurement(settings);
+  // Allow the analog network to settle after an excitation-frequency change.
+  delay(2);
+
+  LCRPhasor impedance;
+
+  if (!measureLCRHardwareImpedance(
+        settings.frequency,
+        settings.referenceResistance,
+        impedance)) {
+    return measurement;
+  }
+  measurement.frequency = settings.frequency;
+  measurement.resistance = impedance.re;
+  measurement.reactance = impedance.im;
+  measurement.impedance = magnitudeLCRPhasor(impedance);
+  measurement.phaseDeg = phaseLCRPhasor(impedance);
+
+  // Series-equivalent quantities derived from complex impedance.
+  measurement.esr = measurement.resistance;
+
+  float omega = 2.0f * PI * settings.frequency;
+
+  if (measurement.reactance < 0.0f) {
+    measurement.capacitance = -1.0f / (omega * measurement.reactance);
+    measurement.inductance = 0.0f;
+  } else if (measurement.reactance > 0.0f) {
+    measurement.capacitance = 0.0f;
+    measurement.inductance = measurement.reactance / omega;
+  } else {
+    measurement.capacitance = 0.0f;
+    measurement.inductance = 0.0f;
+  }
+
+  if (fabsf(measurement.resistance) > 0.000001f)
+    measurement.q = fabsf(measurement.reactance / measurement.resistance);
+  else
+    measurement.q = 0.0f;
+
+  if (fabsf(measurement.reactance) > 0.000001f)
+    measurement.dissipation =
+      fabsf(measurement.resistance / measurement.reactance);
+  else
+    measurement.dissipation = 0.0f;
+
   return measurement;
 }
 
@@ -1148,6 +1223,7 @@ void enterLCRMode()
   lcrDisplayDirty = true;
 
   initializeLCR();
+  initializeLCRCapture();
   drawLCRScreen();
 }
 
@@ -1387,6 +1463,508 @@ void initializeLCRGenerator()
   lcrGeneratorFrequency = 1000;
 
   Serial.println("LCR AD9833 initialized at 1 kHz");
+}
+
+
+// Initialize the RP2040 ADC and DMA resources used by the LCR capture path.
+// ADC0 and ADC1 are sampled round-robin and transferred directly from the
+// ADC FIFO into an interleaved RAM buffer.
+void initializeLCRCapture()
+{
+  adc_init();
+
+  adc_gpio_init(LCR_ADC_TOTAL_PIN);
+  adc_gpio_init(LCR_ADC_DUT_PIN);
+
+  adc_set_round_robin((1u << LCR_ADC_CH_TOTAL) |
+                      (1u << LCR_ADC_CH_DUT));
+
+  adc_select_input(LCR_ADC_CH_TOTAL);
+
+  adc_fifo_setup(
+    true,   // Enable FIFO
+    true,   // Enable DMA request
+    1,      // DMA request when at least one sample is present
+    false,  // Do not set ERR bit in sample data
+    false   // Keep full 12-bit ADC samples
+  );
+
+  if (lcrAdcDmaChannel < 0)
+    lcrAdcDmaChannel = dma_claim_unused_channel(true);
+
+  Serial.print("LCR ADC DMA channel: ");
+  Serial.println(lcrAdcDmaChannel);
+}
+
+
+// Calculate the ADC sample rate and record length for one excitation frequency.
+// The scheduler attempts to maintain a consistent number of samples per cycle
+// while respecting the ADC rate and per-point capture-time limits.
+LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency)
+{
+  LCRCapturePlan plan = {};
+  plan.frequency = frequency;
+
+  if (frequency == 0)
+    return plan;
+
+  // Two ADC conversions are required for every channel sample pair.
+  float targetAggregateRate =
+    2.0f * LCR_TARGET_SAMPLES_PER_CYCLE * frequency;
+
+  // RP2040 ADC conversion requires 96 ADC clock cycles.
+  float adcClock = static_cast<float>(clock_get_hz(clk_adc));
+  float maximumAggregateRate = adcClock / 96.0f;
+
+  plan.aggregateSampleRate = min(targetAggregateRate, maximumAggregateRate);
+  plan.channelSampleRate = plan.aggregateSampleRate / 2.0f;
+  plan.samplesPerCycle = plan.channelSampleRate / frequency;
+  plan.adcClockDiv = adcClock / plan.aggregateSampleRate;
+
+  uint32_t samples = static_cast<uint32_t>(
+    ceilf(LCR_TARGET_CYCLES * plan.samplesPerCycle)
+  );
+
+  if (samples < LCR_CAPTURE_MIN_SAMPLES)
+    samples = LCR_CAPTURE_MIN_SAMPLES;
+
+  if (samples > LCR_CAPTURE_MAX_SAMPLES)
+    samples = LCR_CAPTURE_MAX_SAMPLES;
+
+  // Limit the record length to the configured point-time budget.
+  uint32_t timeLimitedSamples = static_cast<uint32_t>(
+    plan.channelSampleRate * LCR_MAX_POINT_MS / 1000.0f
+  );
+
+  if (timeLimitedSamples >= LCR_CAPTURE_MIN_SAMPLES &&
+      samples > timeLimitedSamples) {
+    samples = timeLimitedSamples;
+  }
+
+  plan.samplesPerChannel = static_cast<uint16_t>(samples);
+
+  return plan;
+}
+
+
+// Capture one frequency-scheduled interleaved ADC0/ADC1 record through DMA.
+// The acquisition parameters are calculated from the requested excitation
+// frequency using the same scheduling model needed by the measurement backend.
+bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
+{
+  if (lcrAdcDmaChannel < 0)
+    return false;
+
+  plan = calculateLCRCapturePlan(frequency);
+
+  if (plan.samplesPerChannel == 0 || plan.adcClockDiv <= 0.0f)
+    return false;
+
+  adc_run(false);
+  adc_fifo_drain();
+
+  adc_select_input(LCR_ADC_CH_TOTAL);
+  adc_set_clkdiv(plan.adcClockDiv);
+
+  dma_channel_config cfg = dma_channel_get_default_config(lcrAdcDmaChannel);
+
+  channel_config_set_transfer_data_size(&cfg, DMA_SIZE_16);
+  channel_config_set_read_increment(&cfg, false);
+  channel_config_set_write_increment(&cfg, true);
+  channel_config_set_dreq(&cfg, DREQ_ADC);
+
+  dma_channel_configure(
+    lcrAdcDmaChannel,
+    &cfg,
+    lcrCaptureBuffer,
+    &adc_hw->fifo,
+    plan.samplesPerChannel * 2,
+    true
+  );
+
+  adc_run(true);
+  dma_channel_wait_for_finish_blocking(lcrAdcDmaChannel);
+
+  adc_run(false);
+  adc_fifo_drain();
+
+  return true;
+}
+
+
+// Return the magnitude of a complex Goertzel phasor.
+float magnitudeLCRPhasor(const LCRPhasor &p)
+{
+  return sqrtf(p.re * p.re + p.im * p.im);
+}
+
+
+// Rotate a complex phasor by theta radians.
+LCRPhasor rotateLCRPhasor(const LCRPhasor &p, float theta)
+{
+  float c = cosf(theta);
+  float s = sinf(theta);
+
+  return {
+    p.re * c - p.im * s,
+    p.re * s + p.im * c
+  };
+}
+
+
+// Subtract one complex phasor from another.
+LCRPhasor subtractLCRPhasor(const LCRPhasor &a, const LCRPhasor &b)
+{
+  return { a.re - b.re, a.im - b.im };
+}
+
+
+// Divide one complex phasor by another.
+LCRPhasor divideLCRPhasor(const LCRPhasor &a, const LCRPhasor &b)
+{
+  float denominator = b.re * b.re + b.im * b.im;
+
+  if (denominator <= 0.0f)
+    return { 0.0f, 0.0f };
+
+  return {
+    (a.re * b.re + a.im * b.im) / denominator,
+    (a.im * b.re - a.re * b.im) / denominator
+  };
+}
+
+
+// Scale a complex phasor by a real value.
+LCRPhasor scaleLCRPhasor(const LCRPhasor &p, float scale)
+{
+  return { p.re * scale, p.im * scale };
+}
+
+
+// Return the phase of a complex phasor in degrees.
+float phaseLCRPhasor(const LCRPhasor &p)
+{
+  return atan2f(p.im, p.re) * 180.0f / PI;
+}
+
+
+// Normalize a phase difference into the range -180 to +180 degrees.
+float normalizeLCRPhase(float phase)
+{
+  while (phase > 180.0f)
+    phase -= 360.0f;
+
+  while (phase < -180.0f)
+    phase += 360.0f;
+
+  return phase;
+}
+
+
+// Calculate the DC mean of one channel in the interleaved ADC capture buffer.
+float meanLCRCaptureChannel(uint16_t sampleCount, uint8_t offset)
+{
+  uint32_t sum = 0;
+
+  for (uint16_t i = 0; i < sampleCount; i++)
+    sum += lcrCaptureBuffer[i * 2 + offset] & 0x0FFF;
+
+  return static_cast<float>(sum) / sampleCount;
+}
+
+
+// Extract the complex amplitude at one frequency from a single channel of the
+// interleaved ADC buffer using the POC's single-bin Goertzel implementation.
+LCRPhasor calculateLCRGoertzel(uint16_t sampleCount, uint8_t offset,
+                               float frequency, float sampleRate, float dc)
+{
+  float w = 2.0f * PI * frequency / sampleRate;
+  float cw = cosf(w);
+  float sw = sinf(w);
+  float coeff = 2.0f * cw;
+
+  float s1 = 0.0f;
+  float s2 = 0.0f;
+
+  float d = (sampleCount > 1) ?
+            (2.0f * PI / static_cast<float>(sampleCount - 1)) : 0.0f;
+
+  float windowCoeff = 2.0f * cosf(d);
+  float windowPrevious = cosf(d);
+  float windowCurrent = 1.0f;
+
+  for (uint16_t i = 0; i < sampleCount; i++) {
+    float x = static_cast<float>(lcrCaptureBuffer[i * 2 + offset] & 0x0FFF) - dc;
+
+    if (LCR_USE_HANN_WINDOW) {
+      x *= 0.5f * (1.0f - windowCurrent);
+
+      float windowNext =
+        windowCoeff * windowCurrent - windowPrevious;
+
+      windowPrevious = windowCurrent;
+      windowCurrent = windowNext;
+    }
+
+    float s0 = x + coeff * s1 - s2;
+    s2 = s1;
+    s1 = s0;
+  }
+
+  LCRPhasor result = {
+    cw * s1 - s2,
+    sw * s1
+  };
+
+  result.im *= LCR_PHASOR_CONJ;
+
+  return result;
+}
+
+
+// Convert a Goertzel phasor into sinusoidal peak amplitude in ADC counts.
+float lcrPhasorAmplitude(const LCRPhasor &p, uint16_t sampleCount)
+{
+  float coherentGain = LCR_USE_HANN_WINDOW ? LCR_HANN_COHERENT_GAIN : 1.0f;
+
+  return 2.0f * magnitudeLCRPhasor(p) /
+         (static_cast<float>(sampleCount) * coherentGain);
+}
+
+
+// Calculate statistics for one channel in the interleaved ADC test buffer.
+// Offset 0 selects ADC0 and offset 1 selects ADC1.
+LCRCaptureStats calculateLCRCaptureStats(uint8_t offset,
+                                         uint16_t sampleCount)
+{
+  LCRCaptureStats stats;
+  stats.minimum = 4095;
+  stats.maximum = 0;
+
+  uint32_t sum = 0;
+
+  for (uint16_t i = 0; i < sampleCount; i++) {
+    uint16_t sample = lcrCaptureBuffer[i * 2 + offset];
+
+    if (sample < stats.minimum)
+      stats.minimum = sample;
+
+    if (sample > stats.maximum)
+      stats.maximum = sample;
+
+    sum += sample;
+  }
+
+  stats.mean = static_cast<float>(sum) / sampleCount;
+  stats.peakToPeak = stats.maximum - stats.minimum;
+
+  return stats;
+}
+
+
+// Print the scheduled acquisition parameters, a small portion of the raw
+// record, and statistics calculated across the complete DMA capture.
+void printLCRRawTest(const LCRCapturePlan &plan)
+{
+  Serial.println();
+  Serial.println("LCR scheduled ADC test");
+
+  Serial.print("Frequency: ");
+  Serial.print(plan.frequency);
+  Serial.println(" Hz");
+
+  Serial.print("Aggregate sample rate: ");
+  Serial.print(plan.aggregateSampleRate, 1);
+  Serial.println(" samples/s");
+
+  Serial.print("Channel sample rate: ");
+  Serial.print(plan.channelSampleRate, 1);
+  Serial.println(" samples/s");
+
+  Serial.print("Samples/cycle/channel: ");
+  Serial.println(plan.samplesPerCycle, 2);
+
+  Serial.print("ADC clock divisor: ");
+  Serial.println(plan.adcClockDiv, 3);
+
+  Serial.print("Samples/channel: ");
+  Serial.println(plan.samplesPerChannel);
+
+  Serial.println();
+  Serial.println("pair,ADC0,ADC1");
+
+  uint16_t printCount = min<uint16_t>(16, plan.samplesPerChannel);
+
+  for (uint16_t i = 0; i < printCount; i++) {
+    uint16_t adc0 = lcrCaptureBuffer[i * 2];
+    uint16_t adc1 = lcrCaptureBuffer[i * 2 + 1];
+
+    Serial.print(i);
+    Serial.print(",");
+    Serial.print(adc0);
+    Serial.print(",");
+    Serial.println(adc1);
+  }
+
+  LCRCaptureStats adc0Stats =
+    calculateLCRCaptureStats(0, plan.samplesPerChannel);
+
+  LCRCaptureStats adc1Stats =
+    calculateLCRCaptureStats(1, plan.samplesPerChannel);
+
+  Serial.println();
+  Serial.println("Full capture statistics");
+
+  Serial.print("ADC0  min: ");
+  Serial.print(adc0Stats.minimum);
+  Serial.print("  max: ");
+  Serial.print(adc0Stats.maximum);
+  Serial.print("  mean: ");
+  Serial.print(adc0Stats.mean, 1);
+  Serial.print("  p-p: ");
+  Serial.println(adc0Stats.peakToPeak);
+
+  Serial.print("ADC1  min: ");
+  Serial.print(adc1Stats.minimum);
+  Serial.print("  max: ");
+  Serial.print(adc1Stats.maximum);
+  Serial.print("  mean: ");
+  Serial.print(adc1Stats.mean, 1);
+  Serial.print("  p-p: ");
+  Serial.println(adc1Stats.peakToPeak);
+
+  if (adc0Stats.peakToPeak > 0) {
+    float ratio =
+      static_cast<float>(adc1Stats.peakToPeak) / adc0Stats.peakToPeak;
+
+    Serial.print("ADC1 / ADC0 p-p ratio: ");
+    Serial.println(ratio, 4);
+  }
+
+  Serial.println();
+}
+
+
+// Process the most recent ADC capture through Goertzel and correct the known
+// ADC0-to-ADC1 round-robin sampling delay before comparing the two channels.
+void printLCRGoertzelTest(const LCRCapturePlan &plan)
+{
+  uint16_t n = plan.samplesPerChannel;
+
+  if (n == 0 || plan.channelSampleRate <= 0.0f)
+    return;
+
+  float dcTotal = meanLCRCaptureChannel(n, 0);
+  float dcDut = meanLCRCaptureChannel(n, 1);
+
+  LCRPhasor vTotal =
+    calculateLCRGoertzel(n, 0, plan.frequency, plan.channelSampleRate, dcTotal);
+
+  LCRPhasor vDut =
+    calculateLCRGoertzel(n, 1, plan.frequency, plan.channelSampleRate, dcDut);
+
+  float totalAmplitude = lcrPhasorAmplitude(vTotal, n);
+  float dutAmplitude = lcrPhasorAmplitude(vDut, n);
+
+  float totalPhase = phaseLCRPhasor(vTotal);
+  float dutPhaseRaw = phaseLCRPhasor(vDut);
+  float rawDifference = normalizeLCRPhase(dutPhaseRaw - totalPhase);
+
+  // ADC1 is sampled exactly one aggregate conversion period after ADC0.
+  float skewSeconds = 1.0f / plan.aggregateSampleRate;
+  float skewRadians = 2.0f * PI * plan.frequency *
+                      skewSeconds * LCR_PHASOR_CONJ;
+
+  LCRPhasor vDutCorrected = rotateLCRPhasor(vDut, -skewRadians);
+
+  float dutPhaseCorrected = phaseLCRPhasor(vDutCorrected);
+  float correctedDifference =
+    normalizeLCRPhase(dutPhaseCorrected - totalPhase);
+
+  Serial.println();
+  Serial.println("LCR Goertzel / de-skew test");
+
+  Serial.print("Vtotal amplitude: ");
+  Serial.print(totalAmplitude, 3);
+  Serial.println(" counts");
+
+  Serial.print("Vdut amplitude:   ");
+  Serial.print(dutAmplitude, 3);
+  Serial.println(" counts");
+
+  if (totalAmplitude > 0.0f) {
+    Serial.print("Vdut / Vtotal:    ");
+    Serial.println(dutAmplitude / totalAmplitude, 4);
+  }
+
+  Serial.print("Vtotal phase:      ");
+  Serial.print(totalPhase, 3);
+  Serial.println(" deg");
+
+  Serial.print("Vdut raw phase:    ");
+  Serial.print(dutPhaseRaw, 3);
+  Serial.println(" deg");
+
+  Serial.print("Raw difference:    ");
+  Serial.print(rawDifference, 3);
+  Serial.println(" deg");
+
+  Serial.print("Predicted skew:    ");
+  Serial.print(360.0f * plan.frequency * skewSeconds *
+               LCR_PHASOR_CONJ, 3);
+  Serial.println(" deg");
+
+  Serial.print("Corrected phase:   ");
+  Serial.print(dutPhaseCorrected, 3);
+  Serial.println(" deg");
+
+  Serial.print("Corrected diff:    ");
+  Serial.print(correctedDifference, 3);
+  Serial.println(" deg");
+
+  Serial.println();
+}
+
+
+// Acquire one hardware record and calculate complex DUT impedance from the
+// de-skewed Vtotal and Vdut phasors.
+bool measureLCRHardwareImpedance(uint32_t frequency, float senseResistance,
+                                 LCRPhasor &impedance)
+{
+  LCRCapturePlan plan;
+
+  if (!captureLCRRawTest(frequency, plan))
+    return false;
+
+  uint16_t n = plan.samplesPerChannel;
+
+  if (n == 0 || plan.channelSampleRate <= 0.0f)
+    return false;
+
+  float dcTotal = meanLCRCaptureChannel(n, 0);
+  float dcDut = meanLCRCaptureChannel(n, 1);
+
+  LCRPhasor vTotal =
+    calculateLCRGoertzel(n, 0, frequency, plan.channelSampleRate, dcTotal);
+
+  LCRPhasor vDut =
+    calculateLCRGoertzel(n, 1, frequency, plan.channelSampleRate, dcDut);
+
+  // ADC1 is sampled one aggregate conversion period after ADC0.
+  float skewSeconds = 1.0f / plan.aggregateSampleRate;
+  float skewRadians =
+    2.0f * PI * frequency * skewSeconds * LCR_PHASOR_CONJ;
+
+  vDut = rotateLCRPhasor(vDut, -skewRadians);
+
+  // V_sense is the complex voltage across the known reference resistor.
+  LCRPhasor vSense = subtractLCRPhasor(vTotal, vDut);
+
+  // Z_DUT = R_sense * V_DUT / V_sense
+  impedance =
+    scaleLCRPhasor(divideLCRPhasor(vDut, vSense), senseResistance);
+
+  return true;
 }
 
 
@@ -2696,7 +3274,7 @@ void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
 {
   const LCRRect &r = lcrLayout.primary;
 
-  LCRFormattedValue formatted = formatCapacitance(m.capacitance);
+  LCRFormattedValue formatted = formatImpedance(m.impedance);
 
   lcrValueSprite.fillSprite(BGCOLOR);
 

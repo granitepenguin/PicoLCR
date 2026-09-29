@@ -372,6 +372,35 @@ enum LCRBackend
 
 extern LCRBackend lcrBackend;
 
+// Summary statistics for one channel of an interleaved ADC capture.
+struct LCRCaptureStats
+{
+  uint16_t minimum;
+  uint16_t maximum;
+  float mean;
+  uint16_t peakToPeak;
+};
+
+
+// Describes the ADC sampling configuration for one LCR measurement point.
+// The plan is calculated from excitation frequency before DMA acquisition.
+struct LCRCapturePlan
+{
+  uint32_t frequency;
+  float aggregateSampleRate;
+  float channelSampleRate;
+  float samplesPerCycle;
+  float adcClockDiv;
+  uint16_t samplesPerChannel;
+};
+
+// Complex single-frequency result returned by the Goertzel processor.
+struct LCRPhasor
+{
+  float re;
+  float im;
+};
+
 
 //
 // Public API
@@ -380,11 +409,29 @@ extern LCRBackend lcrBackend;
 // Perform one impedance measurement using the currently selected backend.
 MeasurementPoint measureImpedance(const MeasurementSettings &settings);
 
+// Acquire one physical LCR measurement and return complex DUT impedance.
+bool measureLCRHardwareImpedance(uint32_t frequency, float senseResistance,
+                                 LCRPhasor &impedance);
+
 // Initialize the LCR instrument.
 void initializeLCR();
 
 // Initialize the AD9833 excitation generator used by the hardware backend.
 void initializeLCRGenerator();
+
+// Initialize the raw ADC/DMA capture hardware used by the LCR backend.
+void initializeLCRCapture();
+
+// Acquire one raw interleaved ADC0/ADC1 diagnostic record.
+bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan);
+
+// Print a small portion of the raw diagnostic record to Serial.
+void printLCRRawTest(const LCRCapturePlan &plan);
+
+// Process the latest raw capture through Goertzel and ADC channel de-skew.
+void printLCRGoertzelTest(const LCRCapturePlan &plan);
+
+LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency);
 
 // Set the physical LCR excitation generator frequency.
 void setLCRGeneratorFrequency(uint32_t frequency);
