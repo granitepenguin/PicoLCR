@@ -61,6 +61,9 @@ Adafruit_NeoPixel pixels(1, DIN_PIN, NEO_GRB + NEO_KHZ800);
 //
 #include "LCR.h"
 
+// ADC DMA ownership helpers
+void stopScopeAdc();
+void restoreScopeAdc();
 
 
 float waveFreq[2];             // frequency (Hz)

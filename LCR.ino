@@ -14,6 +14,7 @@
 
 #include "AD9833_Driver.h"
 #include <hardware/adc.h>
+#include <hardware/clocks.h>
 #include <hardware/dma.h>
 
 
@@ -31,6 +32,7 @@ static const uint8_t LCR_ADC_CH_TOTAL  = 0;
 static const uint8_t LCR_ADC_CH_DUT    = 1;
 
 int lcrAdcDmaChannel = -1;
+static bool lcrCaptureFailureDumped = false;
 
 // Initial LCR acquisition parameters derived from the POC Normal profile.
 static const uint16_t LCR_TARGET_SAMPLES_PER_CYCLE = 50;
@@ -48,8 +50,18 @@ static const float LCR_PHASOR_CONJ = 1.0f;
 static const float LCR_HANN_COHERENT_GAIN = 0.5f;
 static const bool LCR_USE_HANN_WINDOW = true;
 
+// Maximum aggregate ADC rate validated by the standalone PicoLCR POC.
+static const float LCR_ADC_MAX_AGGREGATE_RATE = 250000.0f;
+
+// RP2040 ADC conversion floor used when calculating the hardware divisor.
+static const uint16_t LCR_ADC_MIN_PERIOD_CYCLES = 96;
+
 // AD9833 excitation source for the LCR measurement hardware.
 AD9833_Driver lcrDDS(AD9833_FSYNC_PIN);
+
+// Runtime ADC clock used to calculate exact conversion timing and channel skew.
+uint32_t lcrAdcClockHz = 0;
+float lcrAdcMaxAggregateRate = 0.0f;
 
 // Tracks the frequency currently programmed into the physical generator.
 // Repeated measurements at the same frequency do not need to reprogram the DDS.
@@ -966,9 +978,17 @@ bool acquireLCRSweepPoint(uint32_t frequency)
 
   MeasurementSettings settings = lcrSettings;
   settings.frequency = frequency;
-  MeasurementPoint measurement = measureImpedance(settings);
-  lcrSweepPoints[lcrSweepPointCount] = makeSweepPoint(measurement);
 
+  MeasurementPoint measurement = measureImpedance(settings);
+
+  if (measurement.frequency != frequency) {
+    Serial.print("LCR sweep capture failed at ");
+    Serial.print(frequency);
+    Serial.println(" Hz");
+    return false;
+  }
+
+  lcrSweepPoints[lcrSweepPointCount] = makeSweepPoint(measurement);
   lcrSweepPointCount++;
 
   return true;
@@ -1079,13 +1099,32 @@ void updateLCRSweep()
 
   lcrSweepExecution.currentFrequency = frequency;
 
-  // Acquire and store one Sweep point.
-  if (!acquireLCRSweepPoint(frequency)) {
-    finishLCRSweep();
-    return;
+  // Acquire and store one Sweep point. Retry transient capture failures before
+  // skipping the frequency and continuing with the remainder of the sweep.
+  bool pointAcquired = false;
+
+  for (uint8_t attempt = 1; attempt <= 3; attempt++) {
+    if (acquireLCRSweepPoint(frequency)) {
+      pointAcquired = true;
+      break;
+    }
+
+    Serial.print("LCR sweep retry ");
+    Serial.print(attempt);
+    Serial.print("/3 at ");
+    Serial.print(frequency);
+    Serial.println(" Hz");
+
+    delay(5);
   }
 
-  // Mark this point complete.
+  if (!pointAcquired) {
+    Serial.print("LCR sweep skipped ");
+    Serial.print(frequency);
+    Serial.println(" Hz after 3 failed attempts");
+  }
+
+  // Advance to the next requested frequency whether this point succeeded or not.
   lcrSweepExecution.currentPoint++;
 
   // Update the Running display while the Sweep is still active.
@@ -1141,7 +1180,7 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
   setLCRGeneratorFrequency(settings.frequency);
 
   // Allow the analog network to settle after an excitation-frequency change.
-  delay(2);
+  delay(5);
 
   LCRPhasor impedance;
 
@@ -1210,13 +1249,20 @@ MeasurementPoint measureImpedance(const MeasurementSettings &settings)
 
 
 
-// Enter the LCR analyzer and display the default Measure tab.
-// Each new analyzer session begins in LIVE mode with no selector open.
+// Enter the LCR analyzer and transfer ADC ownership from Scope to LCR.
 void enterLCRMode()
 {
+  // Stop Scope acquisition before LCR changes shared ADC state.
+  stopScopeAdc();
+  lcrCaptureFailureDumped = false;
+
   instrumentMode = MODE_LCR;
   lcrTab = LCR_TAB_MEASURE;
-  lcrMeasureState = LCR_MEASURE_LIVE;
+
+  // Start in HOLD during hardware bring-up. This prevents simply entering
+  // LCR mode from continuously hammering the ADC acquisition path.
+  lcrMeasureState = LCR_MEASURE_HOLD;
+
   lcrSweepState = LCR_SWEEP_SETUP;
   lcrFrequencyTarget = LCR_FREQ_MEASURE;
   lcrUIState = LCR_UI_NORMAL;
@@ -1224,19 +1270,27 @@ void enterLCRMode()
 
   initializeLCR();
   initializeLCRCapture();
+
   drawLCRScreen();
 }
 
 
-
-// Exit the LCR instrument and return to oscilloscope mode.
+// Exit the LCR analyzer, release the shared ADC, and restore Scope ownership.
 void exitLCRMode()
 {
+  // Stop any LCR conversion that may still be active.
+  adc_run(false);
+  adc_set_round_robin(0);
+  adc_fifo_drain();
+
+  // Restore the ADC configuration expected by the oscilloscope.
+  restoreScopeAdc();
+
   instrumentMode = MODE_SCOPE;
+
   display.fillScreen(BGCOLOR);
   DrawText();
 }
-
 
 
 // Main LCR instrument task.
@@ -1466,19 +1520,51 @@ void initializeLCRGenerator()
 }
 
 
+// Configure clk_adc for the higher-rate LCR acquisition path.
+// With the current 192 MHz system clock, dividing PLL_SYS by two produces
+// the 96 MHz ADC clock validated by the standalone PicoLCR POC.
+void configureLCRAdcClock()
+{
+  uint32_t systemClock = clock_get_hz(clk_sys);
+
+  clock_configure(
+    clk_adc,
+    0,
+    CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+    systemClock,
+    systemClock / 2
+  );
+
+  lcrAdcClockHz = clock_get_hz(clk_adc);
+  lcrAdcMaxAggregateRate = LCR_ADC_MAX_AGGREGATE_RATE;
+
+  Serial.print("LCR ADC clock: ");
+  Serial.print(lcrAdcClockHz / 1000000.0f, 2);
+  Serial.println(" MHz");
+
+  Serial.print("LCR ADC aggregate ceiling: ");
+  Serial.print(lcrAdcMaxAggregateRate / 1000.0f, 1);
+  Serial.println(" kS/s");
+}
+
+
 // Initialize the RP2040 ADC and DMA resources used by the LCR capture path.
 // ADC0 and ADC1 are sampled round-robin and transferred directly from the
 // ADC FIFO into an interleaved RAM buffer.
 void initializeLCRCapture()
 {
+  configureLCRAdcClock(); // Adjust for higher freq measurements
+
   adc_init();
+
+  // Clock diag output
+  lcrAdcClockHz = clock_get_hz(clk_adc);
+  lcrAdcMaxAggregateRate = LCR_ADC_MAX_AGGREGATE_RATE;
 
   adc_gpio_init(LCR_ADC_TOTAL_PIN);
   adc_gpio_init(LCR_ADC_DUT_PIN);
 
-  adc_set_round_robin((1u << LCR_ADC_CH_TOTAL) |
-                      (1u << LCR_ADC_CH_DUT));
-
+  adc_set_round_robin(0);
   adc_select_input(LCR_ADC_CH_TOTAL);
 
   adc_fifo_setup(
@@ -1489,6 +1575,8 @@ void initializeLCRCapture()
     false   // Keep full 12-bit ADC samples
   );
 
+  adc_fifo_drain();
+
   if (lcrAdcDmaChannel < 0)
     lcrAdcDmaChannel = dma_claim_unused_channel(true);
 
@@ -1497,49 +1585,95 @@ void initializeLCRCapture()
 }
 
 
-// Calculate the ADC sample rate and record length for one excitation frequency.
-// The scheduler attempts to maintain a consistent number of samples per cycle
-// while respecting the ADC rate and per-point capture-time limits.
+// Calculate the actual ADC timing and record length for one measurement point.
+// An integer ADC divisor avoids fractional-period dither, and all downstream
+// processing uses the achieved sample rate rather than the requested rate.
 LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency)
 {
   LCRCapturePlan plan = {};
   plan.frequency = frequency;
 
-  if (frequency == 0)
+  if (frequency == 0 || lcrAdcClockHz == 0)
     return plan;
 
-  // Two ADC conversions are required for every channel sample pair.
   float targetAggregateRate =
     2.0f * LCR_TARGET_SAMPLES_PER_CYCLE * frequency;
 
-  // RP2040 ADC conversion requires 96 ADC clock cycles.
-  float adcClock = static_cast<float>(clock_get_hz(clk_adc));
-  float maximumAggregateRate = adcClock / 96.0f;
+  if (targetAggregateRate > lcrAdcMaxAggregateRate)
+    targetAggregateRate = lcrAdcMaxAggregateRate;
 
-  plan.aggregateSampleRate = min(targetAggregateRate, maximumAggregateRate);
+  if (targetAggregateRate < 1.0f)
+    targetAggregateRate = 1.0f;
+
+  // One ADC conversion occupies (div + 1) clk_adc cycles. The hardware
+  // conversion floor is 96 cycles.
+  float divisor = static_cast<float>(lcrAdcClockHz) /
+                  targetAggregateRate - 1.0f;
+
+  if (divisor < LCR_ADC_MIN_PERIOD_CYCLES - 1)
+    divisor = LCR_ADC_MIN_PERIOD_CYCLES - 1;
+
+  if (divisor > 65535.0f)
+    divisor = 65535.0f;
+
+  uint32_t integerDivisor = static_cast<uint32_t>(divisor + 0.5f);
+  uint32_t periodCycles = integerDivisor + 1;
+
+  plan.adcClockDiv = static_cast<float>(integerDivisor);
+  plan.aggregateSampleRate =
+    static_cast<float>(lcrAdcClockHz) / periodCycles;
+
   plan.channelSampleRate = plan.aggregateSampleRate / 2.0f;
   plan.samplesPerCycle = plan.channelSampleRate / frequency;
-  plan.adcClockDiv = adcClock / plan.aggregateSampleRate;
 
-  uint32_t samples = static_cast<uint32_t>(
-    ceilf(LCR_TARGET_CYCLES * plan.samplesPerCycle)
+  // Choose the record length using the same cycle-based algorithm as the
+  // validated standalone POC.
+  uint32_t ceiling = LCR_CAPTURE_MAX_SAMPLES;
+
+  if (LCR_MAX_POINT_MS > 0) {
+    uint32_t budgetSamples = static_cast<uint32_t>(
+      plan.channelSampleRate * static_cast<float>(LCR_MAX_POINT_MS) * 1.0e-3f
+    );
+
+    if (budgetSamples < ceiling)
+      ceiling = budgetSamples;
+  }
+
+  if (ceiling > LCR_CAPTURE_MAX_SAMPLES)
+    ceiling = LCR_CAPTURE_MAX_SAMPLES;
+
+  if (ceiling < LCR_CAPTURE_MIN_SAMPLES)
+    ceiling = LCR_CAPTURE_MIN_SAMPLES;
+
+  uint32_t cycles = LCR_TARGET_CYCLES;
+
+  uint32_t minimumCycles = static_cast<uint32_t>(
+    ceilf(static_cast<float>(LCR_CAPTURE_MIN_SAMPLES) /
+          plan.samplesPerCycle)
   );
 
-  if (samples < LCR_CAPTURE_MIN_SAMPLES)
-    samples = LCR_CAPTURE_MIN_SAMPLES;
+  if (minimumCycles > cycles)
+    cycles = minimumCycles;
+
+  uint32_t maximumCycles = static_cast<uint32_t>(
+    floorf(static_cast<float>(ceiling) / plan.samplesPerCycle)
+  );
+
+  if (maximumCycles < 1)
+    maximumCycles = 1;
+
+  if (cycles > maximumCycles)
+    cycles = maximumCycles;
+
+  long samples = lroundf(
+    static_cast<float>(cycles) * plan.samplesPerCycle
+  );
+
+  if (samples < 3)
+    samples = 3;
 
   if (samples > LCR_CAPTURE_MAX_SAMPLES)
     samples = LCR_CAPTURE_MAX_SAMPLES;
-
-  // Limit the record length to the configured point-time budget.
-  uint32_t timeLimitedSamples = static_cast<uint32_t>(
-    plan.channelSampleRate * LCR_MAX_POINT_MS / 1000.0f
-  );
-
-  if (timeLimitedSamples >= LCR_CAPTURE_MIN_SAMPLES &&
-      samples > timeLimitedSamples) {
-    samples = timeLimitedSamples;
-  }
 
   plan.samplesPerChannel = static_cast<uint16_t>(samples);
 
@@ -1547,9 +1681,139 @@ LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency)
 }
 
 
-// Capture one frequency-scheduled interleaved ADC0/ADC1 record through DMA.
-// The acquisition parameters are calculated from the requested excitation
-// frequency using the same scheduling model needed by the measurement backend.
+// Dump ADC/DMA state once when the capture path first develops a real FIFO
+// error. The state is captured before another measurement can disturb it.
+void printLCRCaptureFailureState(uint32_t frequency,
+                                 const LCRCapturePlan &plan,
+                                 uint32_t fifoStatus)
+{
+  Serial.println();
+  Serial.println("=== LCR CAPTURE FAILURE STATE ===");
+
+  Serial.print("frequency: ");
+  Serial.print(frequency);
+  Serial.println(" Hz");
+
+  Serial.print("DMA channel: ");
+  Serial.println(lcrAdcDmaChannel);
+
+  Serial.print("DMA busy: ");
+  Serial.println(dma_channel_is_busy(lcrAdcDmaChannel) ? "yes" : "no");
+
+  Serial.print("DMA transfer_count: ");
+  Serial.println(dma_hw->ch[lcrAdcDmaChannel].transfer_count);
+
+  Serial.print("DMA CTRL_TRIG: 0x");
+  Serial.println(dma_hw->ch[lcrAdcDmaChannel].ctrl_trig, HEX);
+
+  Serial.print("ADC CS: 0x");
+  Serial.println(adc_hw->cs, HEX);
+
+  Serial.print("ADC FCS: 0x");
+  Serial.println(fifoStatus, HEX);
+
+  Serial.print("ADC FIFO level: ");
+  Serial.println(
+    (fifoStatus & ADC_FCS_LEVEL_BITS) >> ADC_FCS_LEVEL_LSB
+  );
+
+  Serial.print("ADC OVER: ");
+  Serial.println(
+    (fifoStatus & ADC_FCS_OVER_BITS) ? "yes" : "no"
+  );
+
+  Serial.print("ADC UNDER: ");
+  Serial.println(
+    (fifoStatus & ADC_FCS_UNDER_BITS) ? "yes" : "no"
+  );
+
+  Serial.print("samples/channel: ");
+  Serial.println(plan.samplesPerChannel);
+
+  Serial.print("capture time: ");
+  Serial.print(plan.captureTimeUs);
+  Serial.println(" us");
+
+  Serial.print("programmed aggregate rate: ");
+  Serial.print(plan.aggregateSampleRate / 1000.0f, 1);
+  Serial.println(" kS/s");
+
+  Serial.print("measured aggregate rate: ");
+  Serial.print(plan.measuredAggregateRate / 1000.0f, 1);
+  Serial.println(" kS/s");
+
+  Serial.print("clk_adc: ");
+  Serial.print(clock_get_hz(clk_adc));
+  Serial.println(" Hz");
+
+  Serial.print("plan adcClockDiv: ");
+  Serial.println(plan.adcClockDiv, 6);
+
+  Serial.print("ADC DIV register: 0x");
+  Serial.println(adc_hw->div, HEX);
+
+  Serial.print("ADC DIV integer: ");
+  Serial.println(
+    (adc_hw->div & ADC_DIV_INT_BITS) >> ADC_DIV_INT_LSB
+  );
+
+  Serial.print("ADC DIV frac: ");
+  Serial.println(
+    (adc_hw->div & ADC_DIV_FRAC_BITS) >> ADC_DIV_FRAC_LSB
+  );
+
+  Serial.print("ADC FCS THRESH: ");
+  Serial.println(
+    (fifoStatus & ADC_FCS_THRESH_BITS) >> ADC_FCS_THRESH_LSB
+  );
+
+  Serial.print("ADC FCS DREQ_EN: ");
+  Serial.println(
+    (fifoStatus & ADC_FCS_DREQ_EN_BITS) ? "yes" : "no"
+  );
+
+  Serial.println("DMA channel states:");
+
+  for (uint8_t ch = 0; ch < NUM_DMA_CHANNELS; ch++) {
+    uint32_t ctrl = dma_hw->ch[ch].ctrl_trig;
+
+    Serial.print("  ch");
+    Serial.print(ch);
+
+    Serial.print(" busy=");
+    Serial.print(
+      (ctrl & DMA_CH0_CTRL_TRIG_BUSY_BITS) ? 1 : 0
+    );
+
+    Serial.print(" count=");
+    Serial.print(dma_hw->ch[ch].transfer_count);
+
+    Serial.print(" ctrl=0x");
+    Serial.println(ctrl, HEX);
+  }
+
+  Serial.print("DMA INTR: 0x");
+  Serial.println(dma_hw->intr, HEX);
+
+  Serial.print("DMA INTE0: 0x");
+  Serial.println(dma_hw->inte0, HEX);
+
+  Serial.print("DMA INTS0: 0x");
+  Serial.println(dma_hw->ints0, HEX);
+
+  Serial.print("DMA INTE1: 0x");
+  Serial.println(dma_hw->inte1, HEX);
+
+  Serial.print("DMA INTS1: 0x");
+  Serial.println(dma_hw->ints1, HEX);
+
+  Serial.println("=== END CAPTURE FAILURE STATE ===");
+  Serial.println();
+}
+
+
+// Capture one interleaved ADC0/ADC1 record using deterministic round-robin
+// startup, DMA transfer, measured-rate verification, and integrity checks.
 bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
 {
   if (lcrAdcDmaChannel < 0)
@@ -1560,35 +1824,182 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
   if (plan.samplesPerChannel == 0 || plan.adcClockDiv <= 0.0f)
     return false;
 
+  uint32_t totalSamples =
+    static_cast<uint32_t>(plan.samplesPerChannel) * 2u;
+
+  //
+  // Establish deterministic ADC0, ADC1, ADC0, ADC1... ordering.
+  //
+
   adc_run(false);
+  adc_set_round_robin(0);
   adc_fifo_drain();
 
   adc_select_input(LCR_ADC_CH_TOTAL);
+
+  adc_set_round_robin(
+    (1u << LCR_ADC_CH_TOTAL) |
+    (1u << LCR_ADC_CH_DUT)
+  );
+
   adc_set_clkdiv(plan.adcClockDiv);
 
-  dma_channel_config cfg = dma_channel_get_default_config(lcrAdcDmaChannel);
+  adc_fifo_setup(
+    true,   // Enable FIFO
+    true,   // Enable DMA request
+    1,      // DREQ on every sample
+    false,  // Do not include ERR bit in FIFO data
+    false   // Keep full 12-bit samples
+  );
+
+  // Clear sticky FIFO overflow/underflow from previous captures.
+  hw_set_bits(
+    &adc_hw->fcs,
+    ADC_FCS_OVER_BITS | ADC_FCS_UNDER_BITS
+  );
+
+  //
+  // Configure and arm DMA before starting ADC conversions.
+  //
+
+  dma_channel_config cfg =
+    dma_channel_get_default_config(lcrAdcDmaChannel);
 
   channel_config_set_transfer_data_size(&cfg, DMA_SIZE_16);
   channel_config_set_read_increment(&cfg, false);
   channel_config_set_write_increment(&cfg, true);
   channel_config_set_dreq(&cfg, DREQ_ADC);
+  channel_config_set_high_priority(&cfg, true);
 
   dma_channel_configure(
     lcrAdcDmaChannel,
     &cfg,
     lcrCaptureBuffer,
     &adc_hw->fifo,
-    plan.samplesPerChannel * 2,
+    totalSamples,
     true
   );
+
+  //
+  // Time only the actual conversion run.
+  //
+
+  uint32_t startUs = time_us_32();
 
   adc_run(true);
   dma_channel_wait_for_finish_blocking(lcrAdcDmaChannel);
 
+  // Stop conversions immediately when DMA has collected the requested record.
   adc_run(false);
+
+  uint32_t stopUs = time_us_32();
+
+  //
+  // Calculate the actual achieved sample rate.
+  //
+
+  plan.captureTimeUs = stopUs - startUs;
+
+  if (plan.captureTimeUs > 0) {
+    plan.measuredAggregateRate =
+      static_cast<float>(totalSamples) /
+      (static_cast<float>(plan.captureTimeUs) * 1.0e-6f);
+
+    plan.measuredChannelRate = plan.measuredAggregateRate / 2.0f;
+
+    plan.measuredSamplesPerCycle =
+      plan.measuredChannelRate / static_cast<float>(frequency);
+  }
+
+  //
+  // Save capture integrity state before disturbing the ADC.
+  //
+  uint32_t fifoStatus = adc_hw->fcs;
+
+  bool fifoError =
+    (fifoStatus &
+     (ADC_FCS_OVER_BITS | ADC_FCS_UNDER_BITS)) != 0;
+
+  uint32_t finalChannel =
+    (adc_hw->cs & ADC_CS_AINSEL_BITS) >> ADC_CS_AINSEL_LSB;
+
+  // Now that status has been preserved, discard conversions that occurred
+  // after DMA completed.
   adc_fifo_drain();
+  adc_set_round_robin(0);
+
+  bool channelParityValid = (finalChannel == LCR_ADC_CH_TOTAL);
+
+  // AINSEL may advance once more after the final DMA transfer and before
+  // adc_run(false) takes effect. Report this for diagnostics, but do not reject
+  // an otherwise clean DMA record solely because of final AINSEL state.
+  if (!channelParityValid && !fifoError) {
+    Serial.print("LCR ADC note: final AINSEL=");
+    Serial.print(finalChannel);
+    Serial.println(" after clean DMA capture");
+  }
+
+  // FIFO overflow/underflow means samples were actually lost, so that record
+  // cannot be trusted.
+  if (fifoError) {
+    Serial.print("LCR ADC capture error:");
+
+    if (fifoStatus & ADC_FCS_OVER_BITS)
+      Serial.print(" FIFO_OVER");
+
+    if (fifoStatus & ADC_FCS_UNDER_BITS)
+      Serial.print(" FIFO_UNDER");
+
+    if (!channelParityValid) {
+      Serial.print(" final=");
+      Serial.print(finalChannel);
+    }
+
+    Serial.println();
+
+    // Preserve the first real FIFO failure for diagnosis instead of allowing
+    // LIVE Measure to immediately hammer the broken capture path again.
+    if (!lcrCaptureFailureDumped) {
+      lcrCaptureFailureDumped = true;
+
+      printLCRCaptureFailureState(
+        frequency,
+        plan,
+        fifoStatus
+      );
+
+      lcrMeasureState = LCR_MEASURE_HOLD;
+
+      Serial.println(
+        "LCR Measure forced to HOLD after ADC capture failure."
+      );
+    }
+
+    return false;
+  }
 
   return true;
+}
+
+
+// Report programmed versus measured ADC rate for selected diagnostic points.
+void printLCRCaptureRate(const LCRCapturePlan &plan)
+{
+  float ratio = 0.0f;
+
+  if (plan.aggregateSampleRate > 0.0f)
+    ratio = plan.measuredAggregateRate / plan.aggregateSampleRate;
+
+  Serial.print("LCR rate: ");
+  Serial.print(plan.frequency);
+  Serial.print(" Hz  programmed=");
+  Serial.print(plan.aggregateSampleRate / 1000.0f, 1);
+  Serial.print(" kS/s  measured=");
+  Serial.print(plan.measuredAggregateRate / 1000.0f, 1);
+  Serial.print(" kS/s  ratio=");
+  Serial.print(ratio, 4);
+  Serial.print("  spc=");
+  Serial.println(plan.measuredSamplesPerCycle, 2);
 }
 
 
@@ -1926,6 +2337,78 @@ void printLCRGoertzelTest(const LCRCapturePlan &plan)
 }
 
 
+// Compare ADC0 and ADC1 when both channels are connected to the same signal.
+// This isolates ADC channel gain and timing errors from the LCR divider.
+void printLCRChannelMatchTest(uint32_t frequency)
+{
+  LCRCapturePlan plan;
+
+  if (!captureLCRRawTest(frequency, plan)) {
+    Serial.print("MATCH ");
+    Serial.print(frequency);
+    Serial.println(" Hz  ADC_ERR");
+    return;
+  }
+
+  if (plan.measuredChannelRate <= 0.0f)
+    return;
+
+  uint16_t n = plan.samplesPerChannel;
+
+  float dc0 = meanLCRCaptureChannel(n, 0);
+  float dc1 = meanLCRCaptureChannel(n, 1);
+
+  LCRPhasor adc0 =
+    calculateLCRGoertzel(n, 0, frequency, plan.channelSampleRate, dc0);
+
+  LCRPhasor adc1 =
+    calculateLCRGoertzel(n, 1, frequency, plan.channelSampleRate, dc1);
+
+  float amp0 = lcrPhasorAmplitude(adc0, n);
+  float amp1 = lcrPhasorAmplitude(adc1, n);
+
+  float rawPhase =
+    normalizeLCRPhase(phaseLCRPhasor(adc1) - phaseLCRPhasor(adc0));
+
+  float skewSeconds = 1.0f / plan.aggregateSampleRate;
+  float skewRadians =
+    2.0f * PI * frequency * skewSeconds * LCR_PHASOR_CONJ;
+
+  LCRPhasor adc1Corrected = rotateLCRPhasor(adc1, -skewRadians);
+
+  float correctedPhase =
+    normalizeLCRPhase(
+      phaseLCRPhasor(adc1Corrected) - phaseLCRPhasor(adc0)
+    );
+
+  Serial.print("MATCH ");
+  Serial.print(frequency);
+  Serial.print(" Hz  ratio=");
+
+  if (amp0 > 0.0f)
+    Serial.print(amp1 / amp0, 4);
+  else
+    Serial.print("ERR");
+
+  Serial.print("  raw=");
+  Serial.print(rawPhase, 3);
+  Serial.print(" deg  predicted=");
+  Serial.print(360.0f * frequency * skewSeconds * LCR_PHASOR_CONJ, 3);
+  Serial.print(" deg  corrected=");
+  Serial.print(correctedPhase, 3);
+  Serial.print("  prog=");
+  Serial.print(plan.aggregateSampleRate / 1000.0f, 1);
+  Serial.print("k  meas=");
+  Serial.print(plan.measuredAggregateRate / 1000.0f, 1);
+  Serial.print("k");
+  Serial.print(" deg  fs=");
+  Serial.print(plan.measuredChannelRate / 1000.0f, 1);
+  Serial.print(" kS/s  spc=");
+  Serial.println(plan.measuredSamplesPerCycle, 2);
+}
+
+
+
 // Acquire one hardware record and calculate complex DUT impedance from the
 // de-skewed Vtotal and Vdut phasors.
 bool measureLCRHardwareImpedance(uint32_t frequency, float senseResistance,
@@ -1935,6 +2418,25 @@ bool measureLCRHardwareImpedance(uint32_t frequency, float senseResistance,
 
   if (!captureLCRRawTest(frequency, plan))
     return false;
+
+  if (plan.measuredChannelRate <= 0.0f)
+    return false;
+
+  // Temporary high-frequency ADC-rate diagnostic.
+  if ((frequency >= 49000 && frequency <= 51000) ||
+      (frequency >= 69000 && frequency <= 71000) ||
+      (frequency >= 89000 && frequency <= 91000) ||
+      frequency >= 109000) {
+    printLCRCaptureRate(plan);
+  }
+
+  if (plan.measuredSamplesPerCycle < 5.0f) {
+    Serial.print("LCR warning: only ");
+    Serial.print(plan.measuredSamplesPerCycle, 2);
+    Serial.print(" samples/cycle at ");
+    Serial.print(frequency);
+    Serial.println(" Hz");
+  }
 
   uint16_t n = plan.samplesPerChannel;
 
