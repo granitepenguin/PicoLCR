@@ -54,6 +54,7 @@ struct MeasurementPoint
 struct SweepPoint
 {
   uint32_t frequency;
+  bool valid;
 
   float impedance;
   float phaseDeg;
@@ -64,6 +65,7 @@ struct SweepPoint
   float esr;
   float q;
 };
+
 
 // Stores the minimum and maximum values used to scale one Sweep plot axis.
 struct SweepPlotRange
@@ -392,6 +394,11 @@ struct LCRCapturePlan
   float samplesPerCycle;
   float adcClockDiv;
   uint16_t samplesPerChannel;
+
+  uint32_t captureTimeUs;
+  float measuredAggregateRate;
+  float measuredChannelRate;
+  float measuredSamplesPerCycle;
 };
 
 // Complex single-frequency result returned by the Goertzel processor.
@@ -428,8 +435,14 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan);
 // Print a small portion of the raw diagnostic record to Serial.
 void printLCRRawTest(const LCRCapturePlan &plan);
 
+// Print a capture rate output diagnostic to Serial
+void printLCRCaptureRate(const LCRCapturePlan &plan);
+
 // Process the latest raw capture through Goertzel and ADC channel de-skew.
 void printLCRGoertzelTest(const LCRCapturePlan &plan);
+
+// Temporary match testing
+void printLCRChannelMatchTest(uint32_t frequency);
 
 LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency);
 

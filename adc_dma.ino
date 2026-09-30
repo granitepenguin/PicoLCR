@@ -28,7 +28,7 @@
 
 // globals
 dma_channel_config cfg;
-uint dma_chan;
+int dma_chan = -1;
 
 void sample_2us() {
   byte ch;
@@ -94,36 +94,69 @@ void sample_dma(uint16_t *capture_buf) {
 }
 
 void dmaadc_setup(float clock_div) {
-  // Make sure GPIO is high-impedance, no pullups etc
+  // Make sure GPIO is high-impedance, no pullups etc.
   adc_gpio_init(26 + CAPTURE_CHANNEL0);
   adc_gpio_init(26 + CAPTURE_CHANNEL1);
 
+  adc_run(false);
+  adc_set_round_robin(0);
+  adc_fifo_drain();
+
   adc_init();
   adc_select_input(CAPTURE_CHANNEL0);
-  adc_fifo_setup(
-     true,    // Write each completed conversion to the sample FIFO
-     true,    // Enable DMA data request (DREQ)
-     1,       // DREQ (and IRQ) asserted when at least 1 sample present
-     false,   // We won't see the ERR bit because of 8 bit reads; disable.
-     false    // do not Shift each sample to 8 bits when pushing to FIFO
-     );
 
-  // set sample rate
+  adc_fifo_setup(
+    true,    // Write each completed conversion to the sample FIFO
+    true,    // Enable DMA data request (DREQ)
+    1,       // DREQ asserted when at least 1 sample is present
+    false,   // Do not include ERR bit in FIFO data
+    false    // Keep full 12-bit samples
+  );
+
   adc_set_clkdiv(clock_div);
 
-  sleep_ms(100);
-  // Set up the DMA to start transferring data as soon as it appears in FIFO
-  dma_chan = dma_claim_unused_channel(true);
+  // Claim the Scope DMA channel once. Reinitializing the Scope ADC must not
+  // consume another DMA channel.
+  if (dma_chan < 0)
+    dma_chan = dma_claim_unused_channel(true);
+
   cfg = dma_channel_get_default_config(dma_chan);
 
-  // Reading from constant address, writing to incrementing byte addresses
   channel_config_set_transfer_data_size(&cfg, DMA_SIZE_16);
   channel_config_set_read_increment(&cfg, false);
   channel_config_set_write_increment(&cfg, true);
-
-  // Pace transfers based on availability of ADC samples
   channel_config_set_dreq(&cfg, DREQ_ADC);
 }
+
+// Stop Scope acquisition before another instrument takes ownership of the ADC.
+// The Scope DMA channel remains claimed so it can be reused on return.
+void stopScopeAdc()
+{
+  adc_run(false);
+  adc_set_round_robin(0);
+  adc_fifo_drain();
+
+  if (dma_chan >= 0 && dma_channel_is_busy(dma_chan))
+    dma_channel_abort(dma_chan);
+}
+
+// Restore the ADC configuration expected by the oscilloscope after another
+// instrument has used the shared ADC peripheral.
+void restoreScopeAdc()
+{
+  float clock_div;
+
+  if (rate == 4)
+    clock_div = 192.0f;
+  else
+    clock_div = 0.0f;
+
+  dmaadc_setup(clock_div);
+
+  // Force the next Scope acquisition path to reapply any rate-specific state.
+  orate = RATE_DMA + 1;
+}
+
 
 void split_capture() {
   for (int i = 0; i < NSAMP/2; ++i){
