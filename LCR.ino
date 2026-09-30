@@ -17,6 +17,9 @@
 #include <hardware/clocks.h>
 #include <hardware/dma.h>
 
+// Enable verbose LCR ADC/DMA diagnostics.
+// Set to 1 while debugging acquisition problems; 0 for normal operation.
+#define LCR_CAPTURE_DEBUG 0
 
 // LCR excitation-generator hardware.
 // The AD9833 uses SPI0 independently from the TFT display bus.
@@ -55,6 +58,16 @@ static const float LCR_ADC_MAX_AGGREGATE_RATE = 250000.0f;
 
 // RP2040 ADC conversion floor used when calculating the hardware divisor.
 static const uint16_t LCR_ADC_MIN_PERIOD_CYCLES = 96;
+
+// Avoid sampling the excitation too close to the per-channel Nyquist
+// frequency. Near 2 samples/cycle the round-robin Goertzel measurement
+// develops a large deterministic artifact.
+static const float LCR_NYQUIST_AVOID_SPC_LOW  = 1.90f;
+static const float LCR_NYQUIST_AVOID_SPC_HIGH = 2.10f;
+
+// When the normal plan lands in the avoidance region, deliberately move the
+// tone farther above Nyquist by targeting 1.60 samples/cycle/channel.
+static const float LCR_NYQUIST_SAFE_SPC = 1.60f;
 
 // AD9833 excitation source for the LCR measurement hardware.
 AD9833_Driver lcrDDS(AD9833_FSYNC_PIN);
@@ -334,6 +347,7 @@ SweepPoint makeSweepPoint(const MeasurementPoint &measurement)
   SweepPoint point;
 
   point.frequency = measurement.frequency;
+  point.valid = true;
   point.impedance = measurement.impedance;
   point.phaseDeg = measurement.phaseDeg;
   point.resistance = measurement.resistance;
@@ -382,11 +396,20 @@ SweepPlotRange findLCRSweepPlotRange()
   if (lcrSweepPointCount == 0)
     return range;
 
-  range.minimum = getLCRSweepPlotValue(lcrSweepPoints[0]);
-  range.maximum = range.minimum;
+  bool haveValidPoint = false;
 
-  for (uint16_t i = 1; i < lcrSweepPointCount; i++) {
+  for (uint16_t i = 0; i < lcrSweepPointCount; i++) {
+    if (!lcrSweepPoints[i].valid)
+      continue;
+
     float value = getLCRSweepPlotValue(lcrSweepPoints[i]);
+
+    if (!haveValidPoint) {
+      range.minimum = value;
+      range.maximum = value;
+      haveValidPoint = true;
+      continue;
+    }
 
     if (value < range.minimum)
       range.minimum = value;
@@ -394,6 +417,10 @@ SweepPlotRange findLCRSweepPlotRange()
     if (value > range.maximum)
       range.maximum = value;
   }
+
+  // If the entire sweep failed, leave the safe default range of 0..1.
+  if (!haveValidPoint)
+    return range;
 
   float span = range.maximum - range.minimum;
 
@@ -648,12 +675,22 @@ void drawLCRSweepPlotControl()
     LCRFormattedValue frequency = formatFrequency(point.frequency);
 
     char value[20];
-    formatLCRSweepCursorValue(
-      value,
-      sizeof(value),
-      getLCRSweepPlotValue(point),
-      scale
-    );
+
+    if (point.valid) {
+      formatLCRSweepCursorValue(
+        value,
+        sizeof(value),
+        getLCRSweepPlotValue(point),
+        scale
+      );
+    }
+    else {
+      snprintf(
+        value,
+        sizeof(value),
+        "NO DATA"
+      );
+    }
 
     snprintf(
       label,
@@ -920,31 +957,67 @@ void drawLCRSweepPlot()
   //
   // Draw the trace.
   //
+  // Invalid measurements are never connected into the normal trace. A red
+  // marker identifies the requested frequency where acquisition failed.
+  //
 
-  int16_t previousX = calculateLCRSweepPlotX( lcrSweepPoints[0].frequency);
-  int16_t previousY =
-    calculateLCRSweepPlotY(getLCRSweepPlotValue(lcrSweepPoints[0]), range);
+  bool havePreviousValidPoint = false;
+  int16_t previousX = 0;
+  int16_t previousY = 0;
 
-  // A single-point result still gets a visible marker.
-  display.drawPixel(
-    previousX,
-    previousY,
-    HIGHCOLOR
-  );
-
-  // Trace drawing loop
-  for (uint16_t i = 1;
+  for (uint16_t i = 0;
        i < lcrSweepPointCount;
        i++) {
 
-    int16_t x = calculateLCRSweepPlotX( lcrSweepPoints[i].frequency);
-    int16_t y =
-      calculateLCRSweepPlotY(getLCRSweepPlotValue(lcrSweepPoints[i]), range);
+    const SweepPoint &point = lcrSweepPoints[i];
 
-    display.drawLine( previousX, previousY, x, y, HIGHCOLOR);
+    int16_t x = calculateLCRSweepPlotX(point.frequency);
+
+    //
+    // Failed acquisition: mark the frequency in red and break the trace.
+    //
+    if (!point.valid) {
+      display.drawFastVLine(
+        x,
+        plot.y + plot.h - 5,
+        4,
+        TFT_RED
+      );
+
+      havePreviousValidPoint = false;
+      continue;
+    }
+
+    //
+    // Valid measurement.
+    //
+    int16_t y =
+      calculateLCRSweepPlotY(
+        getLCRSweepPlotValue(point),
+        range
+      );
+
+    // Always make an individual valid measurement visible.
+    display.drawPixel(
+      x,
+      y,
+      HIGHCOLOR
+    );
+
+    // Connect only consecutive valid measurements.
+    if (havePreviousValidPoint) {
+      display.drawLine(
+        previousX,
+        previousY,
+        x,
+        y,
+        HIGHCOLOR
+      );
+    }
 
     previousX = x;
     previousY = y;
+    havePreviousValidPoint = true;
   }
 
   //
@@ -981,12 +1054,8 @@ bool acquireLCRSweepPoint(uint32_t frequency)
 
   MeasurementPoint measurement = measureImpedance(settings);
 
-  if (measurement.frequency != frequency) {
-    Serial.print("LCR sweep capture failed at ");
-    Serial.print(frequency);
-    Serial.println(" Hz");
+  if (measurement.frequency != frequency)
     return false;
-  }
 
   lcrSweepPoints[lcrSweepPointCount] = makeSweepPoint(measurement);
   lcrSweepPointCount++;
@@ -1119,9 +1188,19 @@ void updateLCRSweep()
   }
 
   if (!pointAcquired) {
-    Serial.print("LCR sweep skipped ");
+    Serial.print("LCR sweep invalid ");
     Serial.print(frequency);
     Serial.println(" Hz after 3 failed attempts");
+
+    if (lcrSweepPointCount < LCR_MAX_SWEEP_POINTS) {
+      SweepPoint &point = lcrSweepPoints[lcrSweepPointCount];
+
+      point = {};
+      point.frequency = frequency;
+      point.valid = false;
+
+      lcrSweepPointCount++;
+    }
   }
 
   // Advance to the next requested frequency whether this point succeeded or not.
@@ -1580,8 +1659,10 @@ void initializeLCRCapture()
   if (lcrAdcDmaChannel < 0)
     lcrAdcDmaChannel = dma_claim_unused_channel(true);
 
+#if LCR_CAPTURE_DEBUG
   Serial.print("LCR ADC DMA channel: ");
   Serial.println(lcrAdcDmaChannel);
+#endif
 }
 
 
@@ -1604,6 +1685,41 @@ LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency)
 
   if (targetAggregateRate < 1.0f)
     targetAggregateRate = 1.0f;
+
+  //
+  // Nyquist avoidance.
+  //
+  // targetAggregateRate contains samples from both round-robin channels, so
+  // the per-channel rate is half of it.
+  //
+  float targetChannelRate = targetAggregateRate / 2.0f;
+  float targetSamplesPerCycle =
+    targetChannelRate / static_cast<float>(frequency);
+
+  if (targetSamplesPerCycle > LCR_NYQUIST_AVOID_SPC_LOW &&
+      targetSamplesPerCycle < LCR_NYQUIST_AVOID_SPC_HIGH) {
+
+    // Nyquist spike troubleshooting
+#if LCR_CAPTURE_DEBUG
+    Serial.print("LCR Nyquist avoid: ");
+    Serial.print(frequency);
+    Serial.print(" Hz  normal_spc=");
+    Serial.print(targetSamplesPerCycle, 3);
+    Serial.print(" -> target_spc=");
+    Serial.println(LCR_NYQUIST_SAFE_SPC, 3);
+#endif
+
+    // Move the excitation away from exactly two samples/cycle. We deliberately
+    // move to the aliased side because measurements above Nyquist have
+    // otherwise remained stable in the validated POC and integrated resistor
+    // tests.
+    targetAggregateRate =
+      2.0f * LCR_NYQUIST_SAFE_SPC * static_cast<float>(frequency);
+
+    // Never exceed the normal ADC acquisition ceiling.
+    if (targetAggregateRate > lcrAdcMaxAggregateRate)
+      targetAggregateRate = lcrAdcMaxAggregateRate;
+  }
 
   // One ADC conversion occupies (div + 1) clk_adc cycles. The hardware
   // conversion floor is 96 cycles.
@@ -1680,7 +1796,7 @@ LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency)
   return plan;
 }
 
-
+#if LCR_CAPTURE_DEBUG
 // Dump ADC/DMA state once when the capture path first develops a real FIFO
 // error. The state is captured before another measurement can disturb it.
 void printLCRCaptureFailureState(uint32_t frequency,
@@ -1810,7 +1926,7 @@ void printLCRCaptureFailureState(uint32_t frequency,
   Serial.println("=== END CAPTURE FAILURE STATE ===");
   Serial.println();
 }
-
+#endif
 
 // Capture one interleaved ADC0/ADC1 record using deterministic round-robin
 // startup, DMA transfer, measured-rate verification, and integrity checks.
@@ -1962,11 +2078,13 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
     if (!lcrCaptureFailureDumped) {
       lcrCaptureFailureDumped = true;
 
+#if LCR_CAPTURE_DEBUG
       printLCRCaptureFailureState(
         frequency,
         plan,
         fifoStatus
       );
+#endif
 
       lcrMeasureState = LCR_MEASURE_HOLD;
 
@@ -2428,14 +2546,6 @@ bool measureLCRHardwareImpedance(uint32_t frequency, float senseResistance,
       (frequency >= 89000 && frequency <= 91000) ||
       frequency >= 109000) {
     printLCRCaptureRate(plan);
-  }
-
-  if (plan.measuredSamplesPerCycle < 5.0f) {
-    Serial.print("LCR warning: only ");
-    Serial.print(plan.measuredSamplesPerCycle, 2);
-    Serial.print(" samples/cycle at ");
-    Serial.print(frequency);
-    Serial.println(" Hz");
   }
 
   uint16_t n = plan.samplesPerChannel;

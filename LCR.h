@@ -54,6 +54,7 @@ struct MeasurementPoint
 struct SweepPoint
 {
   uint32_t frequency;
+  bool valid;
 
   float impedance;
   float phaseDeg;
@@ -64,6 +65,7 @@ struct SweepPoint
   float esr;
   float q;
 };
+
 
 // Stores the minimum and maximum values used to scale one Sweep plot axis.
 struct SweepPlotRange
