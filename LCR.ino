@@ -37,6 +37,9 @@ static const uint8_t LCR_ADC_CH_DUT    = 1;
 int lcrAdcDmaChannel = -1;
 static bool lcrCaptureFailureDumped = false;
 
+// flag for capture isolation
+volatile bool lcrCaptureWindowActive = false;
+
 // Initial LCR acquisition parameters derived from the POC Normal profile.
 static const uint16_t LCR_TARGET_SAMPLES_PER_CYCLE = 50;
 static const uint16_t LCR_TARGET_CYCLES = 16;
@@ -81,7 +84,7 @@ float lcrAdcMaxAggregateRate = 0.0f;
 uint32_t lcrGeneratorFrequency = 0;
 
 // Sense resistor currently installed in the LCR measurement network.
-static const float LCR_R_SENSE_OHMS = 2150.0f;
+static const float LCR_R_SENSE_OHMS = 2160.0f;
 
 // screen locations for various output displays
 constexpr int LABEL_X = 20;
@@ -1928,6 +1931,28 @@ void printLCRCaptureFailureState(uint32_t frequency,
 }
 #endif
 
+
+// Mark the short ADC/DMA acquisition interval as timing-critical.
+//
+// Do not perform display updates, network transfers, Scope acquisition,
+// or other avoidable high-bandwidth work while this flag is set.
+//
+// We deliberately do not disable interrupts or lock out the other RP2040
+// core here. Those are stronger measures that can be added later if the
+// lightweight capture window does not eliminate rare FIFO starvation.
+void beginLCRCaptureWindow()
+{
+  lcrCaptureWindowActive = true;
+}
+
+
+// End the timing-critical ADC/DMA acquisition interval.
+void endLCRCaptureWindow()
+{
+  lcrCaptureWindowActive = false;
+}
+
+
 // Capture one interleaved ADC0/ADC1 record using deterministic round-robin
 // startup, DMA transfer, measured-rate verification, and integrity checks.
 bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
@@ -1968,11 +1993,28 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
     false   // Keep full 12-bit samples
   );
 
-  // Clear sticky FIFO overflow/underflow from previous captures.
-  hw_set_bits(
-    &adc_hw->fcs,
-    ADC_FCS_OVER_BITS | ADC_FCS_UNDER_BITS
-  );
+  uint32_t fcs = adc_hw->fcs;
+
+  adc_hw->fcs =
+    (fcs &
+     (ADC_FCS_THRESH_BITS |
+      ADC_FCS_DREQ_EN_BITS |
+      ADC_FCS_ERR_BITS |
+      ADC_FCS_SHIFT_BITS |
+      ADC_FCS_EN_BITS)) |
+    ADC_FCS_OVER_BITS |
+    ADC_FCS_UNDER_BITS;
+
+  // Verify that no stale FIFO error state remains before starting DMA.
+  if (adc_hw->fcs &
+      (ADC_FCS_OVER_BITS | ADC_FCS_UNDER_BITS)) {
+
+    Serial.println(
+      "LCR ADC error: FIFO status would not clear"
+    );
+
+    return false;
+  }
 
   //
   // Configure and arm DMA before starting ADC conversions.
@@ -2000,15 +2042,48 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
   // Time only the actual conversion run.
   //
 
+  beginLCRCaptureWindow();
+
   uint32_t startUs = time_us_32();
 
   adc_run(true);
-  dma_channel_wait_for_finish_blocking(lcrAdcDmaChannel);
 
-  // Stop conversions immediately when DMA has collected the requested record.
+#if LCR_CAPTURE_DEBUG
+
+  //
+  // Diagnostic FIFO-overflow mitigation:
+  //
+  // Protect the final few ADC samples and DMA -> ADC shutdown transition from
+  // interrupt latency. This did not eliminate the rare FIFO_OVER condition,
+  // but is retained for future investigation.
+  //
+  while (dma_hw->ch[lcrAdcDmaChannel].transfer_count > 4) {
+    tight_loop_contents();
+  }
+
+  noInterrupts();
+
+  while (dma_channel_is_busy(lcrAdcDmaChannel)) {
+    tight_loop_contents();
+  }
+
   adc_run(false);
 
+  interrupts();
+
+#else
+
+  //
+  // Normal capture path.
+  //
+  dma_channel_wait_for_finish_blocking(lcrAdcDmaChannel);
+  adc_run(false);
+
+#endif
+
   uint32_t stopUs = time_us_32();
+
+  endLCRCaptureWindow();
 
   //
   // Calculate the actual achieved sample rate.
@@ -2084,13 +2159,13 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
         plan,
         fifoStatus
       );
-#endif
-
       lcrMeasureState = LCR_MEASURE_HOLD;
 
       Serial.println(
         "LCR Measure forced to HOLD after ADC capture failure."
       );
+#endif
+
     }
 
     return false;
