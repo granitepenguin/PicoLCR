@@ -189,8 +189,8 @@ LCRUIState lcrUIState = LCR_UI_NORMAL;
 // UI controls modify these values and the measurement backend reads them
 // whenever a new impedance measurement is requested.
 MeasurementSettings lcrSettings = {
-  1000,      // Frequency: 1 kHz
-  2150.0f    // Reference resistor: 1 kOhm
+  1000,             // Frequency: 1 kHz
+  LCR_R_SENSE_OHMS  // Reference resistor: 1 kOhm
 };
 
 // Stores the most recently acquired LCR measurement.
@@ -330,12 +330,14 @@ struct SweepPlotPreset
 // Adding another stored quantity later only requires extending this table
 // and teaching the plot-value helpers how to retrieve and scale it.
 const SweepPlotPreset sweepPlotPresets[] = {
-  { "|Z|",   LCR_SWEEP_PLOT_IMPEDANCE  },
-  { "Phase", LCR_SWEEP_PLOT_PHASE      },
-  { "R",     LCR_SWEEP_PLOT_RESISTANCE },
-  { "X",     LCR_SWEEP_PLOT_REACTANCE },
-  { "ESR",   LCR_SWEEP_PLOT_ESR        },
-  { "Q",     LCR_SWEEP_PLOT_Q          }
+  { "|Z|",   LCR_SWEEP_PLOT_IMPEDANCE   },
+  { "Phase", LCR_SWEEP_PLOT_PHASE       },
+  { "R",     LCR_SWEEP_PLOT_RESISTANCE  },
+  { "X",     LCR_SWEEP_PLOT_REACTANCE   },
+  { "ESR",   LCR_SWEEP_PLOT_ESR         },
+  { "Q",     LCR_SWEEP_PLOT_Q           },
+  { "C",     LCR_SWEEP_PLOT_CAPACITANCE },
+  { "L",     LCR_SWEEP_PLOT_INDUCTANCE  }
 };
 
 constexpr uint8_t SWEEP_PLOT_PRESET_COUNT =
@@ -355,6 +357,8 @@ SweepPoint makeSweepPoint(const MeasurementPoint &measurement)
   point.phaseDeg = measurement.phaseDeg;
   point.resistance = measurement.resistance;
   point.reactance = measurement.reactance;
+  point.capacitance = measurement.capacitance;
+  point.inductance = measurement.inductance;
   point.esr = measurement.esr;
   point.q = measurement.q;
 
@@ -375,6 +379,12 @@ float getLCRSweepPlotValue(const SweepPoint &point)
 
     case LCR_SWEEP_PLOT_REACTANCE:
       return point.reactance;
+
+    case LCR_SWEEP_PLOT_CAPACITANCE:
+    return point.capacitance;
+
+    case LCR_SWEEP_PLOT_INDUCTANCE:
+      return point.inductance;
 
     case LCR_SWEEP_PLOT_ESR:
       return point.esr;
@@ -458,9 +468,11 @@ SweepPlotRange padLCRSweepPlotRange(SweepPlotRange range)
 
   // Magnitude-only quantities cannot be negative.
   if ((lcrSweepPlotType == LCR_SWEEP_PLOT_IMPEDANCE ||
-       lcrSweepPlotType == LCR_SWEEP_PLOT_ESR ||
-       lcrSweepPlotType == LCR_SWEEP_PLOT_Q) &&
-      range.minimum < 0.0f) {
+     lcrSweepPlotType == LCR_SWEEP_PLOT_ESR ||
+     lcrSweepPlotType == LCR_SWEEP_PLOT_Q ||
+     lcrSweepPlotType == LCR_SWEEP_PLOT_CAPACITANCE ||
+     lcrSweepPlotType == LCR_SWEEP_PLOT_INDUCTANCE) &&
+    range.minimum < 0.0f) {
 
     range.minimum = 0.0f;
   }
@@ -475,6 +487,38 @@ SweepPlotRange padLCRSweepPlotRange(SweepPlotRange range)
 SweepAxisScale getLCRSweepAxisScale(const SweepPlotRange &range)
 {
   switch (lcrSweepPlotType) {
+    case LCR_SWEEP_PLOT_CAPACITANCE: {
+      float largest =
+        max(fabsf(range.minimum), fabsf(range.maximum));
+
+      if (largest < 1.0e-9f)
+        return { 1.0e-12f, "pF" };
+
+      if (largest < 1.0e-6f)
+        return { 1.0e-9f, "nF" };
+
+      if (largest < 1.0e-3f)
+        return { 1.0e-6f, "uF" };
+
+      return { 1.0f, "F" };
+    }
+
+    case LCR_SWEEP_PLOT_INDUCTANCE: {
+      float largest =
+        max(fabsf(range.minimum), fabsf(range.maximum));
+
+      if (largest < 1.0e-6f)
+        return { 1.0e-9f, "nH" };
+
+      if (largest < 1.0e-3f)
+        return { 1.0e-6f, "uH" };
+
+      if (largest < 1.0f)
+        return { 1.0e-3f, "mH" };
+
+      return { 1.0f, "H" };
+    }
+
     case LCR_SWEEP_PLOT_PHASE:
       return { 1.0f, "deg" };
 
@@ -800,11 +844,102 @@ void drawLCRSweepPlotLabels(const SweepPlotRange &range)
   display.print(label);
 
   //
-  // Start frequency.
+  // X-axis frequency labels.
+  //
+  // Logarithmic sweeps use conventional major-decade labels.
+  // Linear sweeps retain the existing start / midpoint / stop labels.
+  //
+  if (lcrSweepSettings.mode == LCR_SWEEP_LOG) {
+
+    uint32_t start = lcrSweepSettings.startFrequency;
+    uint32_t stop  = lcrSweepSettings.stopFrequency;
+
+    if (start == 0 || stop <= start)
+      return;
+
+    //
+    // Find the first power of ten at or above the Sweep start.
+    //
+    uint32_t decade = 1;
+
+    while (decade < start &&
+           decade <= UINT32_MAX / 10) {
+      decade *= 10;
+    }
+
+    //
+    // Label every major decade contained within the Sweep.
+    //
+    while (decade <= stop) {
+
+      char frequencyLabel[12];
+
+      if (decade >= 1000000UL) {
+        snprintf(
+          frequencyLabel,
+          sizeof(frequencyLabel),
+          "%luM",
+          decade / 1000000UL
+        );
+      }
+      else if (decade >= 1000UL) {
+        snprintf(
+          frequencyLabel,
+          sizeof(frequencyLabel),
+          "%luk",
+          decade / 1000UL
+        );
+      }
+      else {
+        snprintf(
+          frequencyLabel,
+          sizeof(frequencyLabel),
+          "%lu",
+          decade
+        );
+      }
+
+      int16_t x =
+        calculateLCRSweepPlotX(decade);
+
+      int16_t width =
+        strlen(frequencyLabel) * 6;
+
+      //
+      // Center each label under its decade grid line, but keep the text
+      // inside the available screen area.
+      //
+      int16_t labelX = x - width / 2;
+
+      labelX = constrain(
+        labelX,
+        plot.x,
+        plot.x + plot.w - width
+      );
+
+      display.setCursor(
+        labelX,
+        plot.y + plot.h + 4
+      );
+
+      display.print(frequencyLabel);
+
+      if (decade > UINT32_MAX / 10)
+        break;
+
+      decade *= 10;
+    }
+
+    return;
+  }
+
+  //
+  // Linear Sweep labels.
   //
 
+  // Start frequency.
   LCRFormattedValue startFrequency =
-    formatFrequency( lcrSweepSettings.startFrequency);
+    formatFrequency(lcrSweepSettings.startFrequency);
 
   snprintf(
     label,
@@ -821,36 +956,12 @@ void drawLCRSweepPlotLabels(const SweepPlotRange &range)
 
   display.print(label);
 
-  //
+
   // Midpoint frequency.
-  //
-  // The center label represents the frequency at the visual midpoint of the
-  // active X axis. Linear axes use the arithmetic midpoint while Log axes use
-  // the geometric midpoint.
-  //
-
-  uint32_t midpointFrequency;
-
-  if (lcrSweepSettings.mode == LCR_SWEEP_LOG) {
-    midpointFrequency =
-      static_cast<uint32_t>(
-        roundf(
-          sqrtf(
-            static_cast<float>(
-              lcrSweepSettings.startFrequency
-            ) *
-            static_cast<float>(
-              lcrSweepSettings.stopFrequency
-            )
-          )
-        )
-      );
-  } else {
-    midpointFrequency =
-      lcrSweepSettings.startFrequency +
-      (lcrSweepSettings.stopFrequency -
-       lcrSweepSettings.startFrequency) / 2;
-  }
+  uint32_t midpointFrequency =
+    lcrSweepSettings.startFrequency +
+    (lcrSweepSettings.stopFrequency -
+     lcrSweepSettings.startFrequency) / 2;
 
   LCRFormattedValue middleFrequency =
     formatFrequency(midpointFrequency);
@@ -866,21 +977,16 @@ void drawLCRSweepPlotLabels(const SweepPlotRange &range)
   labelWidth = strlen(label) * 6;
 
   display.setCursor(
-    plot.x +
-      (plot.w - labelWidth) / 2,
+    plot.x + (plot.w - labelWidth) / 2,
     plot.y + plot.h + 4
   );
 
   display.print(label);
 
-  //
-  // Stop frequency.
-  //
 
+  // Stop frequency.
   LCRFormattedValue stopFrequency =
-    formatFrequency(
-      lcrSweepSettings.stopFrequency
-    );
+    formatFrequency(lcrSweepSettings.stopFrequency);
 
   snprintf(
     label,
@@ -898,6 +1004,95 @@ void drawLCRSweepPlotLabels(const SweepPlotRange &range)
   );
 
   display.print(label);
+
+}
+
+
+// Draw conventional logarithmic frequency grid lines.
+//
+// Major decade divisions use the normal grid color. Minor divisions at
+// 2..9 times each decade are drawn with a dimmer color so the plot reads
+// naturally as a semilog-X graph without overwhelming the measurement trace.
+void drawLCRSweepLogGrid()
+{
+  if (lcrSweepSettings.mode != LCR_SWEEP_LOG)
+    return;
+
+  const LCRRect &plot = lcrLayout.sweepPlot;
+
+  uint32_t start = lcrSweepSettings.startFrequency;
+  uint32_t stop  = lcrSweepSettings.stopFrequency;
+
+  if (start == 0 || stop <= start)
+    return;
+
+  //
+  // Dimmer version of GRIDCOLOR for minor logarithmic divisions.
+  //
+  uint16_t minorGridColor =
+    display.color565(40, 40, 40);
+
+  //
+  // Find the power of ten at or below the Sweep start.
+  //
+  uint32_t decade = 1;
+
+  while (decade <= start / 10)
+    decade *= 10;
+
+  //
+  // Process each decade intersecting the Sweep range.
+  //
+  while (decade <= stop) {
+
+    //
+    // Minor divisions: 2, 3, ... 9 times the current decade.
+    //
+    for (uint8_t multiplier = 2;
+         multiplier <= 9;
+         multiplier++) {
+
+      uint32_t frequency =
+        decade * multiplier;
+
+      if (frequency <= start ||
+          frequency >= stop) {
+        continue;
+      }
+
+      int16_t x =
+        calculateLCRSweepPlotX(frequency);
+
+      display.drawFastVLine(
+        x,
+        plot.y + 1,
+        plot.h - 2,
+        minorGridColor
+      );
+    }
+
+    //
+    // Major decade division.
+    //
+    if (decade > start &&
+        decade < stop) {
+
+      int16_t x =
+        calculateLCRSweepPlotX(decade);
+
+      display.drawFastVLine(
+        x,
+        plot.y + 1,
+        plot.h - 2,
+        GRIDCOLOR
+      );
+    }
+
+    if (decade > UINT32_MAX / 10)
+      break;
+
+    decade *= 10;
+  }
 }
 
 
@@ -932,17 +1127,28 @@ void drawLCRSweepPlot()
     GRIDCOLOR
   );
 
-  // Draw a single vertical midpoint reference through the plot.
-  // Together with the horizontal midpoint this creates a simple 2x2
-  // reference grid without overcrowding the Results display.
-  const int16_t midpointX = plot.x + plot.w / 2;
+  //
+  // X-axis grid.
+  //
+  // Linear plots retain the single midpoint reference.
+  // Log plots instead show major frequency decades.
+  //
+  if (lcrSweepSettings.mode == LCR_SWEEP_LOG) {
 
-  display.drawFastVLine(
-    midpointX,
-    plot.y + 1,
-    plot.h - 2,
-    GRIDCOLOR
-  );
+    drawLCRSweepLogGrid();
+
+  } else {
+
+    const int16_t midpointX =
+      plot.x + plot.w / 2;
+
+    display.drawFastVLine(
+      midpointX,
+      plot.y + 1,
+      plot.h - 2,
+      GRIDCOLOR
+    );
+  }
 
   if (lcrSweepPointCount == 0)
     return;
@@ -1106,12 +1312,61 @@ bool startLCRSweep()
 }
 
 
+// Select the most useful initial Results plot from the completed Sweep.
+//
+// Classification uses the average phase of the retained Sweep points so a
+// noisy individual frequency does not determine the DUT type. The same
+// +/-10 degree threshold used by the Measure display separates predominantly
+// resistive, capacitive, and inductive behavior.
+LCRSweepPlotType getLCRPrimarySweepPlotType()
+{
+  static const float COMPONENT_PHASE_THRESHOLD_DEG = 10.0f;
+
+  if (lcrSweepPointCount == 0)
+    return LCR_SWEEP_PLOT_IMPEDANCE;
+
+  float phaseSum = 0.0f;
+  uint16_t validCount = 0;
+
+  for (uint16_t i = 0; i < lcrSweepPointCount; i++) {
+
+    //
+    // If your current SweepPoint has a validity flag, keep this check.
+    //
+    if (!lcrSweepPoints[i].valid)
+      continue;
+
+    phaseSum += lcrSweepPoints[i].phaseDeg;
+    validCount++;
+  }
+
+  if (validCount == 0)
+    return LCR_SWEEP_PLOT_IMPEDANCE;
+
+  float averagePhase =
+    phaseSum / static_cast<float>(validCount);
+
+  if (averagePhase < -COMPONENT_PHASE_THRESHOLD_DEG)
+    return LCR_SWEEP_PLOT_CAPACITANCE;
+
+  if (averagePhase > COMPONENT_PHASE_THRESHOLD_DEG)
+    return LCR_SWEEP_PLOT_INDUCTANCE;
+
+  return LCR_SWEEP_PLOT_IMPEDANCE;
+}
+
+
 // Complete the active frequency sweep and transition to the Results state.
 // All successfully acquired SweepPoint entries remain available for
 // plotting and cursor inspection.
 void finishLCRSweep()
 {
   lcrSweepExecution.active = false;
+
+  //
+  // Choose the most useful initial Results quantity for the measured DUT.
+  //
+  lcrSweepPlotType = getLCRPrimarySweepPlotType();
   lcrSweepState = LCR_SWEEP_RESULTS;
   lcrUIState = LCR_UI_NORMAL;
 
@@ -3953,76 +4208,233 @@ void drawLCRSpriteMeasurement(int16_t width, int16_t height,
 }
 
 
-
-// Render the primary measurement using automatically selected engineering
-// units. The completed value/unit pair is composed in the sprite and pushed
-// to the TFT in one operation to prevent visible refresh flicker.
+// Render the primary component value.
+//
+// The measured impedance phase is used to classify the DUT as predominantly
+// resistive, capacitive, or inductive. The large primary field then displays
+// the corresponding component value rather than always displaying |Z|.
 void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
 {
   const LCRRect &r = lcrLayout.primary;
 
-  LCRFormattedValue formatted = formatImpedance(m.impedance);
+  static const float COMPONENT_PHASE_THRESHOLD_DEG = 10.0f;
+
+  LCRFormattedValue formatted;
+
+  if (m.phaseDeg < -COMPONENT_PHASE_THRESHOLD_DEG &&
+      m.capacitance > 0.0f) {
+
+    //
+    // Predominantly capacitive DUT.
+    //
+    formatted = formatCapacitance(m.capacitance);
+  }
+  else if (m.phaseDeg > COMPONENT_PHASE_THRESHOLD_DEG &&
+           m.inductance > 0.0f) {
+
+    //
+    // Predominantly inductive DUT.
+    //
+    formatted = formatInductance(m.inductance);
+  }
+  else {
+
+    //
+    // Predominantly resistive DUT.
+    //
+    formatted = formatImpedance(m.resistance);
+  }
 
   lcrValueSprite.fillSprite(BGCOLOR);
 
-  drawLCRSpriteMeasurement( 
-      r.w,
-      r.h,
-      formatted.value,
-      formatted.unit,
-      4,
-      2,
-      TXTCOLOR
-    );
+  drawLCRSpriteMeasurement(
+    r.w,
+    r.h,
+    formatted.value,
+    formatted.unit,
+    4,
+    2,
+    TXTCOLOR
+  );
 
-  lcrValueSprite.pushSprite( r.x, r.y, 0, 0, r.w, r.h);
+  lcrValueSprite.pushSprite(
+    r.x,
+    r.y,
+    0,
+    0,
+    r.w,
+    r.h
+  );
 }
 
 
-
-// Render the secondary measurement as a horizontal label/value pair.
-// The complete field is composed in RAM and pushed to the TFT at once to
-// avoid visible clearing between successive display updates.
+// Render the detailed single-frequency measurement results.
+//
+// The backend already produces the complete complex impedance measurement.
+// This region exposes the derived C/L, phase, R, X, ESR, and Q values so the
+// Measure tab can be used to validate reactive DUTs directly.
 void drawLCRSecondaryMeasurement(const MeasurementPoint &m)
 {
   const LCRRect &r = lcrLayout.secondary;
 
-  char value[16];
-
-  snprintf(value, sizeof(value), "%.4f", m.dissipation);
-
-  const char *label = "D";
-
-  uint8_t labelSize = 1;
-  uint8_t valueSize = 2;
-
-  int16_t labelWidth = strlen(label) * 6 * labelSize;
-  int16_t valueWidth = strlen(value) * 6 * valueSize;
-  int16_t gap = 12;
-
-  int16_t totalWidth = labelWidth + gap + valueWidth;
-  int16_t startX = (r.w - totalWidth) / 2;
-  int16_t valueHeight = 8 * valueSize;
-  int16_t valueY = (r.h - valueHeight) / 2;
-  int16_t labelY = valueY + valueHeight - (8 * labelSize);
-
   lcrValueSprite.fillSprite(BGCOLOR);
   lcrValueSprite.setTextColor(TXTCOLOR, BGCOLOR);
+  lcrValueSprite.setTextSize(1);
 
-  lcrValueSprite.setTextSize(labelSize);
-  lcrValueSprite.setCursor(startX, labelY);
-  lcrValueSprite.print(label);
+  const int16_t leftLabelX  = 8;
+  const int16_t leftValueX  = r.w * 18 / 100;
 
-  lcrValueSprite.setTextSize(valueSize);
-  lcrValueSprite.setCursor(
-    startX + labelWidth + gap,
-    valueY
-  );
+  const int16_t rightLabelX = r.w * 53 / 100;
+  const int16_t rightValueX = r.w * 68 / 100;
+
+  const int16_t row1Y = r.h * 8 / 100;
+  const int16_t row2Y = r.h * 40 / 100;
+  const int16_t row3Y = r.h * 72 / 100;
+
+  char value[24];
+
+  //
+  // Row 1 left: capacitance or inductance.
+  //
+  if (m.reactance < 0.0f) {
+    LCRFormattedValue formatted = formatCapacitance(m.capacitance);
+
+    lcrValueSprite.setCursor(leftLabelX, row1Y);
+    lcrValueSprite.print("C");
+
+    snprintf(
+      value,
+      sizeof(value),
+      "%s %s",
+      formatted.value,
+      formatted.unit
+    );
+  }
+  else if (m.reactance > 0.0f) {
+    LCRFormattedValue formatted = formatInductance(m.inductance);
+
+    lcrValueSprite.setCursor(leftLabelX, row1Y);
+    lcrValueSprite.print("L");
+
+    snprintf(
+      value,
+      sizeof(value),
+      "%s %s",
+      formatted.value,
+      formatted.unit
+    );
+  }
+  else {
+    lcrValueSprite.setCursor(leftLabelX, row1Y);
+    lcrValueSprite.print("C/L");
+
+    snprintf(value, sizeof(value), "--");
+  }
+
+  lcrValueSprite.setCursor(leftValueX, row1Y);
   lcrValueSprite.print(value);
 
-  lcrValueSprite.pushSprite( r.x, r.y, 0, 0, r.w, r.h);
-}
+  //
+  // Row 1 right: phase.
+  //
+  lcrValueSprite.setCursor(rightLabelX, row1Y);
+  lcrValueSprite.print("Phase");
 
+  snprintf(
+    value,
+    sizeof(value),
+    "%.2f deg",
+    m.phaseDeg
+  );
+
+  lcrValueSprite.setCursor(rightValueX, row1Y);
+  lcrValueSprite.print(value);
+
+  //
+  // Row 2 left: series resistance.
+  //
+  lcrValueSprite.setCursor(leftLabelX, row2Y);
+  lcrValueSprite.print("R");
+
+  LCRFormattedValue resistance =
+    formatImpedance(m.resistance);
+
+  snprintf(
+    value,
+    sizeof(value),
+    "%s %s",
+    resistance.value,
+    resistance.unit
+  );
+
+  lcrValueSprite.setCursor(leftValueX, row2Y);
+  lcrValueSprite.print(value);
+
+  //
+  // Row 2 right: reactance.
+  //
+  lcrValueSprite.setCursor(rightLabelX, row2Y);
+  lcrValueSprite.print("X");
+
+  LCRFormattedValue reactance =
+    formatImpedance(m.reactance);
+
+  snprintf(
+    value,
+    sizeof(value),
+    "%s %s",
+    reactance.value,
+    reactance.unit
+  );
+
+  lcrValueSprite.setCursor(rightValueX, row2Y);
+  lcrValueSprite.print(value);
+
+  //
+  // Row 3 left: ESR.
+  //
+  lcrValueSprite.setCursor(leftLabelX, row3Y);
+  lcrValueSprite.print("ESR");
+
+  LCRFormattedValue esr =
+    formatImpedance(m.esr);
+
+  snprintf(
+    value,
+    sizeof(value),
+    "%s %s",
+    esr.value,
+    esr.unit
+  );
+
+  lcrValueSprite.setCursor(leftValueX, row3Y);
+  lcrValueSprite.print(value);
+
+  //
+  // Row 3 right: Q.
+  //
+  lcrValueSprite.setCursor(rightLabelX, row3Y);
+  lcrValueSprite.print("Q");
+
+  snprintf(
+    value,
+    sizeof(value),
+    "%.3f",
+    m.q
+  );
+
+  lcrValueSprite.setCursor(rightValueX, row3Y);
+  lcrValueSprite.print(value);
+
+  lcrValueSprite.pushSprite(
+    r.x,
+    r.y,
+    0,
+    0,
+    r.w,
+    r.h
+  );
+}
 
 
 // Update the dynamic measurement context fields shown beneath the main
@@ -4058,14 +4470,6 @@ void drawLCRMeasurementContext(const MeasurementPoint &m,
   display.print(reference.value);
   display.print(" ");
   display.print(reference.unit);
-
-  // Temporary excitation level.
-  display.setCursor(leftValueX, row2Y);
-  display.print("1.0 V");
-
-  // Temporary averaging setting.
-  display.setCursor(rightValueX, row2Y);
-  display.print("32");
 }
 
 

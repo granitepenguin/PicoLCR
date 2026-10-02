@@ -62,6 +62,9 @@ struct SweepPoint
   float resistance;
   float reactance;
 
+  float capacitance;
+  float inductance;
+
   float esr;
   float q;
 };
@@ -93,7 +96,9 @@ enum LCRSweepPlotType
   LCR_SWEEP_PLOT_RESISTANCE,
   LCR_SWEEP_PLOT_REACTANCE,
   LCR_SWEEP_PLOT_ESR,
-  LCR_SWEEP_PLOT_Q
+  LCR_SWEEP_PLOT_Q,
+  LCR_SWEEP_PLOT_CAPACITANCE,
+  LCR_SWEEP_PLOT_INDUCTANCE,
 };
 
 extern LCRSweepPlotType lcrSweepPlotType;
