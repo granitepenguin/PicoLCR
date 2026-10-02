@@ -1596,9 +1596,18 @@ void enterLCRMode()
   instrumentMode = MODE_LCR;
   lcrTab = LCR_TAB_MEASURE;
 
-  // Start in HOLD during hardware bring-up. This prevents simply entering
-  // LCR mode from continuously hammering the ADC acquisition path.
+#if LCR_CAPTURE_DEBUG
+
+  // Start in HOLD during ADC/DMA debugging so simply entering LCR mode does
+  // not continuously exercise the acquisition path.
   lcrMeasureState = LCR_MEASURE_HOLD;
+
+#else
+
+  // Normal operation begins with continuous measurement enabled.
+  lcrMeasureState = LCR_MEASURE_LIVE;
+
+#endif
 
   lcrSweepState = LCR_SWEEP_SETUP;
   lcrFrequencyTarget = LCR_FREQ_MEASURE;
@@ -5219,7 +5228,12 @@ void drawMeasureSoftKeys()
     int16_t textX = r.x + (r.w - textWidth) / 2;
     int16_t textY = r.y + (r.h - 8) / 2;
 
-    display.setTextColor(TXTCOLOR, BGCOLOR);
+    if (strcmp(labels[i], "LIVE") == 0)
+      display.setTextColor(TFT_GREEN, BGCOLOR);
+    else if (strcmp(labels[i], "HOLD") == 0)
+      display.setTextColor(TFT_RED, BGCOLOR);
+    else
+      display.setTextColor(TXTCOLOR, BGCOLOR);
     display.setCursor(textX, textY);
     display.print(labels[i]);
 
