@@ -4,6 +4,9 @@
 #include <WebSocketsServer.h> // arduinoWebSockets library
 #include <LEAmDNS.h>
 
+// True only while LCR owns a timing-critical ADC/DMA capture window.
+extern volatile bool lcrCaptureWindowActive;
+
 WebServer server(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
 
@@ -866,24 +869,67 @@ void setup1() {
 
 void loop1() {
   uint32_t dest;
+
+  //
+  // LCR acquisition window
+  //
+  // Keep core 1 out of the networking/WebSocket application while the
+  // timing-critical ADC/DMA record is being acquired. The window lasts only
+  // for the raw capture; normal network servicing resumes immediately after.
+  //
+  if (lcrCaptureWindowActive) {
+    delay(1);
+    return;
+  }
+
   server.handleClient();
   MDNS.update();
+
   if (rp2040.fifo.available() > 0) {
+
     if (rate < RATE_ROLL && fft_mode) {
-      payload[FFT_N/2+2] = (short) ((long)(100.0*waveFreq[0]) / 10000);
-      payload[FFT_N/2+3] = (short) ((long)(100.0*waveFreq[0]) % 10000);
-      webSocket.broadcastBIN((byte *) payload, FFT_N + 8);
-    } else if (rate >= RATE_DUAL || (ch0_mode == MODE_OFF && ch1_mode != MODE_OFF)) {
-      payload[SAMPLES*2] = (short) ((long)(100.0*waveFreq[0]) / 10000);
-      payload[SAMPLES*2+1] = (short) ((long)(100.0*waveFreq[0]) % 10000);
-      webSocket.broadcastBIN((byte *) payload, SAMPLES * 4 + 4);
-    } else {
-      payload[SAMPLES] = (short) ((long)(100.0*waveFreq[0]) / 10000);
-      payload[SAMPLES+1] = (short) ((long)(100.0*waveFreq[0]) % 10000);
-      webSocket.broadcastBIN((byte *) payload, SAMPLES * 2 + 4);
+      payload[FFT_N/2+2] =
+        (short) ((long)(100.0 * waveFreq[0]) / 10000);
+
+      payload[FFT_N/2+3] =
+        (short) ((long)(100.0 * waveFreq[0]) % 10000);
+
+      webSocket.broadcastBIN(
+        (byte *) payload,
+        FFT_N + 8
+      );
     }
+    else if (rate >= RATE_DUAL ||
+             (ch0_mode == MODE_OFF &&
+              ch1_mode != MODE_OFF)) {
+
+      payload[SAMPLES*2] =
+        (short) ((long)(100.0 * waveFreq[0]) / 10000);
+
+      payload[SAMPLES*2+1] =
+        (short) ((long)(100.0 * waveFreq[0]) % 10000);
+
+      webSocket.broadcastBIN(
+        (byte *) payload,
+        SAMPLES * 4 + 4
+      );
+    }
+    else {
+      payload[SAMPLES] =
+        (short) ((long)(100.0 * waveFreq[0]) / 10000);
+
+      payload[SAMPLES+1] =
+        (short) ((long)(100.0 * waveFreq[0]) % 10000);
+
+      webSocket.broadcastBIN(
+        (byte *) payload,
+        SAMPLES * 2 + 4
+      );
+    }
+
     rp2040.fifo.pop_nb(&dest);
   }
+
   webSocket.loop();
   delay(1);
 }
