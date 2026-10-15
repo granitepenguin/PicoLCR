@@ -191,6 +191,41 @@ struct LCRFormattedValue
 };
 
 
+// LCR Web display functions
+//
+//
+
+// Snapshot of the latest completed LCR measurement shared with the web task.
+// Core 0 publishes completed measurements while Core 1 reads them for
+// WebSocket transmission without interacting with the acquisition hardware.
+struct LCRWebMeasurement
+{
+  uint32_t sequence;
+
+  uint32_t frequency;
+  float referenceResistance;
+
+  float impedance;
+  float phaseDeg;
+  float resistance;
+  float reactance;
+  float capacitance;
+  float inductance;
+  float esr;
+  float q;
+  float dissipation;
+
+  uint8_t measureState;
+};
+
+extern volatile LCRWebMeasurement lcrWebMeasurement;
+
+
+// Publish one completed LCR measurement to the web-interface snapshot.
+// The sequence counter allows Core 1 to detect when new measurement data
+// is available for transmission to connected browser clients.
+void publishLCRWebMeasurement(const MeasurementPoint &measurement,
+                              const MeasurementSettings &settings);
 
 // LCR tab displays
 //

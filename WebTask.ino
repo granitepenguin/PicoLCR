@@ -7,6 +7,10 @@
 // True only while LCR owns a timing-critical ADC/DMA capture window.
 extern volatile bool lcrCaptureWindowActive;
 
+// Tracks the most recent LCR measurement sequence processed by Core 1.
+// A changed sequence indicates that Core 0 has published a new snapshot.
+uint32_t lastLCRWebSequence = 0;
+
 WebServer server(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
 
@@ -337,12 +341,210 @@ String html;
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>Raspberry Pi Pico W Web Oscilloscope</title>
-<style>body { background: #fafafa; }
-canvas { display:block; background:#ffe; margin:0 auto; }</style>
+<style>
+body {
+  background: #fafafa;
+  font-family: Arial, sans-serif;
+}
+
+canvas {
+  display: block;
+  background: #ffe;
+  margin: 0 auto;
+}
+
+/* LCR Measure view. Hidden until an LCR WebSocket message is received. */
+#lcr-ui {
+  display: none;
+  max-width: 720px;
+  margin: 20px auto;
+  padding: 20px;
+  background: #101820;
+  color: #e8f6ff;
+  border-radius: 8px;
+}
+
+#lcr-ui h2 {
+  margin-top: 0;
+  text-align: center;
+}
+
+#lcr-primary {
+  margin: 25px 0;
+  text-align: center;
+  font-size: 48px;
+  font-weight: bold;
+}
+
+.lcr-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 40px;
+  font-size: 18px;
+}
+
+.lcr-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.lcr-label {
+  font-weight: bold;
+}
+
+#lcr-state {
+  margin-top: 20px;
+  text-align: center;
+  font-size: 20px;
+  font-weight: bold;
+}
+
+.lcr-live {
+  color: #00c853;
+}
+
+.lcr-hold {
+  color: #d50000;
+}
+</style>
 <script type="text/javascript">
 var ws = new WebSocket('ws://' + window.location.hostname + ':81/');
 ws.binaryType = 'arraybuffer';
+
+// Format a raw SI value using compact engineering prefixes for the LCR view.
+function formatEngineering(value, unit) {
+  var magnitude = Math.abs(value);
+  var scale = 1;
+  var prefix = '';
+
+  if (magnitude >= 1e6) {
+    scale = 1e6;
+    prefix = 'M';
+  }
+  else if (magnitude >= 1e3) {
+    scale = 1e3;
+    prefix = 'k';
+  }
+  else if (magnitude >= 1) {
+    scale = 1;
+  }
+  else if (magnitude >= 1e-3) {
+    scale = 1e-3;
+    prefix = 'm';
+  }
+  else if (magnitude >= 1e-6) {
+    scale = 1e-6;
+    prefix = 'u';
+  }
+  else if (magnitude >= 1e-9) {
+    scale = 1e-9;
+    prefix = 'n';
+  }
+  else if (magnitude >= 1e-12) {
+    scale = 1e-12;
+    prefix = 'p';
+  }
+
+  return (value / scale).toFixed(2) + ' ' + prefix + unit;
+}
+
+
+// Format frequency using the same compact engineering style as the instrument.
+function formatLCRFrequency(frequency) {
+  return formatEngineering(frequency, 'Hz');
+}
+
+
+// Update the read-only browser Measure view from one LCR WebSocket snapshot.
+function updateLCRMeasureView(message) {
+  var phaseThreshold = 10.0;
+
+  var primaryValue;
+  var componentLabel;
+  var componentValue;
+
+  if (message.phase < -phaseThreshold) {
+    primaryValue = formatEngineering(message.capacitance, 'F');
+    componentLabel = 'C';
+    componentValue = formatEngineering(message.capacitance, 'F');
+  }
+  else if (message.phase > phaseThreshold) {
+    primaryValue = formatEngineering(message.inductance, 'H');
+    componentLabel = 'L';
+    componentValue = formatEngineering(message.inductance, 'H');
+  }
+  else {
+    primaryValue = formatEngineering(message.resistance, 'Ohm');
+    componentLabel = '|Z|';
+    componentValue = formatEngineering(message.impedance, 'Ohm');
+  }
+
+  document.getElementById('lcr-primary').textContent = primaryValue;
+
+  document.getElementById('lcr-component-label').textContent = componentLabel;
+
+  document.getElementById('lcr-component-value').textContent = componentValue;
+
+  document.getElementById('lcr-phase').textContent =
+    message.phase.toFixed(2) + ' deg';
+
+  document.getElementById('lcr-r').textContent =
+    formatEngineering(message.resistance, 'Ohm');
+
+  document.getElementById('lcr-x').textContent =
+    formatEngineering(message.reactance, 'Ohm');
+
+  document.getElementById('lcr-esr').textContent =
+    formatEngineering(message.esr, 'Ohm');
+
+  document.getElementById('lcr-q').textContent =
+    message.q.toFixed(3);
+
+  document.getElementById('lcr-frequency').textContent =
+    formatLCRFrequency(message.frequency);
+
+  document.getElementById('lcr-reference').textContent =
+    formatEngineering(message.reference, 'Ohm');
+
+  var state = document.getElementById('lcr-state');
+
+  if (message.state === 0) {
+    state.textContent = 'LIVE';
+    state.className = 'lcr-live';
+  }
+  else {
+    state.textContent = 'HOLD';
+    state.className = 'lcr-hold';
+  }
+
+  document.getElementById('scope-ui').style.display = 'none';
+  document.getElementById('lcr-ui').style.display = 'block';
+}
+
 ws.onmessage = function(evt) {
+
+  // LCR measurements are sent as JSON text messages. For now, report
+  // them to the browser console so the WebSocket transport can be verified
+  // before the LCR web interface itself is added.
+  if (typeof evt.data === 'string') {
+    try {
+      var message = JSON.parse(evt.data);
+
+      if (message.type === 'lcr_measure') {
+        console.log('LCR measurement:', message);
+        updateLCRMeasureView(message);
+      }
+    }
+    catch (error) {
+      console.log('WebSocket text message:', evt.data);
+    }
+
+    return;
+  }
+
+  // Existing oscilloscope and FFT data remain binary and continue through
+  // the original waveform rendering path unchanged.
   var wsRecvMsg = evt.data;
   var datas = new Int16Array(wsRecvMsg);
   var cv1 = document.getElementById('cvs1');
@@ -360,6 +562,15 @@ ws.onmessage = function(evt) {
   const displng = 300;
   const dotpich = (groundW - 1) / displng;
   const fftpich = 512 / fftsamples;
+  // A valid binary Scope/FFT frame means the instrument has returned to
+  // oscilloscope mode. Restore the Scope web interface when one arrives.
+  if (datas.length == (fftsamples + 4) ||
+      datas.length == (displng + 2) ||
+      datas.length == (displng * 2 + 2)) {
+
+    document.getElementById('lcr-ui').style.display = 'none';
+    document.getElementById('scope-ui').style.display = 'block';
+  }
   ctx.beginPath();
   ctx.save();
   ctx.strokeStyle = "rgb(128,128,128)";
@@ -645,6 +856,62 @@ async function post_duty() {
 }
 </script>
 <body>
+
+<div id='lcr-ui'>
+  <h2>LCR ANALYZER</h2>
+
+  <div id='lcr-primary'>--</div>
+
+  <div class='lcr-grid'>
+
+    <div class='lcr-row'>
+      <span id='lcr-component-label' class='lcr-label'>|Z|</span>
+      <span id='lcr-component-value'>--</span>
+    </div>
+
+    <div class='lcr-row'>
+      <span class='lcr-label'>Phase</span>
+      <span id='lcr-phase'>--</span>
+    </div>
+
+    <div class='lcr-row'>
+      <span class='lcr-label'>R</span>
+      <span id='lcr-r'>--</span>
+    </div>
+
+    <div class='lcr-row'>
+      <span class='lcr-label'>X</span>
+      <span id='lcr-x'>--</span>
+    </div>
+
+    <div class='lcr-row'>
+      <span class='lcr-label'>ESR</span>
+      <span id='lcr-esr'>--</span>
+    </div>
+
+    <div class='lcr-row'>
+      <span class='lcr-label'>Q</span>
+      <span id='lcr-q'>--</span>
+    </div>
+
+    <div class='lcr-row'>
+      <span class='lcr-label'>Freq</span>
+      <span id='lcr-frequency'>--</span>
+    </div>
+
+    <div class='lcr-row'>
+      <span class='lcr-label'>Ref</span>
+      <span id='lcr-reference'>--</span>
+    </div>
+
+  </div>
+
+  <div id='lcr-state'>--</div>
+</div>
+
+
+<div id='scope-ui'>
+
 <h3>Raspberry Pi Pico W Web Oscilloscope ver. 1.33</h3>
 <div style='float: left; margin-right: 10px'>
 <canvas id='cvs1' width='601' height='401' class='float'></canvas></div>
@@ -779,6 +1046,9 @@ Hz</label>
 </div>
 
 <label>CH1 frequency: </label><label id="ch1_freq"></label>
+
+</div>
+
 </body>
 </html>
 )=====";
@@ -867,6 +1137,133 @@ void setup1() {
   webSocket.begin();
 }
 
+// Check for a newly published LCR measurement and copy it into local storage.
+//
+// Core 0 updates the shared snapshot and increments sequence only after all
+// measurement fields have been written. Core 1 copies the completed snapshot
+// only when a new sequence is observed.
+bool readLCRWebMeasurement(LCRWebMeasurement &snapshot)
+{
+  uint32_t sequence =
+    lcrWebMeasurement.sequence;
+
+  if (sequence == lastLCRWebSequence)
+    return false;
+
+  snapshot.sequence =
+    sequence;
+
+  snapshot.frequency =
+    lcrWebMeasurement.frequency;
+
+  snapshot.referenceResistance =
+    lcrWebMeasurement.referenceResistance;
+
+  snapshot.impedance =
+    lcrWebMeasurement.impedance;
+
+  snapshot.phaseDeg =
+    lcrWebMeasurement.phaseDeg;
+
+  snapshot.resistance =
+    lcrWebMeasurement.resistance;
+
+  snapshot.reactance =
+    lcrWebMeasurement.reactance;
+
+  snapshot.capacitance =
+    lcrWebMeasurement.capacitance;
+
+  snapshot.inductance =
+    lcrWebMeasurement.inductance;
+
+  snapshot.esr =
+    lcrWebMeasurement.esr;
+
+  snapshot.q =
+    lcrWebMeasurement.q;
+
+  snapshot.dissipation =
+    lcrWebMeasurement.dissipation;
+
+  snapshot.measureState =
+    lcrWebMeasurement.measureState;
+
+  //
+  // Verify that Core 0 did not publish another measurement while this
+  // snapshot was being copied.
+  //
+  if (lcrWebMeasurement.sequence != sequence)
+    return false;
+
+  lastLCRWebSequence = sequence;
+
+  return true;
+}
+
+
+// Broadcast one completed LCR measurement to connected web clients.
+//
+// LCR measurements use JSON text messages so structured instrument data can
+// coexist with the existing binary Scope waveform WebSocket protocol.
+void sendLCRWebMeasurement(const LCRWebMeasurement &measurement)
+{
+  String message;
+
+  message.reserve(384);
+
+  message += "{\"type\":\"lcr_measure\"";
+
+  message += ",\"sequence\":";
+  message += measurement.sequence;
+
+  message += ",\"frequency\":";
+  message += measurement.frequency;
+
+  message += ",\"reference\":";
+  message += String(measurement.referenceResistance, 3);
+
+  message += ",\"impedance\":";
+  message += String(measurement.impedance, 6);
+
+  message += ",\"phase\":";
+  message += String(measurement.phaseDeg, 6);
+
+  message += ",\"resistance\":";
+  message += String(measurement.resistance, 6);
+
+  message += ",\"reactance\":";
+  message += String(measurement.reactance, 6);
+
+  message += ",\"capacitance\":";
+  message += String(measurement.capacitance, 12);
+
+  message += ",\"inductance\":";
+  message += String(measurement.inductance, 12);
+
+  message += ",\"esr\":";
+  message += String(measurement.esr, 6);
+
+  message += ",\"q\":";
+  message += String(measurement.q, 6);
+
+  message += ",\"dissipation\":";
+  message += String(measurement.dissipation, 6);
+
+  message += ",\"state\":";
+  message += measurement.measureState;
+
+  message += "}";
+
+#if LCR_CAPTURE_DEBUG
+  Serial.print("WEB TX LCR: ");
+  Serial.println(message);
+#endif
+
+  webSocket.broadcastTXT(message);
+}
+
+
 void loop1() {
   uint32_t dest;
 
@@ -880,6 +1277,45 @@ void loop1() {
   if (lcrCaptureWindowActive) {
     delay(1);
     return;
+  }
+
+  //
+  // Forward newly completed LCR measurements to connected web clients.
+  //
+  LCRWebMeasurement lcrSnapshot;
+
+  if (readLCRWebMeasurement(lcrSnapshot)) {
+#if LCR_CAPTURE_DEBUG
+
+    //
+    // Optional Core 0 -> Core 1 snapshot diagnostic.
+    //
+
+    Serial.print("WEB LCR seq=");
+    Serial.print(lcrSnapshot.sequence);
+
+    Serial.print("  f=");
+    Serial.print(lcrSnapshot.frequency);
+
+    Serial.print(" Hz  |Z|=");
+    Serial.print(lcrSnapshot.impedance);
+
+    Serial.print("  phase=");
+    Serial.print(lcrSnapshot.phaseDeg);
+
+    Serial.print("  C=");
+    Serial.print(lcrSnapshot.capacitance, 9);
+
+    Serial.print("  L=");
+    Serial.print(lcrSnapshot.inductance, 9);
+
+    Serial.println();
+#endif
+
+    //
+    // Send the completed LCR snapshot to all connected web clients.
+    //
+    sendLCRWebMeasurement(lcrSnapshot);
   }
 
   server.handleClient();

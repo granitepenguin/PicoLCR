@@ -215,6 +215,60 @@ SweepPoint lcrSweepPoints[LCR_MAX_SWEEP_POINTS];
 uint16_t lcrSweepPointCount = 0;
 
 
+// Tracks measurement details for sending to the web interface
+volatile LCRWebMeasurement lcrWebMeasurement = {};
+
+// Publish one completed LCR measurement for the web interface.
+//
+// Core 0 calls this only after measurement processing is complete. The
+// sequence number is updated last so Core 1 can use a changed sequence as
+// the indication that the remaining snapshot fields contain new data.
+void publishLCRWebMeasurement(const MeasurementPoint &measurement,
+                              const MeasurementSettings &settings)
+{
+  lcrWebMeasurement.frequency =
+    measurement.frequency;
+
+  lcrWebMeasurement.referenceResistance =
+    settings.referenceResistance;
+
+  lcrWebMeasurement.impedance =
+    measurement.impedance;
+
+  lcrWebMeasurement.phaseDeg =
+    measurement.phaseDeg;
+
+  lcrWebMeasurement.resistance =
+    measurement.resistance;
+
+  lcrWebMeasurement.reactance =
+    measurement.reactance;
+
+  lcrWebMeasurement.capacitance =
+    measurement.capacitance;
+
+  lcrWebMeasurement.inductance =
+    measurement.inductance;
+
+  lcrWebMeasurement.esr =
+    measurement.esr;
+
+  lcrWebMeasurement.q =
+    measurement.q;
+
+  lcrWebMeasurement.dissipation =
+    measurement.dissipation;
+
+  lcrWebMeasurement.measureState =
+    static_cast<uint8_t>(lcrMeasureState);
+
+  //
+  // Publish the completed snapshot last.
+  //
+  lcrWebMeasurement.sequence++;
+}
+
+
 // Tracks progress through the currently active frequency sweep.
 // Timing fields support non-blocking acquisition and progress estimation.
 SweepExecution lcrSweepExecution = {
@@ -1666,12 +1720,20 @@ void updateLCR()
   if (lcrTab == LCR_TAB_MEASURE &&
       lcrMeasureState == LCR_MEASURE_LIVE &&
       lcrUIState == LCR_UI_NORMAL) {
-
     lcrMeasurement = measureImpedance(lcrSettings);
+
+    //
+    // Publish successful Measure results for the web interface.
+    //
+    if (lcrMeasurement.frequency == lcrSettings.frequency) {
+      publishLCRWebMeasurement(
+        lcrMeasurement,
+        lcrSettings
+      );
+    }
 
     if (lcrDisplayDirty ||
         now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
-
       lastDisplayUpdate = now;
       lcrDisplayDirty = false;
 
@@ -3772,6 +3834,12 @@ void handleMeasureSoftKeyTouch(uint16_t x, uint16_t y)
       lcrMeasureState = LCR_MEASURE_HOLD;
     else
       lcrMeasureState = LCR_MEASURE_LIVE;
+
+    //
+    // Publish the state change immediately so the web display reflects
+    // LIVE/HOLD even when HOLD stops further measurement acquisition.
+    //
+    publishLCRWebMeasurement( lcrMeasurement, lcrSettings);
 
     drawMeasureSoftKeys();
 
