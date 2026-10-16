@@ -229,6 +229,21 @@ void setup(){
   display.fillScreen(BGCOLOR);
 #endif
 
+#ifndef NOLCD
+  //
+  // Calculate the LCR framebuffer geometry and reserve both display sprites
+  // before networking activity can make large allocations unreliable.
+  //
+  calculateLCRLayout();
+  calculateMeasureLayout();
+
+  if (!reserveLCRSweepSprite())
+    Serial.println("WARNING: LCR Sweep display buffer unavailable");
+
+  if (!reserveLCRMeasureSprite())
+    Serial.println("WARNING: LCR Measure display buffer unavailable");
+#endif
+
 // Initialize the LCR excitation generator after the existing display hardware.
 initializeLCRGenerator();
 
