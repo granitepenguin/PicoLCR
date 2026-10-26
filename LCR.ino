@@ -19,7 +19,41 @@
 
 // Enable verbose LCR ADC/DMA diagnostics.
 // Set to 1 while debugging acquisition problems; 0 for normal operation.
-#define LCR_CAPTURE_DEBUG 0
+#define LCR_CAPTURE_DEBUG 1
+
+// Palette indexes used by 4-bit LCR sprites.
+// These indexes map the existing UI colors into the sprite's 16-color table.
+enum LCRSpriteColor
+{
+  LCR_SPRITE_BLACK = 0,
+  LCR_SPRITE_WHITE,
+  LCR_SPRITE_DARKGREY,
+  LCR_SPRITE_LIGHTGREY,
+  LCR_SPRITE_CYAN,
+  LCR_SPRITE_GREEN,
+  LCR_SPRITE_YELLOW,
+  LCR_SPRITE_RED
+};
+
+// RGB565 palette shared by the 4-bit LCR display sprites.
+const uint16_t lcrSpritePalette[16] = {
+  TFT_BLACK,
+  TFT_WHITE,
+  TFT_DARKGREY,
+  TFT_LIGHTGREY,
+  TFT_CYAN,
+  TFT_GREEN,
+  TFT_YELLOW,
+  TFT_RED,
+  TFT_BLACK,
+  TFT_BLACK,
+  TFT_BLACK,
+  TFT_BLACK,
+  TFT_BLACK,
+  TFT_BLACK,
+  TFT_BLACK,
+  TFT_BLACK
+};
 
 // LCR excitation-generator hardware.
 // The AD9833 uses SPI0 independently from the TFT display bus.
@@ -213,6 +247,86 @@ SweepSettings lcrSweepSettings = {
 SweepPoint lcrSweepPoints[LCR_MAX_SWEEP_POINTS];
 
 uint16_t lcrSweepPointCount = 0;
+
+
+// Tracks measurement details for sending to the web interface
+volatile LCRWebMeasurement lcrWebMeasurement = {};
+
+// Stores one pending browser touch until the LCR task on Core 0 consumes it.
+LCRWebTouch lcrWebTouch = {};
+
+// Stores the latest LCR navigation state for the browser front panel.
+volatile LCRWebUIState lcrWebUIState = {};
+
+// Publish one completed LCR measurement for the web interface.
+//
+// Core 0 calls this only after measurement processing is complete. The
+// sequence number is updated last so Core 1 can use a changed sequence as
+// the indication that the remaining snapshot fields contain new data.
+void publishLCRWebMeasurement(const MeasurementPoint &measurement,
+                              const MeasurementSettings &settings)
+{
+  lcrWebMeasurement.frequency =
+    measurement.frequency;
+
+  lcrWebMeasurement.referenceResistance =
+    settings.referenceResistance;
+
+  lcrWebMeasurement.impedance =
+    measurement.impedance;
+
+  lcrWebMeasurement.phaseDeg =
+    measurement.phaseDeg;
+
+  lcrWebMeasurement.resistance =
+    measurement.resistance;
+
+  lcrWebMeasurement.reactance =
+    measurement.reactance;
+
+  lcrWebMeasurement.capacitance =
+    measurement.capacitance;
+
+  lcrWebMeasurement.inductance =
+    measurement.inductance;
+
+  lcrWebMeasurement.esr =
+    measurement.esr;
+
+  lcrWebMeasurement.q =
+    measurement.q;
+
+  lcrWebMeasurement.dissipation =
+    measurement.dissipation;
+
+  lcrWebMeasurement.measureState =
+    static_cast<uint8_t>(lcrMeasureState);
+
+  //
+  // Publish the completed snapshot last.
+  //
+  lcrWebMeasurement.sequence++;
+}
+
+// Publish the current LCR navigation and selector state for the web front
+// panel. The sequence is updated last so Core 1 can detect a new snapshot.
+void publishLCRWebUIState()
+{
+  lcrWebUIState.tab = static_cast<uint8_t>(lcrTab);
+  lcrWebUIState.uiState = static_cast<uint8_t>(lcrUIState);
+  lcrWebUIState.measureState = static_cast<uint8_t>(lcrMeasureState);
+  lcrWebUIState.sweepState = static_cast<uint8_t>(lcrSweepState);
+  lcrWebUIState.frequencyTarget =
+    static_cast<uint8_t>(lcrFrequencyTarget);
+
+  lcrWebUIState.measureFrequency = lcrSettings.frequency;
+  lcrWebUIState.referenceResistance = lcrSettings.referenceResistance;
+
+  //
+  // Publish the completed snapshot last.
+  //
+  lcrWebUIState.sequence++;
+}
 
 
 // Tracks progress through the currently active frequency sweep.
@@ -1292,6 +1406,15 @@ bool startLCRSweep()
     return false;
   }
 
+  //
+  // The Sweep sprite is reserved during startup so beginning a Sweep never
+  // requires a large allocation while networking is active.
+  //
+  if (!lcrSweepSprite.created()) {
+    Serial.println("ERROR: LCR Sweep sprite was not reserved");
+    return false;
+  }
+
   lcrSweepPointCount = 0;
   lcrSweepCursorActive = false;
   lcrSweepCursorIndex = 0;
@@ -1380,6 +1503,7 @@ void finishLCRSweep()
 void cancelLCRSweep()
 {
   lcrSweepExecution.active = false;
+
   lcrSweepExecution.totalPoints = 0;
   lcrSweepExecution.currentPoint = 0;
   lcrSweepExecution.currentFrequency = 0;
@@ -1589,6 +1713,17 @@ MeasurementPoint measureImpedance(const MeasurementSettings &settings)
 // Enter the LCR analyzer and transfer ADC ownership from Scope to LCR.
 void enterLCRMode()
 {
+#if LCR_CAPTURE_DEBUG
+  Serial.print("LCR Sweep sprite at mode entry: ");
+  Serial.println(lcrSweepSprite.created() ? "yes" : "no");
+
+  Serial.print("LCR Measure sprite at mode entry: ");
+  Serial.println(lcrValueSprite.created() ? "yes" : "no");
+
+  Serial.print("LCR free heap at mode entry: ");
+  Serial.println(rp2040.getFreeHeap());
+#endif
+
   // Stop Scope acquisition before LCR changes shared ADC state.
   stopScopeAdc();
   lcrCaptureFailureDumped = false;
@@ -1618,6 +1753,7 @@ void enterLCRMode()
   initializeLCRCapture();
 
   drawLCRScreen();
+  publishLCRWebUIState();
 }
 
 
@@ -1639,78 +1775,15 @@ void exitLCRMode()
 }
 
 
-// Main LCR instrument task.
-// Handles Measure acquisition/display updates and routes touchscreen input
-// according to the active tab and UI state. Modal selectors receive touch
-// input before the controls on the underlying Measure or Sweep screens.
-void updateLCR()
+// Dispatch one logical touch coordinate through the active LCR screen.
+// Physical TFT touches and browser-canvas touches share this path so both
+// interfaces operate the same instrument controls and navigation.
+void handleLCRInputTouch(uint16_t x, uint16_t y)
 {
-  static uint32_t lastDisplayUpdate = 0;
-  static bool lastPressed = false;
-
-  uint32_t now = millis();
-
-  //
-  // Active Sweep execution
-  //
-  if (lcrTab == LCR_TAB_SWEEP &&
-      lcrSweepState == LCR_SWEEP_RUNNING) {
-
-    updateLCRSweep();
-  }
-
-  //
-  // Measure acquisition and display update
-  //
-
-  if (lcrTab == LCR_TAB_MEASURE &&
-      lcrMeasureState == LCR_MEASURE_LIVE &&
-      lcrUIState == LCR_UI_NORMAL) {
-
-    lcrMeasurement = measureImpedance(lcrSettings);
-
-    if (lcrDisplayDirty ||
-        now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
-
-      lastDisplayUpdate = now;
-      lcrDisplayDirty = false;
-
-      updateLCRDisplay(
-        lcrMeasurement,
-        lcrSettings
-      );
-    }
-  }
-
-  //
-  // Touch detection
-  //
-
-  uint16_t x = 0;
-  uint16_t y = 0;
-
-  bool pressed = readTouch(x, y);
-
-  // Require the screen to be released before accepting another touch.
-  if (!pressed) {
-    lastPressed = false;
-    return;
-  }
-
-  if (lastPressed)
-    return;
-
-  lastPressed = true;
-
   //
   // Back
   //
-
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.backButton)) {
-
+  if (pointInLCRRect(x, y, lcrLayout.backButton)) {
     exitLCRMode();
     return;
   }
@@ -1718,12 +1791,7 @@ void updateLCR()
   //
   // Top-level analyzer tabs
   //
-
-  if (pointInLCRRect(
-        x,
-        y,
-        lcrLayout.tabs)) {
-
+  if (pointInLCRRect(x, y, lcrLayout.tabs)) {
     handleLCRTabTouch(x, y);
     return;
   }
@@ -1733,7 +1801,6 @@ void updateLCR()
   //
   // These must be processed before controls on the underlying tab.
   //
-
   if (lcrUIState == LCR_UI_FREQ_SELECT) {
     handleLCRFrequencySelectorTouch(x, y);
     return;
@@ -1767,7 +1834,6 @@ void updateLCR()
   //
   // Sweep Running controls
   //
-
   if (lcrTab == LCR_TAB_SWEEP &&
       lcrSweepState == LCR_SWEEP_RUNNING &&
       lcrUIState == LCR_UI_NORMAL) {
@@ -1779,7 +1845,6 @@ void updateLCR()
   //
   // Sweep Results controls
   //
-
   if (lcrTab == LCR_TAB_SWEEP &&
       lcrSweepState == LCR_SWEEP_RESULTS &&
       lcrUIState == LCR_UI_NORMAL) {
@@ -1791,14 +1856,10 @@ void updateLCR()
   //
   // Sweep Setup controls
   //
-
   if (lcrTab == LCR_TAB_SWEEP &&
       lcrSweepState == LCR_SWEEP_SETUP &&
       lcrUIState == LCR_UI_NORMAL &&
-      pointInLCRRect(
-        x,
-        y,
-        lcrLayout.content)) {
+      pointInLCRRect(x, y, lcrLayout.content)) {
 
     handleLCRSweepSetupTouch(x, y);
     return;
@@ -1807,14 +1868,10 @@ void updateLCR()
   //
   // Sweep Setup action
   //
-
   if (lcrTab == LCR_TAB_SWEEP &&
       lcrSweepState == LCR_SWEEP_SETUP &&
       lcrUIState == LCR_UI_NORMAL &&
-      pointInLCRRect(
-        x,
-        y,
-        lcrLayout.footer)) {
+      pointInLCRRect(x, y, lcrLayout.footer)) {
 
     handleLCRSweepFooterTouch(x, y);
     return;
@@ -1823,17 +1880,120 @@ void updateLCR()
   //
   // Measure soft keys
   //
-
   if (lcrTab == LCR_TAB_MEASURE &&
       lcrUIState == LCR_UI_NORMAL &&
-      pointInLCRRect(
-        x,
-        y,
-        lcrLayout.footer)) {
+      pointInLCRRect(x, y, lcrLayout.footer)) {
 
     handleMeasureSoftKeyTouch(x, y);
     return;
   }
+}
+
+
+// Consume one pending browser touch and route it through the same coordinate
+// dispatcher used by the physical TFT touchscreen.
+void processLCRWebTouch()
+{
+  if (!lcrWebTouch.pending)
+    return;
+
+  uint16_t x = lcrWebTouch.x;
+  uint16_t y = lcrWebTouch.y;
+
+  //
+  // Consume the request before dispatching it so a handler that changes
+  // instrument state cannot accidentally cause the same touch to repeat.
+  //
+  lcrWebTouch.pending = false;
+
+#if LCR_CAPTURE_DEBUG
+  Serial.print("LCR web touch: x=");
+  Serial.print(x);
+  Serial.print(" y=");
+  Serial.println(y);
+#endif
+
+  handleLCRInputTouch(x, y);
+
+  // Publish any navigation or selector change caused by the browser touch.
+  if (instrumentMode == MODE_LCR)
+    publishLCRWebUIState();
+}
+
+
+// Main LCR instrument task.
+// Handles Measure acquisition/display updates and routes touchscreen input
+// according to the active tab and UI state. Modal selectors receive touch
+// input before the controls on the underlying Measure or Sweep screens.
+void updateLCR()
+{
+  static uint32_t lastDisplayUpdate = 0;
+  static bool lastPressed = false;
+
+  uint32_t now = millis();
+
+  // Process browser-generated touches on Core 0 before normal LCR activity.
+  processLCRWebTouch();
+
+  // Active Sweep execution
+  if (lcrTab == LCR_TAB_SWEEP &&
+      lcrSweepState == LCR_SWEEP_RUNNING) {
+
+    updateLCRSweep();
+  }
+
+  //
+  // Measure acquisition and display update
+  //
+
+  if (lcrTab == LCR_TAB_MEASURE &&
+      lcrMeasureState == LCR_MEASURE_LIVE &&
+      lcrUIState == LCR_UI_NORMAL) {
+    lcrMeasurement = measureImpedance(lcrSettings);
+
+    //
+    // Publish successful Measure results for the web interface.
+    //
+    if (lcrMeasurement.frequency == lcrSettings.frequency) {
+      publishLCRWebMeasurement(
+        lcrMeasurement,
+        lcrSettings
+      );
+    }
+
+    if (lcrDisplayDirty ||
+        now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
+      lastDisplayUpdate = now;
+      lcrDisplayDirty = false;
+
+      updateLCRDisplay(
+        lcrMeasurement,
+        lcrSettings
+      );
+    }
+  }
+
+  //
+  // Touch detection
+  //
+
+  uint16_t x = 0;
+  uint16_t y = 0;
+
+  bool pressed = readTouch(x, y);
+
+  // Require the screen to be released before accepting another touch.
+  if (!pressed) {
+    lastPressed = false;
+    return;
+  }
+
+  if (lastPressed)
+    return;
+
+  lastPressed = true;
+
+  handleLCRInputTouch(x, y);
 }
 
 
@@ -2945,13 +3105,13 @@ void testLCRGeneratorFrequency(uint32_t frequency)
 }
 
 
-// Configure the reusable sprite used for dynamic LCR measurement fields.
-// The sprite is created at the largest dynamic-region size and reused for
-// both primary and secondary measurements to minimize RAM consumption.
+// Configure the reusable 8-bit sprite used for dynamic LCR measurement
+// fields. The buffer remains reserved so Measure rendering never requires
+// runtime allocation while networking is active.
 void initializeLCRValueSprite()
 {
-  // Remove an existing buffer before recreating it.
-  lcrValueSprite.deleteSprite();
+  if (lcrValueSprite.created())
+    return;
 
   int16_t spriteW = max(
     lcrLayout.primary.w,
@@ -2963,41 +3123,79 @@ void initializeLCRValueSprite()
     lcrLayout.secondary.h
   );
 
-  lcrValueSprite.setColorDepth(16);
-  lcrValueSprite.createSprite(spriteW, spriteH);
-
-  lcrValueSprite.fillSprite(BGCOLOR);
-  lcrValueSprite.setTextColor(TXTCOLOR, BGCOLOR);
-}
-
-
-// Configure the off-screen sprite used for dynamic Sweep progress.
-// An 8-bit sprite is sufficient for the progress UI and uses half the RAM
-// of a 16-bit sprite, leaving memory available for stored Sweep results.
-void initializeLCRSweepSprite()
-{
-  lcrSweepSprite.deleteSprite();
-
-  lcrSweepSprite.setColorDepth(8);
+  lcrValueSprite.setColorDepth(4);
 
   void *spriteBuffer =
-    lcrSweepSprite.createSprite(
-      lcrLayout.content.w,
-      lcrLayout.content.h
-    );
+    lcrValueSprite.createSprite(spriteW, spriteH);
 
   if (spriteBuffer == nullptr) {
-    Serial.println(
-      "ERROR: Unable to allocate LCR Sweep sprite"
-    );
-
+    Serial.print("ERROR: Unable to allocate LCR Measure sprite ");
+    Serial.print(spriteW);
+    Serial.print(" x ");
+    Serial.println(spriteH);
     return;
   }
 
-  lcrSweepSprite.fillSprite(BGCOLOR);
-  lcrSweepSprite.setTextColor(TXTCOLOR, BGCOLOR);
+  lcrValueSprite.createPalette( lcrSpritePalette, 16);
+  lcrValueSprite.fillSprite(LCR_SPRITE_BLACK);
+  lcrValueSprite.setTextColor( LCR_SPRITE_WHITE, LCR_SPRITE_BLACK);
+
+#if LCR_CAPTURE_DEBUG
+  Serial.print("LCR Measure sprite allocated: ");
+  Serial.print(spriteW);
+  Serial.print(" x ");
+  Serial.print(spriteH);
+  Serial.print("  free heap=");
+  Serial.println(rp2040.getFreeHeap());
+#endif
 }
 
+
+// Reserve the Measure display sprite early so dynamic value rendering never
+// depends on a runtime allocation while networking is active.
+bool reserveLCRMeasureSprite()
+{
+  initializeLCRValueSprite();
+
+  return lcrValueSprite.created();
+}
+
+
+// Reserve the full Sweep display sprite for the lifetime of the firmware.
+// Allocation is performed early so Sweep rendering never depends on a large
+// runtime heap allocation while networking is active.
+bool reserveLCRSweepSprite()
+{
+  if (lcrSweepSprite.created())
+    return true;
+
+  lcrSweepSprite.setColorDepth(4);
+
+  void *spriteBuffer = lcrSweepSprite.createSprite(
+    lcrLayout.content.w,
+    lcrLayout.content.h
+  );
+
+  if (spriteBuffer == nullptr) {
+    Serial.println("ERROR: Unable to reserve LCR Sweep sprite");
+    return false;
+  }
+
+  lcrSweepSprite.createPalette( lcrSpritePalette, 16);
+  lcrSweepSprite.fillSprite(LCR_SPRITE_BLACK);
+  lcrSweepSprite.setTextColor(LCR_SPRITE_WHITE, LCR_SPRITE_BLACK);
+
+#if LCR_CAPTURE_DEBUG
+  Serial.print("Reserved LCR Sweep sprite: ");
+  Serial.print(lcrLayout.content.w);
+  Serial.print(" x ");
+  Serial.print(lcrLayout.content.h);
+  Serial.print("  free heap=");
+  Serial.println(rp2040.getFreeHeap());
+#endif
+
+  return true;
+}
 
 
 // Calculate only the major screen regions shared by every LCR analyzer tab.
@@ -3538,8 +3736,11 @@ void initializeLCR()
   calculateSweepDensitySelectorLayout();
   calculateSweepPlotSelectorLayout();
 
+  //
+  // Entering LCR begins on Measure, so allocate its smaller dynamic-value
+  // sprite here. The full Sweep sprite was reserved earlier during startup.
+  //
   initializeLCRValueSprite();
-  initializeLCRSweepSprite();
 
   display.fillScreen(BGCOLOR);
 
@@ -3737,6 +3938,17 @@ void handleLCRTabTouch(uint16_t x, uint16_t y)
     }
 
     lcrTab = newTab;
+
+    //
+    // Both LCR display sprites remain reserved once allocated. Returning to
+    // Measure therefore requires no runtime framebuffer allocation.
+    //
+    if (lcrTab == LCR_TAB_MEASURE &&
+        !lcrValueSprite.created()) {
+
+      initializeLCRValueSprite();
+    }
+
     lcrUIState = LCR_UI_NORMAL;
     lcrDisplayDirty = true;
 
@@ -3772,6 +3984,12 @@ void handleMeasureSoftKeyTouch(uint16_t x, uint16_t y)
       lcrMeasureState = LCR_MEASURE_HOLD;
     else
       lcrMeasureState = LCR_MEASURE_LIVE;
+
+    //
+    // Publish the state change immediately so the web display reflects
+    // LIVE/HOLD even when HOLD stops further measurement acquisition.
+    //
+    publishLCRWebMeasurement( lcrMeasurement, lcrSettings);
 
     drawMeasureSoftKeys();
 
@@ -3813,6 +4031,14 @@ void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
       return;
 
     setLCRSelectedFrequency(frequency);
+
+#if LCR_CAPTURE_DEBUG
+    // Report the frequency selected before returning to the originating screen.
+    Serial.print("LCR frequency selected: ");
+    Serial.print(frequency);
+    Serial.print(" Hz  target=");
+    Serial.println(static_cast<uint8_t>(lcrFrequencyTarget));
+#endif
 
     if (lcrFrequencyTarget == LCR_FREQ_MEASURE) {
       returnToLCRMeasureScreen();
@@ -4202,7 +4428,7 @@ void drawLCRSpriteMeasurement(int16_t width, int16_t height,
   int16_t valueY = (height - valueHeight) / 2;
   int16_t unitY = valueY + valueHeight - unitHeight;
 
-  lcrValueSprite.setTextColor(color, BGCOLOR);
+  lcrValueSprite.setTextColor(color, LCR_SPRITE_BLACK);
 
   lcrValueSprite.setTextSize(valueSize);
   lcrValueSprite.setCursor(startX, valueY);
@@ -4254,7 +4480,7 @@ void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
     formatted = formatImpedance(m.resistance);
   }
 
-  lcrValueSprite.fillSprite(BGCOLOR);
+  lcrValueSprite.fillSprite(LCR_SPRITE_BLACK);
 
   drawLCRSpriteMeasurement(
     r.w,
@@ -4263,7 +4489,7 @@ void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
     formatted.unit,
     4,
     2,
-    TXTCOLOR
+    LCR_SPRITE_WHITE
   );
 
   lcrValueSprite.pushSprite(
@@ -4286,8 +4512,8 @@ void drawLCRSecondaryMeasurement(const MeasurementPoint &m)
 {
   const LCRRect &r = lcrLayout.secondary;
 
-  lcrValueSprite.fillSprite(BGCOLOR);
-  lcrValueSprite.setTextColor(TXTCOLOR, BGCOLOR);
+  lcrValueSprite.fillSprite(LCR_SPRITE_BLACK);
+  lcrValueSprite.setTextColor(LCR_SPRITE_WHITE, LCR_SPRITE_BLACK);
   lcrValueSprite.setTextSize(1);
 
   const int16_t leftLabelX  = 8;
@@ -4869,10 +5095,10 @@ void updateLCRSweepRunningDisplay()
   uint32_t completed = lcrSweepExecution.currentPoint;
   uint32_t total = lcrSweepExecution.totalPoints;
 
-  lcrSweepSprite.fillSprite(BGCOLOR);
+  lcrSweepSprite.fillSprite(LCR_SPRITE_BLACK);
 
   lcrSweepSprite.setTextSize(1);
-  lcrSweepSprite.setTextColor(TXTCOLOR, BGCOLOR);
+  lcrSweepSprite.setTextColor(LCR_SPRITE_WHITE, LCR_SPRITE_BLACK);
 
   //
   // Title
@@ -4894,7 +5120,7 @@ void updateLCRSweepRunningDisplay()
     progressY,
     progress.w,
     progress.h,
-    TXTCOLOR
+    LCR_SPRITE_WHITE
   );
 
   int16_t innerW = progress.w - 2;
@@ -4911,7 +5137,7 @@ void updateLCRSweepRunningDisplay()
       progressY + 1,
       fillW,
       progress.h - 2,
-      HIGHCOLOR
+      LCR_SPRITE_CYAN
     );
   }
 

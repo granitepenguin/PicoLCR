@@ -191,7 +191,80 @@ struct LCRFormattedValue
 };
 
 
+// LCR Web display functions
+//
+//
 
+// Snapshot of the latest completed LCR measurement shared with the web task.
+// Core 0 publishes completed measurements while Core 1 reads them for
+// WebSocket transmission without interacting with the acquisition hardware.
+struct LCRWebMeasurement
+{
+  uint32_t sequence;
+
+  uint32_t frequency;
+  float referenceResistance;
+
+  float impedance;
+  float phaseDeg;
+  float resistance;
+  float reactance;
+  float capacitance;
+  float inductance;
+  float esr;
+  float q;
+  float dissipation;
+
+  uint8_t measureState;
+};
+
+extern volatile LCRWebMeasurement lcrWebMeasurement;
+
+
+// Publish one completed LCR measurement to the web-interface snapshot.
+// The sequence counter allows Core 1 to detect when new measurement data
+// is available for transmission to connected browser clients.
+void publishLCRWebMeasurement(const MeasurementPoint &measurement,
+                              const MeasurementSettings &settings);
+
+
+// Carries one pending browser touch from Core 1 to the LCR task on Core 0.
+// Coordinates use the same logical 320x240 space as the physical touchscreen.
+struct LCRWebTouch
+{
+  volatile uint16_t x;
+  volatile uint16_t y;
+  volatile bool pending;
+};
+
+extern LCRWebTouch lcrWebTouch;
+
+
+// Process a pending browser touch on Core 0 through the normal LCR UI path.
+void processLCRWebTouch();
+
+// Snapshot of LCR front-panel navigation state shared with the web task.
+// Core 1 uses this state to render the same active tab and selector as the TFT.
+struct LCRWebUIState
+{
+  uint32_t sequence;
+
+  uint8_t tab;
+  uint8_t uiState;
+  uint8_t measureState;
+  uint8_t sweepState;
+  uint8_t frequencyTarget;
+
+  uint32_t measureFrequency;
+  float referenceResistance;
+};
+
+extern volatile LCRWebUIState lcrWebUIState;
+
+// Publish the current LCR front-panel state for browser synchronization.
+void publishLCRWebUIState();
+
+//
 // LCR tab displays
 //
 // enumberation of all the major LCR tabs
@@ -418,12 +491,21 @@ struct LCRPhasor
 // Public API
 //
 
+// Dispatch one logical 320x240 touch coordinate through the LCR user interface.
+void handleLCRInputTouch(uint16_t x, uint16_t y);
+
 // Perform one impedance measurement using the currently selected backend.
 MeasurementPoint measureImpedance(const MeasurementSettings &settings);
 
 // Acquire one physical LCR measurement and return complex DUT impedance.
 bool measureLCRHardwareImpedance(uint32_t frequency, float senseResistance,
                                  LCRPhasor &impedance);
+
+// Reserve the full Sweep display sprite before networking can fragment heap.
+bool reserveLCRSweepSprite();
+
+// Reserve the Measure display sprite before networking can fragment heap.
+bool reserveLCRMeasureSprite();
 
 // Initialize the LCR instrument.
 void initializeLCR();
