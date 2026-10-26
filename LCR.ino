@@ -4032,6 +4032,14 @@ void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
 
     setLCRSelectedFrequency(frequency);
 
+#if LCR_CAPTURE_DEBUG
+    // Report the frequency selected before returning to the originating screen.
+    Serial.print("LCR frequency selected: ");
+    Serial.print(frequency);
+    Serial.print(" Hz  target=");
+    Serial.println(static_cast<uint8_t>(lcrFrequencyTarget));
+#endif
+
     if (lcrFrequencyTarget == LCR_FREQ_MEASURE) {
       returnToLCRMeasureScreen();
     } else {

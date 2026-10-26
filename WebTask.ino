@@ -406,6 +406,9 @@ ws.binaryType = 'arraybuffer';
 // Retains the latest LCR front-panel state received from the instrument.
 var lcrUIState = null;
 
+// Retains the latest measurement so Measure can be restored after a selector.
+var lcrMeasurement = null;
+
 // Format a raw SI value using compact engineering prefixes for the LCR view.
 function formatEngineering(value, unit) {
   var magnitude = Math.abs(value);
@@ -745,15 +748,275 @@ function drawLCRMeasureCanvas(message) {
 }
 
 
+// Draw a modal LCR preset selector using the same geometry as the TFT.
+function drawLCRSelector(title, presets, selectedValue) {
+  var canvas = document.getElementById('lcr-canvas');
+  var ctx = canvas.getContext('2d');
+
+  //
+  // Matches calculateSelectorLayout() for the 320x240 LCR display.
+  //
+  var selector = {
+    x: 0,
+    y: 48,
+    w: 320,
+    h: 192
+  };
+
+  //
+  // Match the LCR_SELECTOR_* constants in LCR.ino.
+  //
+  var marginXPercent = 6;
+  var gapXPercent = 4;
+  var gapYPercent = 6;
+  var topPercent = 22;
+  var bottomGapPercent = 6;
+  var buttonHeightPercent = 13;
+  var cancelWidthPercent = 35;
+  var cancelHeightPercent = 16;
+  var cancelBottomPercent = 5;
+
+  //
+  // Match calculateSelectorLayout().
+  //
+  var cancelW =
+    Math.floor(selector.w * cancelWidthPercent / 100);
+
+  var cancelH =
+    Math.floor(selector.h * cancelHeightPercent / 100);
+
+  var cancelX =
+    selector.x +
+    Math.floor((selector.w - cancelW) / 2);
+
+  var cancelY =
+    selector.y +
+    selector.h -
+    cancelH -
+    Math.floor(selector.h * cancelBottomPercent / 100);
+
+  //
+  // Match calculateSelectorButtonGrid().
+  //
+  var count = presets.length;
+  var columns;
+
+  if (count <= 3)
+    columns = count;
+  else if (count === 4)
+    columns = 2;
+  else
+    columns = 3;
+
+  var rows =
+    Math.floor((count + columns - 1) / columns);
+
+  var marginX =
+    Math.floor(selector.w * marginXPercent / 100);
+
+  var gapX =
+    Math.floor(selector.w * gapXPercent / 100);
+
+  var gapY =
+    Math.floor(selector.h * gapYPercent / 100);
+
+  var gridTop =
+    selector.y +
+    Math.floor(selector.h * topPercent / 100);
+
+  var gridBottom =
+    cancelY -
+    Math.floor(selector.h * bottomGapPercent / 100);
+
+  var availableGridH =
+    gridBottom - gridTop;
+
+  var buttonW =
+    Math.floor(
+      (
+        selector.w -
+        marginX * 2 -
+        gapX * (columns - 1)
+      ) / columns
+    );
+
+  //
+  // Firmware uses display.height(), not selector.h, for this limit.
+  //
+  var maxButtonH =
+    Math.floor(240 * buttonHeightPercent / 100);
+
+  var buttonH =
+    Math.floor(
+      (
+        availableGridH -
+        gapY * (rows - 1)
+      ) / rows
+    );
+
+  buttonH = Math.min(buttonH, maxButtonH);
+
+  var actualGridH =
+    rows * buttonH +
+    (rows - 1) * gapY;
+
+  var centeredGridTop =
+    gridTop +
+    Math.floor((availableGridH - actualGridH) / 2);
+
+  //
+  // Clear the complete selector area.
+  //
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(
+    selector.x,
+    selector.y,
+    selector.w,
+    selector.h
+  );
+
+  //
+  // Selector title.
+  //
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.fillText(
+    title,
+    selector.x + selector.w / 2,
+    selector.y + 18
+  );
+
+  //
+  // Draw preset buttons using the TFT row-centering algorithm.
+  //
+  for (var i = 0; i < count; i++) {
+    var row = Math.floor(i / columns);
+    var column = i % columns;
+
+    var itemsInRow =
+      Math.min(
+        columns,
+        count - row * columns
+      );
+
+    var rowWidth =
+      itemsInRow * buttonW +
+      (itemsInRow - 1) * gapX;
+
+    var rowX =
+      selector.x +
+      Math.floor((selector.w - rowWidth) / 2);
+
+    var x =
+      rowX +
+      column * (buttonW + gapX);
+
+    var y =
+      centeredGridTop +
+      row * (buttonH + gapY);
+
+    var selected =
+      selectedValue === presets[i].value;
+
+    ctx.strokeStyle =
+      selected ? '#00ffff' : '#ffffff';
+
+    ctx.fillStyle =
+      selected ? '#00ffff' : '#ffffff';
+
+    ctx.lineWidth =
+      selected ? 2 : 1;
+
+    ctx.strokeRect(
+      x,
+      y,
+      buttonW,
+      buttonH
+    );
+
+    ctx.fillText(
+      presets[i].label,
+      x + buttonW / 2,
+      y + buttonH / 2
+    );
+  }
+
+  //
+  // Cancel button.
+  //
+  ctx.strokeStyle = '#ffffff';
+  ctx.fillStyle = '#ffffff';
+  ctx.lineWidth = 1;
+
+  ctx.strokeRect(
+    cancelX,
+    cancelY,
+    cancelW,
+    cancelH
+  );
+
+  ctx.fillText(
+    'Cancel',
+    cancelX + cancelW / 2,
+    cancelY + cancelH / 2
+  );
+
+  ctx.textAlign = 'left';
+}
+
+
+// Draw the shared frequency selector for the active frequency target.
+function drawLCRFrequencySelector(message) {
+  var presets = [
+    { label: '100 Hz',  value: 100 },
+    { label: '1 kHz',   value: 1000 },
+    { label: '10 kHz',  value: 10000 },
+    { label: '100 kHz', value: 100000 },
+    { label: '110 kHz', value: 110000 }
+  ];
+
+  drawLCRSelector(
+    'Select Frequency',
+    presets,
+    message.measureFrequency
+  );
+}
+
+
+// Draw the Measure reference-resistor selector.
+function drawLCRReferenceSelector(message) {
+  var presets = [
+    { label: '100 Ohm',  value: 100 },
+    { label: '1 kOhm',   value: 1000 },
+    { label: '10 kOhm',  value: 10000 }
+  ];
+
+  drawLCRSelector(
+    'Select Reference',
+    presets,
+    message.reference
+  );
+}
+
+
 // Render the latest LCR measurement and select the virtual front-panel view.
 function updateLCRMeasureView(message) {
-  drawLCRMeasureCanvas(message);
+  lcrMeasurement = message;
+  //
+  // LIVE measurements continue arriving while a selector is open. Retain the
+  // data, but do not paint over the active front-panel selector.
+  //
+  if (lcrUIState === null || lcrUIState.uiState === 0)
+    drawLCRMeasureCanvas(message);
 
   document.getElementById('scope-ui').style.display = 'none';
   document.getElementById('lcr-ui').style.display = 'block';
 }
 
-// Store the latest LCR navigation state and redraw the active front panel.
+// Store the latest LCR state and render the corresponding virtual front panel.
 function updateLCRUIState(message) {
   lcrUIState = message;
 
@@ -761,6 +1024,33 @@ function updateLCRUIState(message) {
     'LCR front panel: tab=' + message.tab +
     ' uiState=' + message.uiState
   );
+
+  //
+  // Frequency selector.
+  //
+  if (message.uiState === 1) {
+    drawLCRFrequencySelector(message);
+    return;
+  }
+
+  //
+  // Reference-resistor selector.
+  //
+  if (message.uiState === 2) {
+    drawLCRReferenceSelector(message);
+    return;
+  }
+
+  //
+  // Normal Measure display. Other selector/tab renderers will be added as
+  // their web implementations are completed.
+  //
+  if (message.uiState === 0 &&
+      message.tab === 0 &&
+      lcrMeasurement !== null) {
+
+    drawLCRMeasureCanvas(lcrMeasurement);
+  }
 }
 
 ws.onmessage = function(evt) {
