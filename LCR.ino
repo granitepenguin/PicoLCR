@@ -232,12 +232,12 @@ MeasurementSettings lcrSettings = {
 MeasurementPoint lcrMeasurement = {};
 
 // Stores the active LCR sweep configuration.
-// Defaults provide a useful full-range linear sweep while allowing the
+// Defaults provide a useful full-range log sweep while allowing the
 // Sweep Setup screen to modify these values later.
 SweepSettings lcrSweepSettings = {
   100,                 // Start frequency: 100 Hz
   110000,              // Stop frequency: 110 kHz
-  LCR_SWEEP_LINEAR,    // Sweep mode
+  LCR_SWEEP_LOG,       // Sweep mode
   1000,                // Linear step: 1 kHz
   10                   // Logarithmic density: 10 points/decade
 };
@@ -248,6 +248,11 @@ SweepPoint lcrSweepPoints[LCR_MAX_SWEEP_POINTS];
 
 uint16_t lcrSweepPointCount = 0;
 
+// Index of the next completed Sweep point awaiting web publication.
+uint16_t lcrWebSweepResultIndex = 0;
+
+// True while completed Sweep results are being streamed to Core 1.
+bool lcrWebSweepResultsActive = false;
 
 // Tracks measurement details for sending to the web interface
 volatile LCRWebMeasurement lcrWebMeasurement = {};
@@ -257,6 +262,12 @@ LCRWebTouch lcrWebTouch = {};
 
 // Stores the latest LCR navigation state for the browser front panel.
 volatile LCRWebUIState lcrWebUIState = {};
+
+// Stores the latest active Sweep progress for the web interface.
+volatile LCRWebSweepProgress lcrWebSweepProgress = {};
+
+// Holds the latest completed Sweep point published for Core 1.
+volatile LCRWebSweepResult lcrWebSweepResult = {};
 
 // Publish one completed LCR measurement for the web interface.
 //
@@ -316,16 +327,98 @@ void publishLCRWebUIState()
   lcrWebUIState.uiState = static_cast<uint8_t>(lcrUIState);
   lcrWebUIState.measureState = static_cast<uint8_t>(lcrMeasureState);
   lcrWebUIState.sweepState = static_cast<uint8_t>(lcrSweepState);
-  lcrWebUIState.frequencyTarget =
-    static_cast<uint8_t>(lcrFrequencyTarget);
+  lcrWebUIState.frequencyTarget = static_cast<uint8_t>(lcrFrequencyTarget);
 
   lcrWebUIState.measureFrequency = lcrSettings.frequency;
   lcrWebUIState.referenceResistance = lcrSettings.referenceResistance;
+
+  lcrWebUIState.sweepStartFrequency = lcrSweepSettings.startFrequency;
+  lcrWebUIState.sweepStopFrequency = lcrSweepSettings.stopFrequency;
+  lcrWebUIState.sweepMode = static_cast<uint8_t>(lcrSweepSettings.mode);
+  lcrWebUIState.sweepStepFrequency = lcrSweepSettings.stepFrequency;
+  lcrWebUIState.sweepPointsPerDecade = lcrSweepSettings.pointsPerDecade;
+
+  // Keep the browser Results plot synchronized with the TFT selection.
+  lcrWebUIState.sweepPlotType = static_cast<uint8_t>(lcrSweepPlotType);
+
+  // Keep the browser Results cursor synchronized with the TFT.
+  lcrWebUIState.sweepCursorActive = lcrSweepCursorActive;
+  lcrWebUIState.sweepCursorIndex = lcrSweepCursorIndex;
+
+  if (lcrSweepSettings.mode == LCR_SWEEP_LINEAR) {
+    lcrWebUIState.sweepMeasurementCount =
+      calculateLinearSweepPointCount(lcrSweepSettings);
+  } else {
+    lcrWebUIState.sweepMeasurementCount =
+      calculateLogSweepPointCount(lcrSweepSettings);
+  }
 
   //
   // Publish the completed snapshot last.
   //
   lcrWebUIState.sequence++;
+}
+
+
+// Publish active Sweep progress for the web front panel.
+// The sequence is updated last so Core 1 sees a completed snapshot.
+void publishLCRWebSweepProgress()
+{
+  lcrWebSweepProgress.currentPoint = lcrSweepExecution.currentPoint;
+  lcrWebSweepProgress.totalPoints = lcrSweepExecution.totalPoints;
+  lcrWebSweepProgress.currentFrequency = lcrSweepExecution.currentFrequency;
+  lcrWebSweepProgress.elapsedMs = millis() - lcrSweepExecution.startTime;
+
+  lcrWebSweepProgress.sequence++;
+}
+
+
+// Publish one retained Sweep result point for Core 1.
+// The sequence is updated last so the reader sees a complete snapshot.
+void publishLCRWebSweepResult(uint16_t index)
+{
+  if (index >= lcrSweepPointCount)
+    return;
+
+  const SweepPoint &point = lcrSweepPoints[index];
+
+  lcrWebSweepResult.index = index;
+  lcrWebSweepResult.pointCount = lcrSweepPointCount;
+  lcrWebSweepResult.frequency = point.frequency;
+  lcrWebSweepResult.valid = point.valid;
+  lcrWebSweepResult.impedance = point.impedance;
+  lcrWebSweepResult.phaseDeg = point.phaseDeg;
+  lcrWebSweepResult.resistance = point.resistance;
+  lcrWebSweepResult.reactance = point.reactance;
+  lcrWebSweepResult.capacitance = point.capacitance;
+  lcrWebSweepResult.inductance = point.inductance;
+  lcrWebSweepResult.esr = point.esr;
+  lcrWebSweepResult.q = point.q;
+
+  // Mark the completed point available before publishing its sequence.
+  lcrWebSweepResult.pending = true;
+  lcrWebSweepResult.sequence++;
+}
+
+
+// Publish completed Sweep results one point at a time.
+// A new point is not published until Core 1 consumes the previous snapshot.
+void updateLCRWebSweepResults()
+{
+  if (!lcrWebSweepResultsActive)
+    return;
+
+  if (lcrWebSweepResult.pending)
+    return;
+
+  // Stop after every retained point has been published.
+  if (lcrWebSweepResultIndex >= lcrSweepPointCount) {
+    lcrWebSweepResultsActive = false;
+    return;
+  }
+
+  publishLCRWebSweepResult(lcrWebSweepResultIndex);
+  lcrWebSweepResultIndex++;
 }
 
 
@@ -1493,6 +1586,13 @@ void finishLCRSweep()
   lcrSweepState = LCR_SWEEP_RESULTS;
   lcrUIState = LCR_UI_NORMAL;
 
+  // Notify the browser that Sweep acquisition has entered Results.
+  publishLCRWebUIState();
+
+  // Begin streaming the retained Sweep points to the web task.
+  lcrWebSweepResultIndex = 0;
+  lcrWebSweepResultsActive = lcrSweepPointCount > 0;
+
   drawLCRScreen();
 }
 
@@ -1510,6 +1610,9 @@ void cancelLCRSweep()
   lcrSweepPointCount = 0;
   lcrSweepState = LCR_SWEEP_SETUP;
   lcrUIState = LCR_UI_NORMAL;
+
+  // Notify the browser that the cancelled Sweep returned to Setup.
+  publishLCRWebUIState();
 
   drawLCRScreen();
 }
@@ -1587,6 +1690,8 @@ void updateLCRSweep()
 
   // Advance to the next requested frequency whether this point succeeded or not.
   lcrSweepExecution.currentPoint++;
+
+  publishLCRWebSweepProgress();
 
   // Update the Running display while the Sweep is still active.
   updateLCRSweepRunningDisplay();
@@ -1941,6 +2046,9 @@ void updateLCR()
 
     updateLCRSweep();
   }
+
+  // Stream completed Sweep results to Core 1 without blocking the LCR task.
+  updateLCRWebSweepResults();
 
   //
   // Measure acquisition and display update

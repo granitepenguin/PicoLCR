@@ -227,6 +227,48 @@ extern volatile LCRWebMeasurement lcrWebMeasurement;
 void publishLCRWebMeasurement(const MeasurementPoint &measurement,
                               const MeasurementSettings &settings);
 
+// Snapshot of active Sweep progress shared with the web task.
+struct LCRWebSweepProgress
+{
+  uint32_t sequence;
+  uint32_t currentPoint;
+  uint32_t totalPoints;
+  uint32_t currentFrequency;
+  uint32_t elapsedMs;
+};
+
+extern volatile LCRWebSweepProgress lcrWebSweepProgress;
+
+// Snapshot of one completed Sweep result shared with the web task.
+// Results are published one point at a time to avoid large WebSocket messages.
+struct LCRWebSweepResult
+{
+  uint32_t sequence;
+  uint16_t index;
+  uint16_t pointCount;
+
+  uint32_t frequency;
+  bool valid;
+
+  float impedance;
+  float phaseDeg;
+  float resistance;
+  float reactance;
+  float capacitance;
+  float inductance;
+  float esr;
+  float q;
+  // True until Core 1 consumes this published result point.
+  volatile bool pending;
+};
+
+extern volatile LCRWebSweepResult lcrWebSweepResult;
+
+// Publish one retained Sweep result point for the web interface.
+void publishLCRWebSweepResult(uint16_t index);
+
+// Publish the current Sweep progress for the web interface.
+void publishLCRWebSweepProgress();
 
 // Carries one pending browser touch from Core 1 to the LCR task on Core 0.
 // Coordinates use the same logical 320x240 space as the physical touchscreen.
@@ -257,6 +299,21 @@ struct LCRWebUIState
 
   uint32_t measureFrequency;
   float referenceResistance;
+
+  // Sweep Setup configuration.
+  uint32_t sweepStartFrequency;
+  uint32_t sweepStopFrequency;
+  uint8_t sweepMode;
+  uint32_t sweepStepFrequency;
+  uint16_t sweepPointsPerDecade;
+  uint32_t sweepMeasurementCount;
+
+  // Identifies the quantity currently selected for the Sweep Results plot.
+  uint8_t sweepPlotType;
+
+  // Identifies the Sweep Results point currently selected by the cursor.
+  bool sweepCursorActive;
+  uint16_t sweepCursorIndex;
 };
 
 extern volatile LCRWebUIState lcrWebUIState;

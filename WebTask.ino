@@ -14,6 +14,12 @@ uint32_t lastLCRWebSequence = 0;
 // Tracks the most recent LCR UI-state snapshot processed by the web task.
 uint32_t lastLCRWebUISequence = 0;
 
+// Tracks the last Sweep-progress snapshot sent by Core 1.
+uint32_t lastLCRWebSweepSequence = 0;
+
+// Tracks the last Sweep-result snapshot sent by Core 1.
+uint32_t lastLCRWebResultSequence = 0;
+
 WebServer server(80);
 WebSocketsServer webSocket = WebSocketsServer(81);
 
@@ -403,8 +409,19 @@ canvas {
 var ws = new WebSocket('ws://' + window.location.hostname + ':81/');
 ws.binaryType = 'arraybuffer';
 
+// Request the current instrument state whenever the WebSocket reconnects.
+ws.onopen = function() {
+  ws.send('sync');
+};
+
 // Retains the latest LCR front-panel state received from the instrument.
 var lcrUIState = null;
+
+// Retains the latest Sweep progress received from the instrument.
+var lcrSweepProgress = null;
+
+// Retains completed Sweep points for local Results plotting.
+var lcrSweepResults = [];
 
 // Retains the latest measurement so Measure can be restored after a selector.
 var lcrMeasurement = null;
@@ -508,6 +525,71 @@ async function handleLCRCanvasPointer(event) {
   }
 }
 
+
+// Draw the common LCR header and tab bar for all analyzer screens.
+function drawLCRHeaderAndTabs(ctx, activeTab) {
+  const width = 320;
+  const headerH = 24;
+  const tabsH = 24;
+
+  const textColor = '#e8f6ff';
+  const gridColor = '#606060';
+  // Match the TFT HIGHCOLOR used for the active LCR tab.
+  const highlightColor = '#00ffff';
+
+  // Draw the separator below the header.
+  ctx.strokeStyle = gridColor;
+  ctx.beginPath();
+  ctx.moveTo(0, headerH - 1);
+  ctx.lineTo(width, headerH - 1);
+  ctx.stroke();
+
+  // Draw the Back control and analyzer title.
+  ctx.font = '12px monospace';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = textColor;
+
+  drawLCRCenteredText(ctx, '< Back', 0, headerH / 2, 70);
+
+  ctx.font = 'bold 13px monospace';
+  drawLCRCenteredText(ctx, 'LCR ANALYZER', 70, headerH / 2, width - 70);
+
+  // Draw the four analyzer tabs and highlight the active one.
+  var tabs = ['Measure', 'Sweep', 'Cal', 'Settings'];
+  var tabW = width / tabs.length;
+
+  ctx.font = '12px monospace';
+
+  for (var i = 0; i < tabs.length; i++) {
+    ctx.fillStyle = (i === activeTab) ? highlightColor : textColor;
+
+    drawLCRCenteredText(
+      ctx,
+      tabs[i],
+      i * tabW,
+      headerH + tabsH / 2,
+      tabW
+    );
+
+    if (i < tabs.length - 1) {
+      ctx.strokeStyle = gridColor;
+      ctx.beginPath();
+      ctx.moveTo((i + 1) * tabW, headerH + 3);
+      ctx.lineTo((i + 1) * tabW, headerH + tabsH - 3);
+      ctx.stroke();
+    }
+  }
+
+  // Draw the separator below the tab bar.
+  ctx.strokeStyle = gridColor;
+  ctx.beginPath();
+  ctx.moveTo(0, headerH + tabsH - 1);
+  ctx.lineTo(width, headerH + tabsH - 1);
+  ctx.stroke();
+}
+
+
+
 // Draw the read-only LCR Measure screen on the 320x240 virtual front panel.
 function drawLCRMeasureCanvas(message) {
   var canvas = document.getElementById('lcr-canvas');
@@ -549,57 +631,8 @@ function drawLCRMeasureCanvas(message) {
   ctx.fillStyle = backgroundColor;
   ctx.fillRect(0, 0, width, height);
 
-  //
-  // Header.
-  //
-  ctx.strokeStyle = gridColor;
-  ctx.beginPath();
-  ctx.moveTo(0, headerH - 1);
-  ctx.lineTo(width, headerH - 1);
-  ctx.stroke();
-
-  ctx.font = '12px monospace';
-  ctx.textBaseline = 'middle';
-
-  ctx.fillStyle = textColor;
-  drawLCRCenteredText(ctx, '< Back', 0, headerH / 2, 70);
-
-  ctx.font = 'bold 13px monospace';
-  drawLCRCenteredText(ctx, 'LCR ANALYZER', 70, headerH / 2, width - 70);
-
-  //
-  // Tabs.
-  //
-  var tabs = ['Measure', 'Sweep', 'Cal', 'Settings'];
-  var tabW = width / tabs.length;
-
-  ctx.font = '12px monospace';
-
-  for (var i = 0; i < tabs.length; i++) {
-    ctx.fillStyle = (i === 0) ? highlightColor : textColor;
-
-    drawLCRCenteredText(
-      ctx,
-      tabs[i],
-      i * tabW,
-      headerH + tabsH / 2,
-      tabW
-    );
-
-    if (i < tabs.length - 1) {
-      ctx.strokeStyle = gridColor;
-      ctx.beginPath();
-      ctx.moveTo((i + 1) * tabW, headerH + 3);
-      ctx.lineTo((i + 1) * tabW, headerH + tabsH - 3);
-      ctx.stroke();
-    }
-  }
-
-  ctx.strokeStyle = gridColor;
-  ctx.beginPath();
-  ctx.moveTo(0, headerH + tabsH - 1);
-  ctx.lineTo(width, headerH + tabsH - 1);
-  ctx.stroke();
+  // Draw the common header with Measure as the active tab.
+  drawLCRHeaderAndTabs(ctx, 0);
 
   //
   // Determine the primary DUT type using the same +/-10 degree threshold
@@ -748,8 +781,744 @@ function drawLCRMeasureCanvas(message) {
 }
 
 
+// Draw the Sweep Setup screen using the same geometry as the TFT.
+function drawLCRSweepSetupCanvas(message) {
+  var canvas = document.getElementById('lcr-canvas');
+  var ctx = canvas.getContext('2d');
+
+  var content = {
+    x: 0,
+    y: 48,
+    w: 320,
+    h: 164
+  };
+
+  var footer = {
+    x: 0,
+    y: 212,
+    w: 320,
+    h: 28
+  };
+
+  var rowH = Math.floor(content.h / 5);
+  var leftX = content.x + Math.floor(content.w * 10 / 100);
+  var valueX = content.x + Math.floor(content.w * 55 / 100);
+
+  //
+  // Clear the content and footer.
+  //
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(content.x, content.y, content.w, content.h);
+  ctx.fillRect(footer.x, footer.y, footer.w, footer.h);
+
+  // Draw the common header with Sweep as the active tab.
+  drawLCRHeaderAndTabs(ctx, 1);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+
+  //
+  // Match calculateSweepLayout(). The final row consumes the remainder.
+  //
+  var rows = [];
+
+  for (var i = 0; i < 5; i++) {
+    var y = content.y + i * rowH;
+    var h = i === 4 ? content.h - rowH * i : rowH;
+
+    rows.push({
+      x: content.x,
+      y: y,
+      w: content.w,
+      h: h
+    });
+  }
+
+  //
+  // Start frequency.
+  //
+  ctx.fillText('Start', leftX, rows[0].y + rows[0].h / 2);
+  ctx.fillText(
+    formatLCRFrequency(message.sweepStartFrequency),
+    valueX,
+    rows[0].y + rows[0].h / 2
+  );
+
+  //
+  // Stop frequency.
+  //
+  ctx.fillText('Stop', leftX, rows[1].y + rows[1].h / 2);
+  ctx.fillText(
+    formatLCRFrequency(message.sweepStopFrequency),
+    valueX,
+    rows[1].y + rows[1].h / 2
+  );
+
+  //
+  // Sweep mode.
+  //
+  ctx.fillText('Mode', leftX, rows[2].y + rows[2].h / 2);
+  ctx.fillText(
+    message.sweepMode === 0 ? 'Linear' : 'Log',
+    valueX,
+    rows[2].y + rows[2].h / 2
+  );
+
+  //
+  // Linear step or logarithmic density.
+  //
+  if (message.sweepMode === 0) {
+    ctx.fillText('Step', leftX, rows[3].y + rows[3].h / 2);
+    ctx.fillText(
+      formatLCRFrequency(message.sweepStepFrequency),
+      valueX,
+      rows[3].y + rows[3].h / 2
+    );
+  } else {
+    ctx.fillText('Points/Dec', leftX, rows[3].y + rows[3].h / 2);
+    ctx.fillText(
+      String(message.sweepPointsPerDecade),
+      valueX,
+      rows[3].y + rows[3].h / 2
+    );
+  }
+
+  //
+  // Derived measurement count.
+  //
+  ctx.fillText('Measurements', leftX, rows[4].y + rows[4].h / 2);
+  ctx.fillText(
+    String(message.sweepMeasurementCount),
+    valueX,
+    rows[4].y + rows[4].h / 2
+  );
+
+  //
+  // Sweep action footer.
+  //
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(footer.x, footer.y, footer.w, footer.h);
+
+  ctx.textAlign = 'center';
+  ctx.fillText(
+    'Sweep',
+    footer.x + footer.w / 2,
+    footer.y + footer.h / 2
+  );
+
+  ctx.textAlign = 'left';
+}
+
+
+// Draw the Sweep Running screen using the same geometry as the TFT.
+function drawLCRSweepRunningCanvas(progress) {
+  var canvas = document.getElementById('lcr-canvas');
+  var ctx = canvas.getContext('2d');
+
+  var content = {
+    x: 0,
+    y: 48,
+    w: 320,
+    h: 164
+  };
+
+  var footer = {
+    x: 0,
+    y: 212,
+    w: 320,
+    h: 28
+  };
+
+  var progressBar = {
+    x: 32,
+    y: 89,
+    w: 256,
+    h: 19
+  };
+
+  // Clear the dynamic content and footer.
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(content.x, content.y, content.w, content.h);
+  ctx.fillRect(footer.x, footer.y, footer.w, footer.h);
+
+  // Draw the common header with Sweep as the active tab.
+  drawLCRHeaderAndTabs(ctx, 1);
+ 
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#ffffff';
+  ctx.font = '14px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 1;
+
+  // Running-state title.
+  ctx.fillText('Running Sweep', 160, 61);
+
+  // Progress-bar outline.
+  ctx.strokeRect(
+    progressBar.x,
+    progressBar.y,
+    progressBar.w,
+    progressBar.h
+  );
+
+  // Fill the completed portion of the progress bar.
+  var innerW = progressBar.w - 2;
+  var fillW = 0;
+
+  if (progress.totalPoints > 0) {
+    fillW = Math.floor(
+      innerW * progress.currentPoint / progress.totalPoints
+    );
+  }
+
+  if (fillW > 0) {
+    ctx.fillStyle = '#00ffff';
+    ctx.fillRect(
+      progressBar.x + 1,
+      progressBar.y + 1,
+      fillW,
+      progressBar.h - 2
+    );
+  }
+
+  ctx.fillStyle = '#ffffff';
+
+  // Display completed and total Sweep points.
+  ctx.fillText(
+    progress.currentPoint + ' / ' + progress.totalPoints,
+    160,
+    120
+  );
+
+  // Display the frequency of the most recently completed point.
+  ctx.fillText(
+    'Current: ' + formatLCRFrequency(progress.currentFrequency),
+    160,
+    140
+  );
+
+  // Match the TFT estimated-remaining-time calculation.
+  var remainingMs = 0;
+
+  if (progress.currentPoint > 0 &&
+      progress.currentPoint < progress.totalPoints) {
+
+    var averagePointMs =
+      Math.floor(progress.elapsedMs / progress.currentPoint);
+
+    remainingMs =
+      averagePointMs * (progress.totalPoints - progress.currentPoint);
+  }
+
+  var remainingText = 'Remaining: --';
+
+  if (progress.currentPoint > 0) {
+    remainingText =
+      'Remaining: ' + (remainingMs / 1000).toFixed(1) + ' s';
+  }
+
+  ctx.fillText(remainingText, 160, 160);
+
+  // Match the TFT separator above the Cancel footer.
+  ctx.strokeStyle = '#555555';
+  ctx.beginPath();
+  ctx.moveTo(footer.x, footer.y);
+  ctx.lineTo(footer.x + footer.w, footer.y);
+  ctx.stroke();
+
+  // Cancel occupies the complete footer touch region.
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('Cancel', 160, footer.y + footer.h / 2);
+
+  ctx.textAlign = 'left';
+}
+
+
+// Return the stored Sweep value associated with one Results plot type.
+function getLCRSweepResultValue(point, plotType) {
+  switch (plotType) {
+    case 1:
+      return point.phase;
+
+    case 2:
+      return point.resistance;
+
+    case 3:
+      return point.reactance;
+
+    case 4:
+      return point.esr;
+
+    case 5:
+      return point.q;
+
+    case 6:
+      return point.capacitance;
+
+    case 7:
+      return point.inductance;
+
+    case 0:
+    default:
+      return point.impedance;
+  }
+}
+
+
+// Return the label, engineering divisor, and unit for a Results plot.
+function getLCRSweepPlotInfo(plotType, minimum, maximum) {
+  var labels = ['|Z|', 'Phase', 'R', 'X', 'ESR', 'Q', 'C', 'L'];
+  var largest = Math.max(Math.abs(minimum), Math.abs(maximum));
+  var info = {
+    label: labels[plotType] || '|Z|',
+    divisor: 1,
+    unit: 'Ohm'
+  };
+
+  // Capacitance.
+  if (plotType === 6) {
+    if (largest < 1e-9) {
+      info.divisor = 1e-12;
+      info.unit = 'pF';
+    }
+    else if (largest < 1e-6) {
+      info.divisor = 1e-9;
+      info.unit = 'nF';
+    }
+    else if (largest < 1e-3) {
+      info.divisor = 1e-6;
+      info.unit = 'uF';
+    }
+    else {
+      info.unit = 'F';
+    }
+
+    return info;
+  }
+
+  // Inductance.
+  if (plotType === 7) {
+    if (largest < 1e-6) {
+      info.divisor = 1e-9;
+      info.unit = 'nH';
+    }
+    else if (largest < 1e-3) {
+      info.divisor = 1e-6;
+      info.unit = 'uH';
+    }
+    else if (largest < 1) {
+      info.divisor = 1e-3;
+      info.unit = 'mH';
+    }
+    else {
+      info.unit = 'H';
+    }
+
+    return info;
+  }
+
+  // Phase and Q do not use engineering prefixes.
+  if (plotType === 1) {
+    info.unit = 'deg';
+    return info;
+  }
+
+  if (plotType === 5) {
+    info.unit = '';
+    return info;
+  }
+
+  // Resistance-like quantities use Ohm engineering prefixes.
+  if (largest >= 1e6) {
+    info.divisor = 1e6;
+    info.unit = 'MOhm';
+  }
+  else if (largest >= 1e3) {
+    info.divisor = 1e3;
+    info.unit = 'kOhm';
+  }
+
+  return info;
+}
+
+
+// Format Sweep-axis values using the same precision rules as the TFT.
+function formatLCRSweepAxisNumber(value) {
+  var magnitude = Math.abs(value);
+
+  if (magnitude >= 100)
+    return value.toFixed(0);
+
+  if (magnitude >= 10)
+    return value.toFixed(1);
+
+  return value.toFixed(2);
+}
+
+
+// Draw completed Sweep results using the same geometry and scaling as the TFT.
+function drawLCRSweepResultsCanvas(message) {
+  var canvas = document.getElementById('lcr-canvas');
+
+  if (!canvas || !canvas.getContext)
+    return;
+
+  var ctx = canvas.getContext('2d');
+
+  const width = 320;
+  const content = { x: 0, y: 48, w: 320, h: 164 };
+  const footer = { x: 0, y: 212, w: 320, h: 28 };
+
+  const textColor = '#e8f6ff';
+  const gridColor = '#606060';
+  // Match the TFT HIGHCOLOR used for the Sweep trace.
+  const highlightColor = '#00ffff';
+  const backgroundColor = '#000000';
+
+  // Calculate the same Results geometry used by the TFT.
+  const controlH = Math.floor(content.h * 15 / 100);
+  const plotLeft = Math.floor(content.w * 16 / 100);
+  const plotRight = Math.floor(content.w * 5 / 100);
+  const plotTop = Math.floor(content.h * 8 / 100);
+  const plotBottom = Math.floor(content.h * 12 / 100);
+
+  const plotAreaY = content.y + controlH;
+  const plotAreaH = content.h - controlH;
+
+  const plot = {
+    x: content.x + plotLeft,
+    y: plotAreaY + plotTop,
+    w: content.w - plotLeft - plotRight,
+    h: plotAreaH - plotTop - plotBottom
+  };
+
+  // Clear the previous screen contents.
+  ctx.fillStyle = backgroundColor;
+  ctx.fillRect(content.x, content.y, content.w, content.h);
+  ctx.fillRect(footer.x, footer.y, footer.w, footer.h);
+
+  drawLCRHeaderAndTabs(ctx, 1);
+
+  // Draw the Results plot-selection strip.
+  ctx.strokeStyle = gridColor;
+  ctx.strokeRect(content.x, content.y, content.w, controlH);
+
+  var plotType = message.sweepPlotType || 0;
+  var plotLabels = ['|Z|', 'Phase', 'R', 'X', 'ESR', 'Q', 'C', 'L'];
+
+  ctx.fillStyle = textColor;
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+
+  // Draw the selector down-arrow.
+  var arrowX = content.x + content.w - 12;
+  var arrowY = content.y + controlH / 2 - 1;
+
+  ctx.beginPath();
+  ctx.moveTo(arrowX - 3, arrowY - 2);
+  ctx.lineTo(arrowX, arrowY + 1);
+  ctx.lineTo(arrowX + 3, arrowY - 2);
+  ctx.stroke();
+
+  // Draw the plot boundary and horizontal midpoint.
+  ctx.strokeStyle = gridColor;
+  ctx.strokeRect(plot.x, plot.y, plot.w, plot.h);
+
+  ctx.beginPath();
+  ctx.moveTo(plot.x + 1, plot.y + Math.floor(plot.h / 2));
+  ctx.lineTo(plot.x + plot.w - 1, plot.y + Math.floor(plot.h / 2));
+  ctx.stroke();
+
+  if (lcrSweepResults.length > 0) {
+    var minimum = null;
+    var maximum = null;
+
+    // Determine the range from valid retained points.
+    for (var i = 0; i < lcrSweepResults.length; i++) {
+      var point = lcrSweepResults[i];
+
+      if (!point || !point.valid)
+        continue;
+
+      var value = getLCRSweepResultValue(point, plotType);
+
+      if (minimum === null || value < minimum)
+        minimum = value;
+
+      if (maximum === null || value > maximum)
+        maximum = value;
+    }
+
+    if (minimum !== null && maximum !== null) {
+      // Expand a constant range using the same rule as the TFT.
+      if (maximum - minimum <= 0) {
+        var constantPadding = Math.abs(maximum) * 0.05;
+
+        if (constantPadding < 0.01)
+          constantPadding = 0.01;
+
+        minimum -= constantPadding;
+        maximum += constantPadding;
+      }
+
+      // Add the TFT's normal 8-percent plot padding.
+      var span = maximum - minimum;
+      var padding = span * 0.08;
+
+      minimum -= padding;
+      maximum += padding;
+
+      // Magnitude-only quantities cannot display below zero.
+      if ((plotType === 0 || plotType === 4 || plotType === 5 ||
+           plotType === 6 || plotType === 7) && minimum < 0) {
+
+        minimum = 0;
+      }
+
+      var info = getLCRSweepPlotInfo(plotType, minimum, maximum);
+
+      // Match the TFT status strip when a Sweep point is selected.
+      var controlLabel = 'Plot: ' + plotLabels[plotType];
+
+      if (message.sweepCursorActive &&
+          message.sweepCursorIndex < lcrSweepResults.length) {
+
+        var selectedPoint = lcrSweepResults[message.sweepCursorIndex];
+
+        if (selectedPoint) {
+          var frequencyText = formatLCRFrequency(selectedPoint.frequency);
+          var valueText = 'NO DATA';
+
+          if (selectedPoint.valid) {
+            var selectedValue =
+              getLCRSweepResultValue(selectedPoint, plotType);
+
+            valueText =
+              formatLCRSweepAxisNumber(selectedValue / info.divisor) +
+              info.unit;
+          }
+
+          controlLabel =
+            plotLabels[plotType] + '   ' +
+            frequencyText + '   ' +
+            valueText;
+        }
+      }
+
+      // Draw the plot name or selected-point status in the control strip.
+      ctx.fillStyle = textColor;
+      ctx.font = '12px monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+
+      ctx.fillText(
+        controlLabel,
+        content.x + 8,
+        content.y + controlH / 2
+      );
+
+      var midpoint = (minimum + maximum) / 2;
+
+      // Draw the common Y-axis engineering unit.
+      if (info.unit.length > 0) {
+        ctx.fillStyle = textColor;
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillText('(' + info.unit + ')', plot.x, plot.y - 2);
+      }
+
+      // Draw maximum, midpoint, and minimum Y labels.
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+
+      ctx.fillText(
+        formatLCRSweepAxisNumber(maximum / info.divisor),
+        plot.x - 3,
+        plot.y + 4
+      );
+
+      ctx.fillText(
+        formatLCRSweepAxisNumber(midpoint / info.divisor),
+        plot.x - 3,
+        plot.y + plot.h / 2
+      );
+
+      ctx.fillText(
+        formatLCRSweepAxisNumber(minimum / info.divisor),
+        plot.x - 3,
+        plot.y + plot.h - 4
+      );
+
+      var start = message.sweepStartFrequency;
+      var stop = message.sweepStopFrequency;
+
+      // Convert a Sweep frequency into the same X coordinate as the TFT.
+      var calculateX = function(frequency) {
+        var position;
+
+        if (message.sweepMode === 1) {
+          var logStart = Math.log10(start);
+          var logStop = Math.log10(stop);
+
+          position =
+            (Math.log10(frequency) - logStart) / (logStop - logStart);
+        }
+        else {
+          position = (frequency - start) / (stop - start);
+        }
+
+        position = Math.max(0, Math.min(1, position));
+
+        return plot.x + position * (plot.w - 1);
+      };
+
+      // Draw the logarithmic decade grid and labels.
+      if (message.sweepMode === 1) {
+        var decade = 1;
+
+        while (decade < start)
+          decade *= 10;
+
+        while (decade <= stop) {
+          var decadeX = calculateX(decade);
+
+          if (decade > start && decade < stop) {
+            ctx.strokeStyle = gridColor;
+            ctx.beginPath();
+            ctx.moveTo(decadeX, plot.y + 1);
+            ctx.lineTo(decadeX, plot.y + plot.h - 1);
+            ctx.stroke();
+          }
+
+          var frequencyLabel;
+
+          if (decade >= 1000000)
+            frequencyLabel = (decade / 1000000) + 'M';
+          else if (decade >= 1000)
+            frequencyLabel = (decade / 1000) + 'k';
+          else
+            frequencyLabel = decade.toString();
+
+          ctx.fillStyle = textColor;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+
+          ctx.fillText(
+            frequencyLabel,
+            decadeX,
+            plot.y + plot.h + 4
+          );
+
+          decade *= 10;
+        }
+      }
+      else {
+        // Linear sweeps use a vertical midpoint reference.
+        ctx.strokeStyle = gridColor;
+        ctx.beginPath();
+        ctx.moveTo(plot.x + plot.w / 2, plot.y + 1);
+        ctx.lineTo(plot.x + plot.w / 2, plot.y + plot.h - 1);
+        ctx.stroke();
+      }
+
+      // Draw valid points as one connected trace.
+      ctx.strokeStyle = highlightColor;
+      ctx.fillStyle = highlightColor;
+
+      var previousValid = false;
+      var previousX = 0;
+      var previousY = 0;
+
+      for (var i = 0; i < lcrSweepResults.length; i++) {
+        var point = lcrSweepResults[i];
+
+        if (!point)
+          continue;
+
+        var x = calculateX(point.frequency);
+
+        // Mark failed acquisitions and break the connected trace.
+        if (!point.valid) {
+          ctx.strokeStyle = '#ff0000';
+          ctx.beginPath();
+          ctx.moveTo(x, plot.y + plot.h - 5);
+          ctx.lineTo(x, plot.y + plot.h - 1);
+          ctx.stroke();
+
+          ctx.strokeStyle = highlightColor;
+          previousValid = false;
+          continue;
+        }
+
+        var value = getLCRSweepResultValue(point, plotType);
+        var position = (value - minimum) / (maximum - minimum);
+
+        position = Math.max(0, Math.min(1, position));
+
+        var y = plot.y + plot.h - 1 -
+          position * (plot.h - 1);
+
+        // Make every individual valid measurement visible.
+        ctx.fillRect(Math.round(x), Math.round(y), 1, 1);
+
+        if (previousValid) {
+          ctx.beginPath();
+          ctx.moveTo(previousX, previousY);
+          ctx.lineTo(x, y);
+          ctx.stroke();
+        }
+
+        previousX = x;
+        previousY = y;
+        previousValid = true;
+      }
+
+      // Draw the TFT-style vertical inspection cursor at the selected point.
+      if (message.sweepCursorActive &&
+          message.sweepCursorIndex < lcrSweepResults.length) {
+
+        var cursorPoint = lcrSweepResults[message.sweepCursorIndex];
+
+        if (cursorPoint) {
+          var cursorX = calculateX(cursorPoint.frequency);
+
+          ctx.strokeStyle = textColor;
+          ctx.beginPath();
+          ctx.moveTo(cursorX, plot.y + 1);
+          ctx.lineTo(cursorX, plot.y + plot.h - 1);
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
+  // Draw the Results footer.
+  ctx.strokeStyle = gridColor;
+  ctx.beginPath();
+  ctx.moveTo(0, footer.y);
+  ctx.lineTo(width, footer.y);
+  ctx.moveTo(width / 2, footer.y + 3);
+  ctx.lineTo(width / 2, footer.y + footer.h - 3);
+  ctx.stroke();
+
+  ctx.fillStyle = textColor;
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.fillText('Setup', 80, footer.y + footer.h / 2);
+  ctx.fillText('Sweep', 240, footer.y + footer.h / 2);
+
+  ctx.textAlign = 'left';
+}
+
+
 // Draw a modal LCR preset selector using the same geometry as the TFT.
-function drawLCRSelector(title, presets, selectedValue) {
+function drawLCRSelector(title, presets, selectedValue, isEnabled) {
   var canvas = document.getElementById('lcr-canvas');
   var ctx = canvas.getContext('2d');
 
@@ -906,42 +1675,31 @@ function drawLCRSelector(title, presets, selectedValue) {
       itemsInRow * buttonW +
       (itemsInRow - 1) * gapX;
 
-    var rowX =
-      selector.x +
-      Math.floor((selector.w - rowWidth) / 2);
+    var rowX = selector.x + Math.floor((selector.w - rowWidth) / 2);
 
-    var x =
-      rowX +
-      column * (buttonW + gapX);
+    var x = rowX + column * (buttonW + gapX);
 
-    var y =
-      centeredGridTop +
-      row * (buttonH + gapY);
+    var y = centeredGridTop + row * (buttonH + gapY);
 
-    var selected =
-      selectedValue === presets[i].value;
+    var selected = selectedValue === presets[i].value;
+    var enabled = !isEnabled || isEnabled(presets[i].value);
 
-    ctx.strokeStyle =
-      selected ? '#00ffff' : '#ffffff';
+    var color;
 
-    ctx.fillStyle =
-      selected ? '#00ffff' : '#ffffff';
+    if (!enabled)
+      color = '#555555';
+    else if (selected)
+      color = '#00ffff';
+    else
+      color = '#ffffff';
 
-    ctx.lineWidth =
-      selected ? 2 : 1;
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = selected && enabled ? 2 : 1;
 
-    ctx.strokeRect(
-      x,
-      y,
-      buttonW,
-      buttonH
-    );
+    ctx.strokeRect( x, y, buttonW, buttonH);
 
-    ctx.fillText(
-      presets[i].label,
-      x + buttonW / 2,
-      y + buttonH / 2
-    );
+    ctx.fillText( presets[i].label, x + buttonW / 2, y + buttonH / 2);
   }
 
   //
@@ -978,10 +1736,28 @@ function drawLCRFrequencySelector(message) {
     { label: '110 kHz', value: 110000 }
   ];
 
+  var selectedFrequency = message.measureFrequency;
+
+  if (message.frequencyTarget === 1)
+    selectedFrequency = message.sweepStartFrequency;
+  else if (message.frequencyTarget === 2)
+    selectedFrequency = message.sweepStopFrequency;
+
+  var isEnabled = function(frequency) {
+    if (message.frequencyTarget === 1)
+      return frequency < message.sweepStopFrequency;
+
+    if (message.frequencyTarget === 2)
+      return frequency > message.sweepStartFrequency;
+
+    return true;
+  };
+
   drawLCRSelector(
     'Select Frequency',
     presets,
-    message.measureFrequency
+    selectedFrequency,
+    isEnabled
   );
 }
 
@@ -998,6 +1774,74 @@ function drawLCRReferenceSelector(message) {
     'Select Reference',
     presets,
     message.reference
+  );
+}
+
+
+// Draw the Sweep mode selector.
+function drawLCRSweepModeSelector(message) {
+  var presets = [
+    { label: 'Linear', value: 0 },
+    { label: 'Log',    value: 1 }
+  ];
+
+  drawLCRSelector(
+    'Select Sweep Mode',
+    presets,
+    message.sweepMode
+  );
+}
+
+
+// Draw the linear Sweep-step selector.
+function drawLCRSweepStepSelector(message) {
+  var presets = [
+    { label: '100 Hz', value: 100 },
+    { label: '1 kHz',  value: 1000 },
+    { label: '10 kHz', value: 10000 }
+  ];
+
+  drawLCRSelector(
+    'Select Sweep Step',
+    presets,
+    message.sweepStepFrequency
+  );
+}
+
+
+// Draw the logarithmic Sweep-density selector.
+function drawLCRSweepDensitySelector(message) {
+  var presets = [
+    { label: '10', value: 10 },
+    { label: '20', value: 20 },
+    { label: '50', value: 50 }
+  ];
+
+  drawLCRSelector(
+    'Select Points/Decade',
+    presets,
+    message.sweepPointsPerDecade
+  );
+}
+
+
+// Draw the Sweep Results quantity selector.
+function drawLCRSweepPlotSelector(message) {
+  var presets = [
+    { label: '|Z|',   value: 0 },
+    { label: 'Phase', value: 1 },
+    { label: 'R',     value: 2 },
+    { label: 'X',     value: 3 },
+    { label: 'ESR',   value: 4 },
+    { label: 'Q',     value: 5 },
+    { label: 'C',     value: 6 },
+    { label: 'L',     value: 7 }
+  ];
+
+  drawLCRSelector(
+    'Select Plot',
+    presets,
+    message.sweepPlotType
   );
 }
 
@@ -1019,6 +1863,11 @@ function updateLCRMeasureView(message) {
 // Store the latest LCR state and render the corresponding virtual front panel.
 function updateLCRUIState(message) {
   lcrUIState = message;
+
+  // Receiving LCR UI state means the LCR front panel is active even when
+  // HOLD prevents a new measurement from being published.
+  document.getElementById('scope-ui').style.display = 'none';
+  document.getElementById('lcr-ui').style.display = 'block';
 
   console.log(
     'LCR front panel: tab=' + message.tab +
@@ -1042,6 +1891,74 @@ function updateLCRUIState(message) {
   }
 
   //
+  // Sweep-mode selector.
+  //
+  if (message.uiState === 3) {
+    drawLCRSweepModeSelector(message);
+    return;
+  }
+
+  //
+  // Linear Sweep-step selector.
+  //
+  if (message.uiState === 4) {
+    drawLCRSweepStepSelector(message);
+    return;
+  }
+
+  //
+  // Logarithmic Sweep-density selector.
+  //
+  if (message.uiState === 5) {
+    drawLCRSweepDensitySelector(message);
+    return;
+  }
+
+  //
+  // Sweep Results plot-quantity selector.
+  //
+  if (message.uiState === 6) {
+    drawLCRSweepPlotSelector(message);
+    return;
+  }
+
+  //
+  // Sweep Running display. Progress messages provide dynamic contents.
+  //
+  if (message.uiState === 0 &&
+      message.tab === 1 &&
+      message.sweepState === 1) {
+
+    if (lcrSweepProgress !== null)
+      drawLCRSweepRunningCanvas(lcrSweepProgress);
+
+    return;
+  }
+
+  //
+  // Sweep Results display.
+  // The full Results renderer will replace this temporary screen.
+  //
+  if (message.uiState === 0 &&
+      message.tab === 1 &&
+      message.sweepState === 2) {
+
+    drawLCRSweepResultsCanvas(message);
+    return;
+  }
+
+  //
+  // Normal Sweep Setup display.
+  //
+  if (message.uiState === 0 &&
+      message.tab === 1 &&
+      message.sweepState === 0) {
+
+    drawLCRSweepSetupCanvas(message);
+    return;
+  }
+
+  //
   // Normal Measure display. Other selector/tab renderers will be added as
   // their web implementations are completed.
   //
@@ -1050,6 +1967,7 @@ function updateLCRUIState(message) {
       lcrMeasurement !== null) {
 
     drawLCRMeasureCanvas(lcrMeasurement);
+    return;
   }
 }
 
@@ -1065,6 +1983,36 @@ ws.onmessage = function(evt) {
       if (message.type === 'lcr_measure') {
         console.log('LCR measurement:', message);
         updateLCRMeasureView(message);
+      }
+      else if (message.type === 'lcr_sweep') {
+        console.log('LCR Sweep progress:', message);
+
+        // Retain progress for redraws and update the active Running screen.
+        lcrSweepProgress = message;
+
+        if (lcrUIState !== null &&
+            lcrUIState.tab === 1 &&
+            lcrUIState.sweepState === 1) {
+
+          drawLCRSweepRunningCanvas(message);
+        }
+      }
+      else if (message.type === 'lcr_result') {
+        // Start a new Results array when the first Sweep point arrives.
+        if (message.index === 0)
+          lcrSweepResults = new Array(message.pointCount);
+
+        // Store this result at its original Sweep index.
+        lcrSweepResults[message.index] = message;
+
+        // Redraw Results when the complete Sweep dataset has arrived.
+        if (message.index === message.pointCount - 1 &&
+            lcrUIState !== null &&
+            lcrUIState.tab === 1 &&
+            lcrUIState.sweepState === 2) {
+
+          drawLCRSweepResultsCanvas(lcrUIState);
+        }
       }
       else if (message.type === 'lcr_ui') {
         console.log('LCR UI state:', message);
@@ -1622,6 +2570,21 @@ void setup1() {
   server.onNotFound(handleNotFound);
   server.begin();
   webSocket.begin();
+
+  // Handle browser requests for an immediate copy of the current LCR state.
+  webSocket.onEvent(
+    [](uint8_t clientNum, WStype_t type, uint8_t *payload, size_t length) {
+      if (type != WStype_TEXT)
+        return;
+
+      // Force the existing web task to resend its current LCR snapshots.
+      if (length == 4 && memcmp(payload, "sync", 4) == 0) {
+        lastLCRWebSequence = 0;
+        lastLCRWebUISequence = 0;
+        lastLCRWebSweepSequence = 0;
+      }
+    }
+  );
 }
 
 // Check for a newly published LCR measurement and copy it into local storage.
@@ -1705,11 +2668,87 @@ bool readLCRWebUIState(LCRWebUIState &snapshot)
   snapshot.frequencyTarget = lcrWebUIState.frequencyTarget;
   snapshot.measureFrequency = lcrWebUIState.measureFrequency;
   snapshot.referenceResistance = lcrWebUIState.referenceResistance;
+  snapshot.sweepStartFrequency = lcrWebUIState.sweepStartFrequency;
+  snapshot.sweepStopFrequency = lcrWebUIState.sweepStopFrequency;
+  snapshot.sweepMode = lcrWebUIState.sweepMode;
+  snapshot.sweepStepFrequency = lcrWebUIState.sweepStepFrequency;
+  snapshot.sweepPointsPerDecade = lcrWebUIState.sweepPointsPerDecade;
+  snapshot.sweepMeasurementCount = lcrWebUIState.sweepMeasurementCount;
+
+  // Copy the active Sweep Results quantity selected by Core 0.
+  snapshot.sweepPlotType = lcrWebUIState.sweepPlotType;
+
+  // Copy the current Sweep Results inspection cursor.
+  snapshot.sweepCursorActive = lcrWebUIState.sweepCursorActive;
+  snapshot.sweepCursorIndex = lcrWebUIState.sweepCursorIndex;
 
   if (lcrWebUIState.sequence != sequence)
     return false;
 
   lastLCRWebUISequence = sequence;
+
+  return true;
+}
+
+
+// Copy newly published Sweep progress from Core 0.
+// A second sequence check rejects a snapshot changed during the copy.
+bool readLCRWebSweepProgress(LCRWebSweepProgress &snapshot)
+{
+  uint32_t sequence = lcrWebSweepProgress.sequence;
+
+  if (sequence == lastLCRWebSweepSequence)
+    return false;
+
+  snapshot.sequence = sequence;
+  snapshot.currentPoint = lcrWebSweepProgress.currentPoint;
+  snapshot.totalPoints = lcrWebSweepProgress.totalPoints;
+  snapshot.currentFrequency = lcrWebSweepProgress.currentFrequency;
+  snapshot.elapsedMs = lcrWebSweepProgress.elapsedMs;
+
+  if (lcrWebSweepProgress.sequence != sequence)
+    return false;
+
+  lastLCRWebSweepSequence = sequence;
+
+  return true;
+}
+
+
+// Copy one newly published Sweep result point from Core 0.
+// The pending flag is cleared only after the complete point is copied.
+bool readLCRWebSweepResult(LCRWebSweepResult &snapshot)
+{
+  if (!lcrWebSweepResult.pending)
+    return false;
+
+  uint32_t sequence = lcrWebSweepResult.sequence;
+
+  if (sequence == lastLCRWebResultSequence)
+    return false;
+
+  snapshot.sequence = sequence;
+  snapshot.index = lcrWebSweepResult.index;
+  snapshot.pointCount = lcrWebSweepResult.pointCount;
+  snapshot.frequency = lcrWebSweepResult.frequency;
+  snapshot.valid = lcrWebSweepResult.valid;
+  snapshot.impedance = lcrWebSweepResult.impedance;
+  snapshot.phaseDeg = lcrWebSweepResult.phaseDeg;
+  snapshot.resistance = lcrWebSweepResult.resistance;
+  snapshot.reactance = lcrWebSweepResult.reactance;
+  snapshot.capacitance = lcrWebSweepResult.capacitance;
+  snapshot.inductance = lcrWebSweepResult.inductance;
+  snapshot.esr = lcrWebSweepResult.esr;
+  snapshot.q = lcrWebSweepResult.q;
+
+  // Reject the copy if Core 0 changed the snapshot while it was read.
+  if (lcrWebSweepResult.sequence != sequence)
+    return false;
+
+  lastLCRWebResultSequence = sequence;
+
+  // Allow Core 0 to publish the next retained Sweep point.
+  lcrWebSweepResult.pending = false;
 
   return true;
 }
@@ -1782,7 +2821,7 @@ void sendLCRWebUIState(const LCRWebUIState &state)
 {
   String message;
 
-  message.reserve(192);
+  message.reserve(384);
 
   message += "{\"type\":\"lcr_ui\"";
 
@@ -1810,6 +2849,35 @@ void sendLCRWebUIState(const LCRWebUIState &state)
   message += ",\"reference\":";
   message += String(state.referenceResistance, 3);
 
+  message += ",\"sweepStartFrequency\":";
+  message += state.sweepStartFrequency;
+
+  message += ",\"sweepStopFrequency\":";
+  message += state.sweepStopFrequency;
+
+  message += ",\"sweepMode\":";
+  message += state.sweepMode;
+
+  message += ",\"sweepStepFrequency\":";
+  message += state.sweepStepFrequency;
+
+  message += ",\"sweepPointsPerDecade\":";
+  message += state.sweepPointsPerDecade;
+
+  message += ",\"sweepMeasurementCount\":";
+  message += state.sweepMeasurementCount;
+
+  // Send the active Results quantity so the browser matches the TFT plot.
+  message += ",\"sweepPlotType\":";
+  message += state.sweepPlotType;
+
+  // Send the Results cursor state so the browser matches the TFT.
+  message += ",\"sweepCursorActive\":";
+  message += state.sweepCursorActive ? "true" : "false";
+
+  message += ",\"sweepCursorIndex\":";
+  message += state.sweepCursorIndex;
+
   message += "}";
 
 #if LCR_CAPTURE_DEBUG
@@ -1819,6 +2887,101 @@ void sendLCRWebUIState(const LCRWebUIState &state)
 
   webSocket.broadcastTXT(message);
 }
+
+
+// Broadcast active LCR Sweep progress to web clients.
+void sendLCRWebSweepProgress(const LCRWebSweepProgress &progress)
+{
+  String message;
+
+  message.reserve(160);
+
+  message += "{\"type\":\"lcr_sweep\"";
+
+  message += ",\"sequence\":";
+  message += progress.sequence;
+
+  message += ",\"currentPoint\":";
+  message += progress.currentPoint;
+
+  message += ",\"totalPoints\":";
+  message += progress.totalPoints;
+
+  message += ",\"currentFrequency\":";
+  message += progress.currentFrequency;
+
+  message += ",\"elapsedMs\":";
+  message += progress.elapsedMs;
+
+  message += "}";
+
+#if LCR_CAPTURE_DEBUG
+  Serial.print("WEB TX LCR SWEEP: ");
+  Serial.println(message);
+#endif
+
+  webSocket.broadcastTXT(message);
+}
+
+
+// Broadcast one retained Sweep result point to connected web clients.
+void sendLCRWebSweepResult(const LCRWebSweepResult &result)
+{
+  String message;
+
+  message.reserve(384);
+
+  message += "{\"type\":\"lcr_result\"";
+
+  message += ",\"sequence\":";
+  message += result.sequence;
+
+  message += ",\"index\":";
+  message += result.index;
+
+  message += ",\"pointCount\":";
+  message += result.pointCount;
+
+  message += ",\"frequency\":";
+  message += result.frequency;
+
+  message += ",\"valid\":";
+  message += result.valid ? "true" : "false";
+
+  message += ",\"impedance\":";
+  message += String(result.impedance, 6);
+
+  message += ",\"phase\":";
+  message += String(result.phaseDeg, 6);
+
+  message += ",\"resistance\":";
+  message += String(result.resistance, 6);
+
+  message += ",\"reactance\":";
+  message += String(result.reactance, 6);
+
+  message += ",\"capacitance\":";
+  message += String(result.capacitance, 10);
+
+  message += ",\"inductance\":";
+  message += String(result.inductance, 10);
+
+  message += ",\"esr\":";
+  message += String(result.esr, 6);
+
+  message += ",\"q\":";
+  message += String(result.q, 6);
+
+  message += "}";
+
+#if LCR_CAPTURE_DEBUG
+  Serial.print("WEB TX LCR RESULT: ");
+  Serial.println(message);
+#endif
+
+  webSocket.broadcastTXT(message);
+}
+
 
 void loop1() {
   uint32_t dest;
@@ -1881,6 +3044,17 @@ void loop1() {
 
   if (readLCRWebUIState(lcrUI))
     sendLCRWebUIState(lcrUI);
+
+  LCRWebSweepProgress lcrSweepProgress;
+
+  if (readLCRWebSweepProgress(lcrSweepProgress))
+    sendLCRWebSweepProgress(lcrSweepProgress);
+
+  // Forward one newly published Sweep result point to web clients.
+  LCRWebSweepResult lcrSweepResult;
+
+  if (readLCRWebSweepResult(lcrSweepResult))
+    sendLCRWebSweepResult(lcrSweepResult);
 
   server.handleClient();
   MDNS.update();
