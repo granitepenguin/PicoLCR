@@ -724,8 +724,10 @@ function drawLCRMeasureCanvas(message) {
   ctx.fillText('FREQ:', 16, contextRow1Y);
   ctx.fillText( formatLCRFrequency(message.frequency), 70, contextRow1Y);
 
-  ctx.fillText('REF:', 176, contextRow1Y);
-  ctx.fillText( formatEngineering(message.reference, 'Ohm'), 224, contextRow1Y);
+  // Show the active TIA feedback resistance used for the Kelvin measurement.
+  ctx.fillText('Rf:', 176, contextRow1Y);
+  ctx.fillText(formatEngineering(message.feedbackResistance, 'Ohm'),
+               224, contextRow1Y);
 
   ctx.fillText('LEVEL:', 16, contextRow2Y);
   ctx.fillText('AVG:', 176, contextRow2Y);
@@ -736,7 +738,7 @@ function drawLCRMeasureCanvas(message) {
   //
   var softKeys = [
     'Freq',
-    'Ref',
+    'Range',
     message.state === 0 ? 'LIVE' : 'HOLD',
     'More'
   ];
@@ -1376,17 +1378,37 @@ function drawLCRSweepResultsCanvas(message) {
         return plot.x + position * (plot.w - 1);
       };
 
-      // Draw the logarithmic decade grid and labels.
+      // Draw logarithmic major and minor grid divisions to match the TFT.
       if (message.sweepMode === 1) {
+        const minorGridColor = '#282828';
+
+        // Begin with the power of ten at or below the Sweep start.
         var decade = 1;
 
-        while (decade < start)
+        while (decade <= start / 10)
           decade *= 10;
 
         while (decade <= stop) {
-          var decadeX = calculateX(decade);
+          // Draw minor divisions at 2 through 9 times the current decade.
+          for (var multiplier = 2; multiplier <= 9; multiplier++) {
+            var frequency = decade * multiplier;
 
+            if (frequency <= start || frequency >= stop)
+              continue;
+
+            var minorX = calculateX(frequency);
+
+            ctx.strokeStyle = minorGridColor;
+            ctx.beginPath();
+            ctx.moveTo(minorX, plot.y + 1);
+            ctx.lineTo(minorX, plot.y + plot.h - 1);
+            ctx.stroke();
+          }
+
+          // Draw the major decade line.
           if (decade > start && decade < stop) {
+            var decadeX = calculateX(decade);
+
             ctx.strokeStyle = gridColor;
             ctx.beginPath();
             ctx.moveTo(decadeX, plot.y + 1);
@@ -1394,24 +1416,29 @@ function drawLCRSweepResultsCanvas(message) {
             ctx.stroke();
           }
 
-          var frequencyLabel;
+          // Label every major decade contained within the Sweep range.
+          if (decade >= start && decade <= stop) {
+            var frequencyLabel;
 
-          if (decade >= 1000000)
-            frequencyLabel = (decade / 1000000) + 'M';
-          else if (decade >= 1000)
-            frequencyLabel = (decade / 1000) + 'k';
-          else
-            frequencyLabel = decade.toString();
+            if (decade >= 1000000)
+              frequencyLabel = (decade / 1000000) + 'M';
+            else if (decade >= 1000)
+              frequencyLabel = (decade / 1000) + 'k';
+            else
+              frequencyLabel = decade.toString();
 
-          ctx.fillStyle = textColor;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'top';
+            var labelX = calculateX(decade);
 
-          ctx.fillText(
-            frequencyLabel,
-            decadeX,
-            plot.y + plot.h + 4
-          );
+            ctx.fillStyle = textColor;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+
+            ctx.fillText(
+              frequencyLabel,
+              labelX,
+              plot.y + plot.h + 4
+            );
+          }
 
           decade *= 10;
         }
@@ -1762,18 +1789,19 @@ function drawLCRFrequencySelector(message) {
 }
 
 
-// Draw the Measure reference-resistor selector.
-function drawLCRReferenceSelector(message) {
+// Draw the TIA feedback-range selector.
+// These values mirror the feedback ranges currently validated on the
+// physical instrument during Kelvin hardware bring-up.
+function drawLCRFeedbackSelector(message) {
   var presets = [
-    { label: '100 Ohm',  value: 100 },
-    { label: '1 kOhm',   value: 1000 },
-    { label: '10 kOhm',  value: 10000 }
+    { label: '100 Ohm', value: 100 },
+    { label: '1 kOhm', value: 1000 }
   ];
 
   drawLCRSelector(
-    'Select Reference',
+    'Select Range',
     presets,
-    message.reference
+    message.feedbackResistance
   );
 }
 
@@ -1883,10 +1911,10 @@ function updateLCRUIState(message) {
   }
 
   //
-  // Reference-resistor selector.
+  // TIA feedback-range selector.
   //
   if (message.uiState === 2) {
-    drawLCRReferenceSelector(message);
+    drawLCRFeedbackSelector(message);
     return;
   }
 
@@ -2606,8 +2634,9 @@ bool readLCRWebMeasurement(LCRWebMeasurement &snapshot)
   snapshot.frequency =
     lcrWebMeasurement.frequency;
 
-  snapshot.referenceResistance =
-    lcrWebMeasurement.referenceResistance;
+  // Copy the active TIA feedback resistance into the local snapshot.
+  snapshot.feedbackResistance =
+    lcrWebMeasurement.feedbackResistance;
 
   snapshot.impedance =
     lcrWebMeasurement.impedance;
@@ -2667,7 +2696,7 @@ bool readLCRWebUIState(LCRWebUIState &snapshot)
   snapshot.sweepState = lcrWebUIState.sweepState;
   snapshot.frequencyTarget = lcrWebUIState.frequencyTarget;
   snapshot.measureFrequency = lcrWebUIState.measureFrequency;
-  snapshot.referenceResistance = lcrWebUIState.referenceResistance;
+  snapshot.feedbackResistance = lcrWebUIState.feedbackResistance;
   snapshot.sweepStartFrequency = lcrWebUIState.sweepStartFrequency;
   snapshot.sweepStopFrequency = lcrWebUIState.sweepStopFrequency;
   snapshot.sweepMode = lcrWebUIState.sweepMode;
@@ -2772,8 +2801,9 @@ void sendLCRWebMeasurement(const LCRWebMeasurement &measurement)
   message += ",\"frequency\":";
   message += measurement.frequency;
 
-  message += ",\"reference\":";
-  message += String(measurement.referenceResistance, 3);
+  // Send the TIA feedback resistance used for this Kelvin measurement.
+  message += ",\"feedbackResistance\":";
+  message += String(measurement.feedbackResistance, 3);
 
   message += ",\"impedance\":";
   message += String(measurement.impedance, 6);
@@ -2846,8 +2876,9 @@ void sendLCRWebUIState(const LCRWebUIState &state)
   message += ",\"measureFrequency\":";
   message += state.measureFrequency;
 
-  message += ",\"reference\":";
-  message += String(state.referenceResistance, 3);
+  // Send the TIA feedback resistance represented by the Range control.
+  message += ",\"feedbackResistance\":";
+  message += String(state.feedbackResistance, 3);
 
   message += ",\"sweepStartFrequency\":";
   message += state.sweepStartFrequency;

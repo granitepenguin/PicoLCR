@@ -124,7 +124,7 @@ extern uint16_t lcrSweepPointCount;
 struct MeasurementSettings
 {
   uint32_t frequency;          // Test frequency (Hz)
-  float referenceResistance;   // Selected reference resistor (Ohms)
+  float feedbackResistance;    // Active TIA feedback resistance Rf (Ohms)
 };
 
 // Stores the active measurement configuration for the LCR analyzer.
@@ -203,7 +203,9 @@ struct LCRWebMeasurement
   uint32_t sequence;
 
   uint32_t frequency;
-  float referenceResistance;
+
+  // TIA feedback resistance used to calculate this Kelvin measurement.
+  float feedbackResistance;
 
   float impedance;
   float phaseDeg;
@@ -298,7 +300,9 @@ struct LCRWebUIState
   uint8_t frequencyTarget;
 
   uint32_t measureFrequency;
-  float referenceResistance;
+
+  // Active TIA feedback resistance represented by the Measure Range control.
+  float feedbackResistance;
 
   // Sweep Setup configuration.
   uint32_t sweepStartFrequency;
@@ -451,7 +455,8 @@ struct LCRLayout
   // Softkey screen info
   LCRRect selector;
   LCRRect frequencyPresets[LCR_MAX_SELECTOR_BUTTONS];
-  LCRRect referencePresets[LCR_MAX_SELECTOR_BUTTONS];
+  // Touch regions for the selectable TIA feedback ranges.
+  LCRRect feedbackPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect sweepStepPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect sweepDensityPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect sweepPlotPresets[LCR_MAX_SELECTOR_BUTTONS];
