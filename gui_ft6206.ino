@@ -805,13 +805,22 @@ void CheckSW() {
   byte sw;
 
   ms = millis();
-  if ((ms - Millis)<200)
-    return;
-  Millis = ms;
 
 #ifndef NOLCD
-  CheckTouch();
+  // Poll the capacitive touchscreen independently from the slower
+  // legacy physical-button scan so short taps are not missed.
+  static unsigned long touchMillis = 0;
+
+  if ((ms - touchMillis) >= 20) {
+    touchMillis = ms;
+    CheckTouch();
+  }
 #endif
+
+  if ((ms - Millis) < 200)
+    return;
+
+  Millis = ms;
   if (wrate != 0) {
     updown_rate(wrate);
     wrate = 0;
