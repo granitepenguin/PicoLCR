@@ -36,8 +36,17 @@ public:
     writeReg(FREQ0_W | msb14);
   }
 
+  // Power down the AD9833 internal clock and DAC so the LCR excitation
+  // signal does not interfere with other instrument modes such as Scope.
   void stop() {
     writeReg(CTRL_REG | CTRL_B28 | CTRL_SLEEP1 | CTRL_SLEEP12);
+  }
+
+  // Resume normal AD9833 operation without changing the programmed
+  // frequency or phase registers. Clearing the SLEEP bits restores the
+  // previously configured sine-wave output.
+  void start() {
+    writeReg(CTRL_REG | CTRL_B28);
   }
 
 private:

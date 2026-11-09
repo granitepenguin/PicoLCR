@@ -19,32 +19,42 @@
 #include <Arduino.h>
 
 
+// Describes the validity of a completed LCR measurement.
+enum LCRMeasurementStatus
+{
+  LCR_MEASUREMENT_VALID,
+  LCR_MEASUREMENT_OL,
+  LCR_MEASUREMENT_ERROR
+};
+
+
 // Results from a single impedance measurement.
 //
 // This structure represents one measurement at a single frequency.
-// It is used by both the single-measurement mode and the future
-// sweep mode.
+// It is used by both single-frequency Measure operation and the
+// frequency Sweep measurement backend.
 struct MeasurementPoint
 {
-  uint32_t frequency;      // Measurement frequency (Hz)
+  uint32_t frequency;           // Measurement frequency (Hz)
+  LCRMeasurementStatus status;  // valid/OL/error
 
-  float vrmsRef;           // RMS voltage across reference resistor
-  float vrmsDut;           // RMS voltage across DUT
+  float vrmsRef;                // RMS voltage across reference resistor
+  float vrmsDut;                // RMS voltage across DUT
 
-  float phaseDeg;          // DUT phase angle (degrees)
+  float phaseDeg;               // DUT phase angle (degrees)
 
-  float impedance;         // |Z| Magnitude (Ohms)
+  float impedance;              // |Z| Magnitude (Ohms)
 
-  float resistance;        // Real component (Ohms)
-  float reactance;         // Imaginary component (Ohms)
+  float resistance;             // Real component (Ohms)
+  float reactance;              // Imaginary component (Ohms)
 
-  float capacitance;       // Equivalent capacitance (Farads)
-  float inductance;        // Equivalent inductance (Henries)
+  float capacitance;            // Equivalent capacitance (Farads)
+  float inductance;             // Equivalent inductance (Henries)
 
-  float esr;               // Equivalent Series Resistance (Ohms)
+  float esr;                    // Equivalent Series Resistance (Ohms)
 
-  float q;                 // Quality factor
-  float dissipation;       // Dissipation factor
+  float q;                      // Quality factor
+  float dissipation;            // Dissipation factor
 };
 
 
@@ -124,7 +134,8 @@ extern uint16_t lcrSweepPointCount;
 struct MeasurementSettings
 {
   uint32_t frequency;          // Test frequency (Hz)
-  float referenceResistance;   // Selected reference resistor (Ohms)
+  float feedbackResistance;    // Active TIA feedback resistance Rf (Ohms)
+  bool autoRange;              // Automatically select the TIA feedback range
 };
 
 // Stores the active measurement configuration for the LCR analyzer.
@@ -203,7 +214,12 @@ struct LCRWebMeasurement
   uint32_t sequence;
 
   uint32_t frequency;
-  float referenceResistance;
+
+  // Measurement result status: VALID, OL, or ERROR.
+  uint8_t status;
+
+  // TIA feedback resistance used to calculate this Kelvin measurement.
+  float feedbackResistance;
 
   float impedance;
   float phaseDeg;
@@ -298,7 +314,12 @@ struct LCRWebUIState
   uint8_t frequencyTarget;
 
   uint32_t measureFrequency;
-  float referenceResistance;
+
+  // Active TIA feedback resistance represented by the Range controls.
+  float feedbackResistance;
+
+  // True when the analyzer automatically selects the TIA feedback range.
+  bool autoRange;
 
   // Sweep Setup configuration.
   uint32_t sweepStartFrequency;
@@ -389,6 +410,15 @@ enum LCRFrequencyTarget
 
 extern LCRFrequencyTarget lcrFrequencyTarget;
 
+// Identifies which screen opened the shared feedback-range selector.
+enum LCRRangeTarget
+{
+  LCR_RANGE_MEASURE,
+  LCR_RANGE_SWEEP
+};
+
+extern LCRRangeTarget lcrRangeTarget;
+
 // Defines a rectangular region of the LCR user interface
 // The same geometry is used for both drawing and touch detection
 struct LCRRect
@@ -424,7 +454,7 @@ struct LCRLayout
   LCRRect context;
 
   // Sweep setup tab
-  LCRRect sweepSetupRows[5];
+  LCRRect sweepSetupRows[6];
   LCRRect sweepModePresets[2];
   LCRRect sweepButton;
   LCRRect sweepProgress;
@@ -436,12 +466,15 @@ struct LCRLayout
 
   // Sweep Results control/status strip.
   // This provides a large touch target for selecting the plotted quantity
-  // while keeping the graph itself available for future cursor interaction.
+  // while keeping the graph itself available for cursor interaction.
   LCRRect sweepPlotControl;
 
   // This rectangle contains the graph itself, excluding axis labels and footer.
   LCRRect sweepPlot;
 
+  // Settings tab
+  LCRRect settingsRows[4];
+  LCRRect rangeModeButtons[2];
 
   LCRRect footer;
 
@@ -451,7 +484,8 @@ struct LCRLayout
   // Softkey screen info
   LCRRect selector;
   LCRRect frequencyPresets[LCR_MAX_SELECTOR_BUTTONS];
-  LCRRect referencePresets[LCR_MAX_SELECTOR_BUTTONS];
+  // Touch regions for the selectable TIA feedback ranges.
+  LCRRect feedbackPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect sweepStepPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect sweepDensityPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect sweepPlotPresets[LCR_MAX_SELECTOR_BUTTONS];
@@ -585,7 +619,10 @@ void printLCRCaptureRate(const LCRCapturePlan &plan);
 // Process the latest raw capture through Goertzel and ADC channel de-skew.
 void printLCRGoertzelTest(const LCRCapturePlan &plan);
 
-// Temporary match testing
+// Run the ADC channel-match diagnostic across the LCR frequency range.
+void runLCRChannelMatchTest();
+
+// Compare ADC0 and ADC1 when both receive the same physical signal.
 void printLCRChannelMatchTest(uint32_t frequency);
 
 LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency);

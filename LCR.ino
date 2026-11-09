@@ -61,6 +61,11 @@ static const uint8_t AD9833_FSYNC_PIN = 3;  // GP3, physical pin 5
 static const uint8_t AD9833_SCK_PIN   = 6;  // GP6, physical pin 9
 static const uint8_t AD9833_DATA_PIN  = 7;  // GP7, physical pin 10
 
+// MAX4582 TIA feedback-range control.
+// These assignments match the PicoLCR production schematic.
+static const uint8_t LCR_RANGE_SEL_A_PIN = 8;  // GP8, physical pin 11
+static const uint8_t LCR_RANGE_SEL_B_PIN = 9;  // GP9, physical pin 12
+
 // Raw dual-channel ADC capture used while integrating the LCR hardware.
 // Samples alternate ADC0/ADC1 in one DMA-filled buffer.
 static const uint8_t LCR_ADC_TOTAL_PIN = 26;  // GP26, physical pin 31
@@ -116,9 +121,6 @@ float lcrAdcMaxAggregateRate = 0.0f;
 // Tracks the frequency currently programmed into the physical generator.
 // Repeated measurements at the same frequency do not need to reprogram the DDS.
 uint32_t lcrGeneratorFrequency = 0;
-
-// Sense resistor currently installed in the LCR measurement network.
-static const float LCR_R_SENSE_OHMS = 2160.0f;
 
 // screen locations for various output displays
 constexpr int LABEL_X = 20;
@@ -215,16 +217,28 @@ uint16_t lcrSweepCursorIndex = 0;
 // Measure frequency is the default target when entering the analyzer.
 LCRFrequencyTarget lcrFrequencyTarget = LCR_FREQ_MEASURE;
 
+// Measure is the default origin for the shared feedback-range selector.
+LCRRangeTarget lcrRangeTarget = LCR_RANGE_MEASURE;
+
 // Stores the current LCR user-interface state.
 // The analyzer normally displays the active tab unless a selector is open.
 LCRUIState lcrUIState = LCR_UI_NORMAL;
+
+// Autorange thresholds for normalized I_MEAS peak amplitude.
+//
+// Measurements below the lower threshold should move toward a larger TIA
+// feedback resistance. Measurements above the upper threshold should move
+// toward a smaller feedback resistance.
+constexpr float LCR_AUTORANGE_LOW = 40.0f;
+constexpr float LCR_AUTORANGE_HIGH = 350.0f;
 
 // Stores the active measurement configuration used by the LCR analyzer.
 // UI controls modify these values and the measurement backend reads them
 // whenever a new impedance measurement is requested.
 MeasurementSettings lcrSettings = {
-  1000,             // Frequency: 1 kHz
-  LCR_R_SENSE_OHMS  // Reference resistor: 1 kOhm
+  1000,      // Frequency: 1 kHz
+  1023.71f,  // Calibrated effective Rf for the 1 kOhm range
+  true       // Automatic TIA range selection by default
 };
 
 // Stores the most recently acquired LCR measurement.
@@ -245,6 +259,10 @@ SweepSettings lcrSweepSettings = {
 // Stores the results of the most recently completed or active sweep.
 // The point count identifies how many entries currently contain valid data.
 SweepPoint lcrSweepPoints[LCR_MAX_SWEEP_POINTS];
+
+// Prevent the Scope touch used to enter LCR mode from also activating
+// a control on the newly displayed LCR screen.
+bool lcrWaitForTouchRelease = false;
 
 uint16_t lcrSweepPointCount = 0;
 
@@ -277,41 +295,32 @@ volatile LCRWebSweepResult lcrWebSweepResult = {};
 void publishLCRWebMeasurement(const MeasurementPoint &measurement,
                               const MeasurementSettings &settings)
 {
-  lcrWebMeasurement.frequency =
-    measurement.frequency;
+  lcrWebMeasurement.frequency = measurement.frequency;
 
-  lcrWebMeasurement.referenceResistance =
-    settings.referenceResistance;
+  lcrWebMeasurement.status = static_cast<uint8_t>(measurement.status);
 
-  lcrWebMeasurement.impedance =
-    measurement.impedance;
+  // Publish the active TIA feedback resistance used for this measurement.
+  lcrWebMeasurement.feedbackResistance = settings.feedbackResistance;
 
-  lcrWebMeasurement.phaseDeg =
-    measurement.phaseDeg;
+  lcrWebMeasurement.impedance = measurement.impedance;
 
-  lcrWebMeasurement.resistance =
-    measurement.resistance;
+  lcrWebMeasurement.phaseDeg = measurement.phaseDeg;
 
-  lcrWebMeasurement.reactance =
-    measurement.reactance;
+  lcrWebMeasurement.resistance = measurement.resistance;
 
-  lcrWebMeasurement.capacitance =
-    measurement.capacitance;
+  lcrWebMeasurement.reactance = measurement.reactance;
 
-  lcrWebMeasurement.inductance =
-    measurement.inductance;
+  lcrWebMeasurement.capacitance = measurement.capacitance;
 
-  lcrWebMeasurement.esr =
-    measurement.esr;
+  lcrWebMeasurement.inductance = measurement.inductance;
 
-  lcrWebMeasurement.q =
-    measurement.q;
+  lcrWebMeasurement.esr = measurement.esr;
 
-  lcrWebMeasurement.dissipation =
-    measurement.dissipation;
+  lcrWebMeasurement.q = measurement.q;
 
-  lcrWebMeasurement.measureState =
-    static_cast<uint8_t>(lcrMeasureState);
+  lcrWebMeasurement.dissipation = measurement.dissipation;
+
+  lcrWebMeasurement.measureState = static_cast<uint8_t>(lcrMeasureState);
 
   //
   // Publish the completed snapshot last.
@@ -330,7 +339,12 @@ void publishLCRWebUIState()
   lcrWebUIState.frequencyTarget = static_cast<uint8_t>(lcrFrequencyTarget);
 
   lcrWebUIState.measureFrequency = lcrSettings.frequency;
-  lcrWebUIState.referenceResistance = lcrSettings.referenceResistance;
+
+  // Publish the active TIA feedback resistance for the browser UI.
+  lcrWebUIState.feedbackResistance = lcrSettings.feedbackResistance;
+
+  // Publish whether Range is controlled automatically or manually.
+  lcrWebUIState.autoRange = lcrSettings.autoRange;
 
   lcrWebUIState.sweepStartFrequency = lcrSweepSettings.startFrequency;
   lcrWebUIState.sweepStopFrequency = lcrSweepSettings.stopFrequency;
@@ -467,25 +481,29 @@ constexpr uint8_t FREQUENCY_PRESET_COUNT =
   sizeof(frequencyPresets) / sizeof(frequencyPresets[0]);
 
 
-// Defines one selectable reference-resistor preset.
-// The label is used by the UI and the value is stored internally in Ohms.
-struct ReferencePreset
+// Defines one selectable TIA feedback-resistance preset.
+// The value represents the physical Rf installed or selected in the
+// current-measurement feedback path.
+struct FeedbackPreset
 {
   const char *label;
-  float value;
+  float nominalResistance;
+  float effectiveResistance;
+  uint8_t muxChannel;
 };
 
-// Defines all reference-resistor presets available from the Measure screen.
-// Adding or removing an entry automatically changes the selector button
-// count, layout, drawing, and touch handling.
-const ReferencePreset referencePresets[] = {
-  { "100 Ohm", 100.0f },
-  { "1 kOhm", 1000.0f },
-  { "10 kOhm", 10000.0f }
+// Defines the selectable TIA feedback ranges used by the Kelvin
+// measurement frontend. Effective resistance values include calibration
+// of the complete selected feedback path.
+const FeedbackPreset feedbackPresets[] = {
+  { "100 Ohm", 100.0f,    139.17f,  0 },
+  { "1 kOhm",  1000.0f,   1023.71f, 1 },
+  { "10 kOhm", 10000.0f,  10198.7f, 2 },
+  { "100 kOhm", 100000.0f, 98298.0f, 3 }
 };
 
-constexpr uint8_t REFERENCE_PRESET_COUNT =
-  sizeof(referencePresets) / sizeof(referencePresets[0]);
+constexpr uint8_t FEEDBACK_PRESET_COUNT =
+  sizeof(feedbackPresets) / sizeof(feedbackPresets[0]);
 
 
 // Defines one selectable linear Sweep step.
@@ -559,7 +577,7 @@ SweepPoint makeSweepPoint(const MeasurementPoint &measurement)
   SweepPoint point;
 
   point.frequency = measurement.frequency;
-  point.valid = true;
+  point.valid = measurement.status == LCR_MEASUREMENT_VALID;
   point.impedance = measurement.impedance;
   point.phaseDeg = measurement.phaseDeg;
   point.resistance = measurement.resistance;
@@ -1458,8 +1476,8 @@ void drawLCRSweepPlot()
 
 
 // Acquire and store one measurement at the requested Sweep frequency.
-// The normal measurement backend is used so this works with the simulation
-// backend now and the hardware backend later without changing Sweep logic.
+// The common measurement interface keeps Sweep acquisition independent
+// of whether the simulation or physical hardware backend is selected.
 bool acquireLCRSweepPoint(uint32_t frequency)
 {
   if (lcrSweepPointCount >= LCR_MAX_SWEEP_POINTS)
@@ -1716,6 +1734,7 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings);
 MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings)
 {
   MeasurementPoint m;
+  m.status = LCR_MEASUREMENT_VALID;
   static float phase = -45.0f;
   m.frequency = settings.frequency;
   m.impedance = 1000.0f + 200.0f * sin(millis() / 800.0f);
@@ -1742,6 +1761,7 @@ MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings)
 MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
 {
   MeasurementPoint measurement = {};
+  measurement.status = LCR_MEASUREMENT_ERROR;
 
   setLCRGeneratorFrequency(settings.frequency);
 
@@ -1749,13 +1769,77 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
   delay(5);
 
   LCRPhasor impedance;
+  float iAmplitude = 0.0f;
+  bool iSaturated = false;
 
-  if (!measureLCRHardwareImpedance(
-        settings.frequency,
-        settings.referenceResistance,
-        impedance)) {
-    return measurement;
+  // Use a local copy so autoranging can change the physical feedback range
+  // without modifying the caller's const measurement settings.
+  float feedbackResistance = settings.feedbackResistance;
+
+  // Track the previous autorange move so a boundary condition cannot
+  // oscillate repeatedly between two adjacent feedback ranges.
+  int8_t previousPreset = -1;
+
+  for (uint8_t attempt = 0; attempt < FEEDBACK_PRESET_COUNT; attempt++) {
+
+    if (!measureLCRHardwareImpedance( settings.frequency,
+                                      feedbackResistance,
+                                      impedance,
+                                      iAmplitude,
+                                      iSaturated)) {
+      return measurement;
+    }
+
+    // Manual range mode uses the first capture without changing ranges.
+    if (!settings.autoRange)
+      break;
+
+    int8_t currentPreset = getLCRFeedbackPresetIndex(feedbackResistance);
+
+    if (currentPreset < 0)
+      break;
+
+    uint8_t nextPreset =
+      chooseLCRAutorangePreset(currentPreset,
+                               iAmplitude,
+                               iSaturated);
+
+    // If the current signal is still too small on the highest-gain range,
+    // the DUT impedance is beyond the measurable range.
+    if (currentPreset == FEEDBACK_PRESET_COUNT - 1 &&
+        !iSaturated &&
+        iAmplitude < LCR_AUTORANGE_LOW) {
+
+      measurement.frequency = settings.frequency;
+      measurement.status = LCR_MEASUREMENT_OL;
+
+      return measurement;
+    }
+
+    // If the newly selected range immediately wants to return to the
+    // previous range, neither range lies completely inside the preferred
+    // amplitude window. Keep the current capture instead of oscillating
+    // between the two ranges.
+    if (previousPreset >= 0 &&
+        nextPreset == previousPreset) {
+      break;
+    }
+
+    // The current range is already inside the desired amplitude window,
+    // or we have reached the end of the available feedback ranges.
+    if (nextPreset == currentPreset)
+      break;
+
+    previousPreset = currentPreset;
+
+    selectLCRFeedbackPreset(nextPreset);
+
+    feedbackResistance = feedbackPresets[nextPreset].effectiveResistance;
+
+    // Allow the analog feedback path to settle before the next capture.
+    delay(2);
   }
+
   measurement.frequency = settings.frequency;
   measurement.resistance = impedance.re;
   measurement.reactance = impedance.im;
@@ -1789,6 +1873,7 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
   else
     measurement.dissipation = 0.0f;
 
+  measurement.status = LCR_MEASUREMENT_VALID;
   return measurement;
 }
 
@@ -1836,18 +1921,16 @@ void enterLCRMode()
   instrumentMode = MODE_LCR;
   lcrTab = LCR_TAB_MEASURE;
 
-#if LCR_CAPTURE_DEBUG
+  // The touch that selected LCR on the Scope screen may still be held.
+  // Ignore physical LCR touches until that finger has been released.
+  lcrWaitForTouchRelease = true;
 
-  // Start in HOLD during ADC/DMA debugging so simply entering LCR mode does
-  // not continuously exercise the acquisition path.
-  lcrMeasureState = LCR_MEASURE_HOLD;
-
-#else
+  // LCR now owns the measurement hardware, so restore the previously
+  // programmed AD9833 excitation signal for Measure and Sweep operation.
+  lcrDDS.start();
 
   // Normal operation begins with continuous measurement enabled.
   lcrMeasureState = LCR_MEASURE_LIVE;
-
-#endif
 
   lcrSweepState = LCR_SWEEP_SETUP;
   lcrFrequencyTarget = LCR_FREQ_MEASURE;
@@ -1865,6 +1948,11 @@ void enterLCRMode()
 // Exit the LCR analyzer, release the shared ADC, and restore Scope ownership.
 void exitLCRMode()
 {
+  // Scope is reclaiming the analog inputs, so power down the AD9833
+  // excitation source before restoring the oscilloscope ADC configuration.
+  // Frequency and phase registers remain programmed for the next LCR session.
+  lcrDDS.stop();
+
   // Stop any LCR conversion that may still be active.
   adc_run(false);
   adc_set_round_robin(0);
@@ -1912,7 +2000,7 @@ void handleLCRInputTouch(uint16_t x, uint16_t y)
   }
 
   if (lcrUIState == LCR_UI_REF_SELECT) {
-    handleLCRReferenceSelectorTouch(x, y);
+    handleLCRFeedbackSelectorTouch(x, y);
     return;
   }
 
@@ -1933,6 +2021,17 @@ void handleLCRInputTouch(uint16_t x, uint16_t y)
 
   if (lcrUIState == LCR_UI_SWEEP_PLOT_SELECT) {
     handleLCRSweepPlotSelectorTouch(x, y);
+    return;
+  }
+
+  //
+  // Settings controls
+  //
+  if (lcrTab == LCR_TAB_SETTINGS &&
+      lcrUIState == LCR_UI_NORMAL &&
+      pointInLCRRect(x, y, lcrLayout.content)) {
+
+    handleLCRSettingsTouch(x, y);
     return;
   }
 
@@ -2059,6 +2158,14 @@ void updateLCR()
       lcrUIState == LCR_UI_NORMAL) {
     lcrMeasurement = measureImpedance(lcrSettings);
 
+    // A hardware capture failure may force LIVE Measure into HOLD.
+    // Synchronize both front panels immediately when that occurs.
+    if (lcrMeasureState == LCR_MEASURE_HOLD) {
+      drawMeasureSoftKeys();
+      publishLCRWebUIState();
+      return;
+    }
+
     //
     // Publish successful Measure results for the web interface.
     //
@@ -2090,6 +2197,17 @@ void updateLCR()
 
   bool pressed = readTouch(x, y);
 
+  // When LCR was entered by touchscreen, consume the remainder of that
+  // physical press before allowing any LCR control to respond.
+  if (lcrWaitForTouchRelease) {
+    if (!pressed) {
+      lcrWaitForTouchRelease = false;
+      lastPressed = false;
+    }
+
+    return;
+  }
+
   // Require the screen to be released before accepting another touch.
   if (!pressed) {
     lastPressed = false;
@@ -2102,6 +2220,11 @@ void updateLCR()
   lastPressed = true;
 
   handleLCRInputTouch(x, y);
+
+  // Publish any navigation, selector, or setting change caused by the
+  // physical touchscreen so the browser follows the TFT front panel.
+  if (instrumentMode == MODE_LCR)
+    publishLCRWebUIState();
 }
 
 
@@ -2129,6 +2252,11 @@ void initializeLCRGenerator()
   // on every pass.
   lcrDDS.begin(1000);
   lcrGeneratorFrequency = 1000;
+
+  // The AD9833 belongs exclusively to the LCR instrument. Keep its DAC and
+  // internal clock powered down after initialization so Scope/FFT operation
+  // is not contaminated by the LCR excitation signal.
+  lcrDDS.stop();
 
   Serial.println("LCR AD9833 initialized at 1 kHz");
 }
@@ -3062,6 +3190,40 @@ void printLCRGoertzelTest(const LCRCapturePlan &plan)
 }
 
 
+// Run the ADC channel-match diagnostic across the LCR frequency range.
+// Both ADC inputs must be connected to the same excitation signal.
+void runLCRChannelMatchTest()
+{
+  static const uint32_t frequencies[] = {
+    100,
+    1000,
+    10000,
+    20000,
+    30000,
+    40000,
+    50000,
+    63000,
+    80000,
+    100000,
+    110000
+  };
+
+  for (uint8_t i = 0;
+       i < sizeof(frequencies) / sizeof(frequencies[0]);
+       i++) {
+
+    uint32_t frequency = frequencies[i];
+
+    setLCRGeneratorFrequency(frequency);
+
+    // Allow the excitation signal to settle after each frequency change.
+    delay(5);
+
+    printLCRChannelMatchTest(frequency);
+  }
+}
+
+
 // Compare ADC0 and ADC1 when both channels are connected to the same signal.
 // This isolates ADC channel gain and timing errors from the LCR divider.
 void printLCRChannelMatchTest(uint32_t frequency)
@@ -3133,11 +3295,13 @@ void printLCRChannelMatchTest(uint32_t frequency)
 }
 
 
-
 // Acquire one hardware record and calculate complex DUT impedance from the
-// de-skewed Vtotal and Vdut phasors.
-bool measureLCRHardwareImpedance(uint32_t frequency, float senseResistance,
-                                 LCRPhasor &impedance)
+// de-skewed I_MEAS and V_MEAS phasors using the four-wire Kelvin frontend.
+bool measureLCRHardwareImpedance(uint32_t frequency,
+                                 float feedbackResistance,
+                                 LCRPhasor &impedance,
+                                 float &iAmplitude,
+                                 bool &iSaturated)
 {
   LCRCapturePlan plan;
 
@@ -3147,7 +3311,7 @@ bool measureLCRHardwareImpedance(uint32_t frequency, float senseResistance,
   if (plan.measuredChannelRate <= 0.0f)
     return false;
 
-  // Temporary high-frequency ADC-rate diagnostic.
+  // Report ADC timing at selected high-frequency diagnostic points.
   if ((frequency >= 49000 && frequency <= 51000) ||
       (frequency >= 69000 && frequency <= 71000) ||
       (frequency >= 89000 && frequency <= 91000) ||
@@ -3160,28 +3324,59 @@ bool measureLCRHardwareImpedance(uint32_t frequency, float senseResistance,
   if (n == 0 || plan.channelSampleRate <= 0.0f)
     return false;
 
-  float dcTotal = meanLCRCaptureChannel(n, 0);
-  float dcDut = meanLCRCaptureChannel(n, 1);
+  LCRCaptureStats iStats = calculateLCRCaptureStats(0, n);
 
-  LCRPhasor vTotal =
-    calculateLCRGoertzel(n, 0, frequency, plan.channelSampleRate, dcTotal);
+  // Detect a TIA output driven against either ADC rail. A saturated
+  // current-sense channel requires less TIA gain regardless of the
+  // calculated Goertzel amplitude.
+  iSaturated = iStats.minimum <= 0 || iStats.maximum >= 4095;
 
-  LCRPhasor vDut =
-    calculateLCRGoertzel(n, 1, frequency, plan.channelSampleRate, dcDut);
+#if LCR_CAPTURE_DEBUG
+  Serial.print("LCR I_MEAS ADC: min=");
+  Serial.print(iStats.minimum);
+  Serial.print("  max=");
+  Serial.print(iStats.maximum);
+  Serial.print("  saturated=");
+  Serial.println(iSaturated ? "yes" : "no");
+#endif
 
-  // ADC1 is sampled one aggregate conversion period after ADC0.
+  // ADC0/GP26 measures the TIA output representing DUT current.
+  float dcI = meanLCRCaptureChannel(n, 0);
+
+  // ADC1/GP27 measures the Kelvin voltage across the DUT.
+  float dcV = meanLCRCaptureChannel(n, 1);
+
+  LCRPhasor vI =
+    calculateLCRGoertzel(n, 0, frequency, plan.channelSampleRate, dcI);
+
+  LCRPhasor vV =
+    calculateLCRGoertzel(n, 1, frequency, plan.channelSampleRate, dcV);
+
+  // ADC1/V_MEAS is sampled one aggregate conversion after ADC0/I_MEAS.
   float skewSeconds = 1.0f / plan.aggregateSampleRate;
   float skewRadians =
     2.0f * PI * frequency * skewSeconds * LCR_PHASOR_CONJ;
 
-  vDut = rotateLCRPhasor(vDut, -skewRadians);
+  vV = rotateLCRPhasor(vV, -skewRadians);
 
-  // V_sense is the complex voltage across the known reference resistor.
-  LCRPhasor vSense = subtractLCRPhasor(vTotal, vDut);
+  // Calculate normalized I_MEAS sinusoidal peak amplitude in ADC counts.
+  // This is also used by the TIA autoranging logic.
+  iAmplitude = lcrPhasorAmplitude(vI, n);
 
-  // Z_DUT = R_sense * V_DUT / V_sense
-  impedance =
-    scaleLCRPhasor(divideLCRPhasor(vDut, vSense), senseResistance);
+#if LCR_CAPTURE_DEBUG
+  Serial.print("LCR I_MEAS amplitude: ");
+  Serial.print(iAmplitude, 3);
+  Serial.println(" ADC counts");
+#endif
+
+  // Four-wire Kelvin impedance calculation.
+  //
+  // ADC1 provides the DUT voltage phasor while ADC0 provides the inverted
+  // TIA current-sense phasor. The active TIA feedback resistance converts
+  // their complex voltage ratio into DUT impedance.
+  //
+  // Z_DUT = -R_f * V_MEAS / I_MEAS
+  impedance = scaleLCRPhasor( divideLCRPhasor(vV, vI), -feedbackResistance);
 
   return true;
 }
@@ -3200,9 +3395,89 @@ void setLCRGeneratorFrequency(uint32_t frequency)
 }
 
 
-// Set the AD9833 frequency directly for hardware bring-up testing.
-// This diagnostic helper will be removed once the generator is controlled
-// exclusively through the LCR hardware measurement backend.
+// Select the physical TIA feedback path through the MAX4582.
+//
+//   Channel  B A   Feedback path
+//      X0    0 0   100 Ohm
+//      X1    0 1   1 kOhm
+//      X2    1 0   10 kOhm
+//      X3    1 1   100 kOhm
+void setLCRFeedbackRange(uint8_t muxChannel)
+{
+  digitalWrite(LCR_RANGE_SEL_A_PIN, muxChannel & 0x01);
+  digitalWrite(LCR_RANGE_SEL_B_PIN, (muxChannel >> 1) & 0x01);
+}
+
+
+// Select one calibrated TIA feedback preset.
+//
+// This keeps the physical MAX4582 selection and the effective resistance
+// used by the Kelvin calculation synchronized.
+void selectLCRFeedbackPreset(uint8_t presetIndex)
+{
+  if (presetIndex >= FEEDBACK_PRESET_COUNT)
+    return;
+
+  setLCRFeedbackRange(feedbackPresets[presetIndex].muxChannel);
+
+  lcrSettings.feedbackResistance =
+    feedbackPresets[presetIndex].effectiveResistance;
+
+#if LCR_CAPTURE_DEBUG
+  Serial.print("LCR range: ");
+  Serial.print(feedbackPresets[presetIndex].label);
+  Serial.print("  channel=");
+  Serial.print(feedbackPresets[presetIndex].muxChannel);
+  Serial.print("  effective Rf=");
+  Serial.println(feedbackPresets[presetIndex].effectiveResistance, 2);
+#endif
+}
+
+
+// Return the feedback-preset index currently represented by the calibrated
+// effective resistance stored in the measurement settings.
+int8_t getLCRFeedbackPresetIndex(float feedbackResistance)
+{
+  for (uint8_t i = 0; i < FEEDBACK_PRESET_COUNT; i++) {
+    if (fabsf(feedbackResistance -
+              feedbackPresets[i].effectiveResistance) < 0.01f) {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+
+// Determine which TIA feedback preset should be used for the next capture.
+//
+// A low I_MEAS amplitude moves toward more TIA gain. A high amplitude moves
+// toward less TIA gain. The first and last presets naturally limit movement.
+uint8_t chooseLCRAutorangePreset(uint8_t currentPreset,
+                                 float iAmplitude,
+                                 bool iSaturated)
+{
+  // Saturation always means the TIA gain is too high.
+  if (iSaturated && currentPreset > 0)
+    return currentPreset - 1;
+
+  if (iAmplitude < LCR_AUTORANGE_LOW &&
+      currentPreset + 1 < FEEDBACK_PRESET_COUNT) {
+    return currentPreset + 1;
+  }
+
+  if (iAmplitude > LCR_AUTORANGE_HIGH &&
+      currentPreset > 0) {
+    return currentPreset - 1;
+  }
+
+  return currentPreset;
+}
+
+
+// Set the AD9833 frequency directly for generator hardware diagnostics.
+// Normal Measure and Sweep operation controls the generator through the
+// LCR measurement backend instead.
 void testLCRGeneratorFrequency(uint32_t frequency)
 {
   lcrDDS.setFrequencyHz(frequency);
@@ -3401,7 +3676,7 @@ void calculateSweepLayout()
 {
   const LCRRect &content = lcrLayout.content;
 
-  const int16_t rowCount = 5;
+  const int16_t rowCount = 6;
   const int16_t rowH = content.h / rowCount;
 
   for (int16_t i = 0; i < rowCount; i++) {
@@ -3453,7 +3728,7 @@ void calculateSweepLayout()
 
   // Calculate the Sweep Results control strip.
   // The complete strip is touchable, providing a large target for changing
-  // the plotted quantity without interfering with future graph cursors.
+  // the plotted quantity without interfering with graph cursor interaction.
   const int16_t plotControlH = content.h * LCR_SWEEP_PLOT_CONTROL_PERCENT / 100;
 
   lcrLayout.sweepPlotControl = {
@@ -3773,13 +4048,13 @@ void calculateFrequencySelectorLayout()
 }
 
 
-// Calculate reference-selector geometry from the reference preset table.
+// Calculate TIA-range selector geometry from the feedback preset table.
 // No button count or arrangement is duplicated outside the preset data.
-void calculateReferenceSelectorLayout()
+void calculateFeedbackSelectorLayout()
 {
   calculateSelectorButtonGrid(
-    lcrLayout.referencePresets,
-    REFERENCE_PRESET_COUNT
+    lcrLayout.feedbackPresets,
+    FEEDBACK_PRESET_COUNT
   );
 }
 
@@ -3829,20 +4104,68 @@ void calculateSweepPlotSelectorLayout()
 }
 
 
+// Calculate interactive row geometry for the Settings tab.
+void calculateSettingsLayout()
+{
+  const LCRRect &content = lcrLayout.content;
+
+  int16_t rowHeight = content.h / 4;
+
+  for (uint8_t i = 0; i < 4; i++) {
+    lcrLayout.settingsRows[i] = {
+      content.x,
+      static_cast<int16_t>(content.y + i * rowHeight),
+      content.w,
+      rowHeight
+    };
+  }
+
+  // Range-mode controls occupy the right half of the first Settings row.
+  const LCRRect &row = lcrLayout.settingsRows[0];
+
+  int16_t buttonX = row.x + row.w / 2;
+  int16_t buttonWidth = row.w / 4;
+
+  lcrLayout.rangeModeButtons[0] = {
+    buttonX,
+    row.y,
+    buttonWidth,
+    row.h
+  };
+
+  lcrLayout.rangeModeButtons[1] = {
+    static_cast<int16_t>(buttonX + buttonWidth),
+    row.y,
+    buttonWidth,
+    row.h
+  };
+}
+
+
 // Initialize the LCR analyzer and calculate all currently supported UI
 // geometry before drawing the instrument screen.
 void initializeLCR()
 {
+  // Configure the MAX4582 TIA feedback-range select lines.
+  pinMode(LCR_RANGE_SEL_A_PIN, OUTPUT);
+  pinMode(LCR_RANGE_SEL_B_PIN, OUTPUT);
+
+  // Start on X1 / 1 kOhm so the physical feedback path and calibrated
+  // effective resistance begin synchronized.
+  selectLCRFeedbackPreset(1);
+
   calculateLCRLayout();
   calculateMeasureLayout();
   calculateSweepLayout();
   calculateSelectorLayout();
   calculateFrequencySelectorLayout();
-  calculateReferenceSelectorLayout();
+  // Calculate the button geometry for the selectable TIA feedback ranges.
+  calculateFeedbackSelectorLayout();
   calculateSweepModeSelectorLayout();
   calculateSweepStepSelectorLayout();
   calculateSweepDensitySelectorLayout();
   calculateSweepPlotSelectorLayout();
+  calculateSettingsLayout();
 
   //
   // Entering LCR begins on Measure, so allocate its smaller dynamic-value
@@ -3851,15 +4174,6 @@ void initializeLCR()
   initializeLCRValueSprite();
 
   display.fillScreen(BGCOLOR);
-
-  //
-  // Future initialization:
-  //
-  // - Initialize AD9833
-  // - Configure ADC/DMA
-  // - Reset measurement state
-  // - Load calibration data
-  //
 }
 
 
@@ -4061,6 +4375,7 @@ void handleLCRTabTouch(uint16_t x, uint16_t y)
     lcrDisplayDirty = true;
 
     drawLCRScreen();
+
     return;
   }
 }
@@ -4079,10 +4394,16 @@ void handleMeasureSoftKeyTouch(uint16_t x, uint16_t y)
     return;
   }
 
-  // Open the reference-resistor preset selector.
+  // Open the feedback-range selector only when manual ranging is enabled.
+  // Auto mode owns the feedback-range selection.
   if (pointInLCRRect(x, y, lcrLayout.measureSoftKeys[1])) {
+    if (lcrSettings.autoRange)
+      return;
+
+    lcrRangeTarget = LCR_RANGE_MEASURE;
     lcrUIState = LCR_UI_REF_SELECT;
-    drawLCRReferenceSelector();
+
+    drawLCRFeedbackSelector();
     return;
   }
 
@@ -4182,34 +4503,38 @@ void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
 // Handle touch input while the reference-resistor selector is displayed.
 // Selecting a reference updates the shared measurement settings and resumes
 // LIVE acquisition; Cancel closes the selector without changing anything.
-void handleLCRReferenceSelectorTouch(uint16_t x, uint16_t y)
+void handleLCRFeedbackSelectorTouch(uint16_t x, uint16_t y)
 {
   // Match touches against the reference preset table so button labels,
   // values, layout, and touch behavior all originate from one definition.
-  for (uint8_t i = 0; i < REFERENCE_PRESET_COUNT; i++) {
+  for (uint8_t i = 0; i < FEEDBACK_PRESET_COUNT; i++) {
     if (pointInLCRRect(
           x,
           y,
-          lcrLayout.referencePresets[i])) {
+          lcrLayout.feedbackPresets[i])) {
 
-      lcrSettings.referenceResistance = referencePresets[i].value;
-      lcrMeasureState = LCR_MEASURE_LIVE;
+      // Select the physical MAX4582 path and its calibrated effective Rf.
+      selectLCRFeedbackPreset(i);
 
-      returnToLCRMeasureScreen();
+      // Selecting a Measure range resumes continuous acquisition.
+      if (lcrRangeTarget == LCR_RANGE_MEASURE)
+        lcrMeasureState = LCR_MEASURE_LIVE;
+
+      returnFromLCRFeedbackSelector();
       return;
     }
   }
 
-  if (pointInLCRRect( x, y, lcrLayout.selectorCancel)) {
-    returnToLCRMeasureScreen();
+  if (pointInLCRRect(x, y, lcrLayout.selectorCancel)) {
+    returnFromLCRFeedbackSelector();
     return;
   }
 }
 
 
 // Handle interactive controls on the Sweep Setup screen.
-// Start and Stop currently reuse the common frequency preset selector;
-// Mode and Step are added in subsequent Sweep configuration milestones.
+// Frequency limits, Sweep mode, Step/Density, and manual TIA range
+// selection reuse the common selector interfaces where appropriate.
 void handleLCRSweepSetupTouch(uint16_t x, uint16_t y)
 {
   // Open the Sweep-Start selector.
@@ -4251,6 +4576,19 @@ void handleLCRSweepSetupTouch(uint16_t x, uint16_t y)
       drawLCRSweepDensitySelector();
     }
 
+    return;
+  }
+
+  // Open the feedback-range selector only when manual ranging is enabled.
+  // Auto mode owns the feedback-range selection.
+  if (pointInLCRRect(x, y, lcrLayout.sweepSetupRows[4])) {
+    if (lcrSettings.autoRange)
+      return;
+
+    lcrRangeTarget = LCR_RANGE_SWEEP;
+    lcrUIState = LCR_UI_REF_SELECT;
+
+    drawLCRFeedbackSelector();
     return;
   }
 }
@@ -4323,6 +4661,23 @@ void handleLCRSweepResultsTouch(uint16_t x, uint16_t y)
   // Run another Sweep using the current configuration.
   if (pointInLCRRect( x, y, lcrLayout.sweepResultsSweepButton)) {
     startLCRSweep();
+    return;
+  }
+}
+
+
+// Handle direct controls on the Settings tab.
+void handleLCRSettingsTouch(uint16_t x, uint16_t y)
+{
+  if (pointInLCRRect(x, y, lcrLayout.rangeModeButtons[0])) {
+    lcrSettings.autoRange = true;
+    drawLCRSettings();
+    return;
+  }
+
+  if (pointInLCRRect(x, y, lcrLayout.rangeModeButtons[1])) {
+    lcrSettings.autoRange = false;
+    drawLCRSettings();
     return;
   }
 }
@@ -4560,6 +4915,34 @@ void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
 {
   const LCRRect &r = lcrLayout.primary;
 
+  // An over-limit measurement has no trustworthy component value.
+  // Display OL prominently while leaving the normal formatting path
+  // unchanged for valid measurements.
+  if (m.status == LCR_MEASUREMENT_OL) {
+    lcrValueSprite.fillSprite(LCR_SPRITE_BLACK);
+
+    drawLCRSpriteMeasurement(
+      r.w,
+      r.h,
+      "OL",
+      "",
+      4,
+      2,
+      LCR_SPRITE_WHITE
+    );
+
+    lcrValueSprite.pushSprite(
+      r.x,
+      r.y,
+      0,
+      0,
+      r.w,
+      r.h
+    );
+
+    return;
+  }
+
   static const float COMPONENT_PHASE_THRESHOLD_DEG = 10.0f;
 
   LCRFormattedValue formatted;
@@ -4635,6 +5018,51 @@ void drawLCRSecondaryMeasurement(const MeasurementPoint &m)
   const int16_t row3Y = r.h * 72 / 100;
 
   char value[24];
+
+  // No derived values are trustworthy when the measurement is over limit.
+  if (m.status == LCR_MEASUREMENT_OL) {
+
+    lcrValueSprite.setCursor(leftLabelX, row1Y);
+    lcrValueSprite.print("C/L");
+    lcrValueSprite.setCursor(leftValueX, row1Y);
+    lcrValueSprite.print("--");
+
+    lcrValueSprite.setCursor(rightLabelX, row1Y);
+    lcrValueSprite.print("Phase");
+    lcrValueSprite.setCursor(rightValueX, row1Y);
+    lcrValueSprite.print("--");
+
+    lcrValueSprite.setCursor(leftLabelX, row2Y);
+    lcrValueSprite.print("R");
+    lcrValueSprite.setCursor(leftValueX, row2Y);
+    lcrValueSprite.print("--");
+
+    lcrValueSprite.setCursor(rightLabelX, row2Y);
+    lcrValueSprite.print("X");
+    lcrValueSprite.setCursor(rightValueX, row2Y);
+    lcrValueSprite.print("--");
+
+    lcrValueSprite.setCursor(leftLabelX, row3Y);
+    lcrValueSprite.print("ESR");
+    lcrValueSprite.setCursor(leftValueX, row3Y);
+    lcrValueSprite.print("--");
+
+    lcrValueSprite.setCursor(rightLabelX, row3Y);
+    lcrValueSprite.print("Q");
+    lcrValueSprite.setCursor(rightValueX, row3Y);
+    lcrValueSprite.print("--");
+
+    lcrValueSprite.pushSprite(
+      r.x,
+      r.y,
+      0,
+      0,
+      r.w,
+      r.h
+    );
+
+    return;
+  }
 
   //
   // Row 1 left: capacitance or inductance.
@@ -4806,13 +5234,15 @@ void drawLCRMeasurementContext(const MeasurementPoint &m,
   display.print(" ");
   display.print(frequency.unit);
 
-  // Format the selected reference resistor using engineering units so values
-  // such as 1000 Ohm and 10000 Ohm display more readably as kOhm.
-  LCRFormattedValue reference = formatImpedance(settings.referenceResistance);
+  // Format the active TIA feedback resistance using engineering units.
+  // This value must match the physical Rf used by the current-measurement path.
+  LCRFormattedValue feedback =
+    formatImpedance(settings.feedbackResistance);
+
   display.setCursor(rightValueX, row1Y);
-  display.print(reference.value);
+  display.print(feedback.value);
   display.print(" ");
-  display.print(reference.unit);
+  display.print(feedback.unit);
 }
 
 
@@ -4902,8 +5332,30 @@ void drawLCRSweepSetup()
     );
   }
 
+  // Feedback range.
+  const LCRRect &rangeRow = lcrLayout.sweepSetupRows[4];
+
+  y = rangeRow.y + (rangeRow.h - 8) / 2;
+
+  display.setCursor(leftX, y);
+
+  if (lcrSettings.autoRange)
+    display.print("Range (Auto)");
+  else
+    display.print("Range (Manual)");
+
+  display.setCursor(valueX, y);
+
+  int8_t preset =
+    getLCRFeedbackPresetIndex(lcrSettings.feedbackResistance);
+
+  if (preset >= 0)
+    display.print(feedbackPresets[preset].label);
+  else
+    display.print("--");
+
   // Derived measurement count.
-  const LCRRect &countRow = lcrLayout.sweepSetupRows[4];
+  const LCRRect &countRow = lcrLayout.sweepSetupRows[5];
 
   y = countRow.y + (countRow.h - 8) / 2;
 
@@ -4914,9 +5366,13 @@ void drawLCRSweepSetup()
 
   // Display the number of measurements derived from the active Sweep mode.
   if (lcrSweepSettings.mode == LCR_SWEEP_LINEAR) {
-    display.print( calculateLinearSweepPointCount( lcrSweepSettings));
+    display.print(
+      calculateLinearSweepPointCount(lcrSweepSettings)
+    );
   } else {
-    display.print( calculateLogSweepPointCount( lcrSweepSettings));
+    display.print(
+      calculateLogSweepPointCount(lcrSweepSettings)
+    );
   }
 }
 
@@ -5132,9 +5588,7 @@ void drawLCRSweepDensitySelector()
 
 
 
-// Draw the Sweep Setup footer.
-// The Sweep action will become interactive once sweep configuration and
-// acquisition state are implemented.
+// Draw the interactive Sweep action footer used by Sweep Setup.
 void drawLCRSweepFooter()
 {
   const LCRRect &r = lcrLayout.footer;
@@ -5327,7 +5781,7 @@ void updateLCRSweepRunningDisplay()
 }
 
 
-// Draw the temporary Sweep Results screen after acquisition completes.
+// Draw the Sweep Results screen after acquisition completes.
 // Setup returns to Sweep configuration, while Sweep immediately repeats
 // the acquisition using the current configuration.
 void drawLCRSweepResults()
@@ -5403,6 +5857,70 @@ void drawLCRSweepResults()
   display.print(sweepLabel);
 }
 
+
+// Draw analyzer-wide configuration controls.
+void drawLCRSettings()
+{
+  const LCRRect &row = lcrLayout.settingsRows[0];
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  display.setCursor(
+    row.x + 8,
+    row.y + row.h / 2 - 4
+  );
+  display.print("Range Mode");
+
+  const char *labels[] = {
+    "Auto",
+    "Manual"
+  };
+
+  for (uint8_t i = 0; i < 2; i++) {
+    const LCRRect &button = lcrLayout.rangeModeButtons[i];
+
+    bool selected =
+      (i == 0 && lcrSettings.autoRange) ||
+      (i == 1 && !lcrSettings.autoRange);
+
+    // Clear the complete button area so a previously selected outline
+    // does not remain when the Range Mode selection changes.
+    display.fillRect(
+      button.x,
+      button.y + 4,
+      button.w,
+      button.h - 8,
+      BGCOLOR
+    );
+
+    uint16_t color = selected ? TFT_CYAN : TXTCOLOR;
+
+    // Only outline the currently selected option.
+    if (selected) {
+      display.drawRect(
+        button.x,
+        button.y + 4,
+        button.w,
+        button.h - 8,
+        TFT_CYAN
+      );
+    }
+
+    display.setTextColor(color, BGCOLOR);
+
+    int16_t textWidth = strlen(labels[i]) * 6;
+
+    display.setCursor(
+      button.x + (button.w - textWidth) / 2,
+      button.y + button.h / 2 - 4
+    );
+
+    display.print(labels[i]);
+  }
+
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+}
 
 
 // Draw the common LCR analyzer header.
@@ -5516,7 +6034,10 @@ void drawMeasureScreen()
   display.print("FREQ:");
 
   display.setCursor(rightX, row1Y);
-  display.print("REF:");
+
+  // Display the active TIA feedback resistance used by the Kelvin
+  // current-measurement path.
+  display.print("Rf:");
 
   display.setCursor(leftX, row2Y);
   display.print("LEVEL:");
@@ -5533,7 +6054,7 @@ void drawMeasureSoftKeys()
 {
   const char *labels[] = {
     "Freq",
-    "Ref",
+    lcrSettings.autoRange ? "Range (Auto)" : "Range",
     lcrMeasureState == LCR_MEASURE_LIVE ? "LIVE" : "HOLD",
     "More"
   };
@@ -5718,7 +6239,7 @@ void drawLCRFrequencySelector()
 // Draw the reference-resistor preset selector over the Measure screen.
 // The currently selected reference is highlighted, while the shared
 // selector geometry keeps drawing and touch targets synchronized.
-void drawLCRReferenceSelector()
+void drawLCRFeedbackSelector()
 {
   const LCRRect &r = lcrLayout.selector;
 
@@ -5735,7 +6256,7 @@ void drawLCRReferenceSelector()
   display.setTextColor(TXTCOLOR, BGCOLOR);
 
   // Draw selector title.
-  const char *title = "Select Reference";
+  const char *title = "Select Range";
   int16_t titleWidth = strlen(title) * 6;
 
   display.setCursor(
@@ -5746,14 +6267,14 @@ void drawLCRReferenceSelector()
   display.print(title);
 
   // Draw each reference preset directly from the shared preset table.
-  for (uint8_t i = 0; i < REFERENCE_PRESET_COUNT; i++) {
+  for (uint8_t i = 0; i < FEEDBACK_PRESET_COUNT; i++) {
     bool selected =
-      lcrSettings.referenceResistance ==
-      referencePresets[i].value;
+      lcrSettings.feedbackResistance ==
+      feedbackPresets[i].effectiveResistance;
 
     drawLCRSelectorButton(
-      lcrLayout.referencePresets[i],
-      referencePresets[i].label,
+      lcrLayout.feedbackPresets[i],
+      feedbackPresets[i].label,
       selected
     );
   }
@@ -5766,6 +6287,19 @@ void drawLCRReferenceSelector()
   );
 }
 
+
+// Close the shared feedback-range selector and restore the screen that
+// originally opened it.
+void returnFromLCRFeedbackSelector()
+{
+  if (lcrRangeTarget == LCR_RANGE_MEASURE) {
+    returnToLCRMeasureScreen();
+    return;
+  }
+
+  lcrUIState = LCR_UI_NORMAL;
+  drawLCRScreen();
+}
 
 
 // Close the active Measure selector and restore the Measure screen.
@@ -5824,9 +6358,12 @@ void drawLCRScreen()
       }
       break;
 
-    case LCR_TAB_CALIBRATION:
-    case LCR_TAB_SETTINGS:
-      break;
+      case LCR_TAB_CALIBRATION:
+        break;
+
+      case LCR_TAB_SETTINGS:
+        drawLCRSettings();
+        break;
   }
 }
 

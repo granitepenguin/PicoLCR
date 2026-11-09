@@ -591,7 +591,7 @@ void loop() {
   if (rate > RATE_DMA) {
     adc_set_round_robin(0); // de-activate round robin
     set_trigger_ad();
-    auto_time = pow(10, rate / 3) + 5;
+    auto_time = min( (unsigned long)(pow(10, rate / 3) + 5), 50UL);
     if (trig_mode != TRIG_SCAN) {
       unsigned long st = millis();
       oad = adc_read();
