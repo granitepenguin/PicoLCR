@@ -854,9 +854,12 @@ void CheckSW() {
   if (sw != lastsw)
     vtime = ms;
   saveTimer = 5000;     // set EEPROM save timer to 5 second
-  menu_sw(sw); 
-  DrawText();
-//  display.display();
+  menu_sw(sw);
+
+  if (instrumentMode == MODE_SCOPE)
+    DrawText();
+
+  //  display.display();
   lastsw = sw;
 #endif
 }

@@ -787,9 +787,17 @@ function drawLCRMeasureCanvas(message) {
   // Measure soft keys. These use the same four equal-width regions as the
   // physical footer so browser touches map directly to TFT controls.
   //
+
+  // Auto ranging owns the TIA feedback selection, so identify the Range
+  // control as automatic just as the physical TFT does.
+  var rangeLabel =
+    (lcrUIState !== null && lcrUIState.autoRange)
+      ? 'Range (Auto)'
+      : 'Range';
+
   var softKeys = [
     'Freq',
-    'Range',
+    rangeLabel,
     message.state === 0 ? 'LIVE' : 'HOLD',
     'More'
   ];
@@ -814,6 +822,13 @@ function drawLCRMeasureCanvas(message) {
     else {
       ctx.fillStyle = textColor;
     }
+
+    // The Auto range label is longer than the other soft-key labels.
+    // Reduce only this label slightly so it remains inside its button.
+    if (softKeys[i] === 'Range (Auto)')
+      ctx.font = '10px monospace';
+    else
+      ctx.font = '12px monospace';
 
     drawLCRCenteredText(
       ctx,
@@ -1942,6 +1957,52 @@ function drawLCRSweepPlotSelector(message) {
 }
 
 
+// Draw the Measure More menu.
+function drawLCRMoreSelector(message) {
+  var presets = [
+    { label: 'Current PGA', value: 0 },
+    { label: 'Voltage PGA', value: 1 }
+  ];
+
+  // More is a navigation menu rather than a value selector,
+  // so no entry is highlighted.
+  drawLCRSelector(
+    'More',
+    presets,
+    -1
+  );
+}
+
+
+// Draw the shared current/voltage PGA gain selector.
+function drawLCRPGASelector(message) {
+  var presets = [
+    { label: '1x',   value: 0 },
+    { label: '5x',   value: 1 },
+    { label: '25x',  value: 2 },
+    { label: '101x', value: 3 }
+  ];
+
+  var currentTarget = 0;
+
+  if (message.pgaTarget === 0)
+    currentTarget = message.currentPgaGain;
+  else
+    currentTarget = message.voltagePgaGain;
+
+  var title =
+    message.pgaTarget === 0
+      ? 'Current PGA Gain'
+      : 'Voltage PGA Gain';
+
+  drawLCRSelector(
+    title,
+    presets,
+    currentTarget
+  );
+}
+
+
 // Render the latest LCR measurement and select the virtual front-panel view.
 function updateLCRMeasureView(message) {
   lcrMeasurement = message;
@@ -2134,6 +2195,22 @@ function updateLCRUIState(message) {
   //
   if (message.uiState === 6) {
     drawLCRSweepPlotSelector(message);
+    return;
+  }
+
+  //
+  // Measure More menu.
+  //
+  if (message.uiState === 7) {
+    drawLCRMoreSelector(message);
+    return;
+  }
+
+  //
+  // Current/voltage PGA gain selector.
+  //
+  if (message.uiState === 8) {
+    drawLCRPGASelector(message);
     return;
   }
 
@@ -2871,6 +2948,11 @@ bool readLCRWebUIState(LCRWebUIState &snapshot)
   snapshot.measureFrequency = lcrWebUIState.measureFrequency;
   snapshot.feedbackResistance = lcrWebUIState.feedbackResistance;
   snapshot.autoRange = lcrWebUIState.autoRange;
+
+  snapshot.voltagePgaGain = lcrWebUIState.voltagePgaGain;
+  snapshot.currentPgaGain = lcrWebUIState.currentPgaGain;
+  snapshot.pgaTarget = lcrWebUIState.pgaTarget;
+
   snapshot.sweepStartFrequency = lcrWebUIState.sweepStartFrequency;
   snapshot.sweepStopFrequency = lcrWebUIState.sweepStopFrequency;
   snapshot.sweepMode = lcrWebUIState.sweepMode;
@@ -3059,6 +3141,15 @@ void sendLCRWebUIState(const LCRWebUIState &state)
 
   message += ",\"autoRange\":";
   message += state.autoRange ? "true" : "false";
+
+  message += ",\"voltagePgaGain\":";
+  message += state.voltagePgaGain;
+
+  message += ",\"currentPgaGain\":";
+  message += state.currentPgaGain;
+
+  message += ",\"pgaTarget\":";
+  message += state.pgaTarget;
 
   message += ",\"sweepStartFrequency\":";
   message += state.sweepStartFrequency;
