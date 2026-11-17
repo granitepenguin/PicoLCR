@@ -1595,7 +1595,7 @@ bool startLCRSweep()
   // requires a large allocation while networking is active.
   //
   if (!lcrSweepSprite.created()) {
-    Serial.println("ERROR: LCR Sweep sprite was not reserved");
+    Debug.println("ERROR: LCR Sweep sprite was not reserved");
     return false;
   }
 
@@ -1752,19 +1752,19 @@ void updateLCRSweep()
       break;
     }
 
-    Serial.print("LCR sweep retry ");
-    Serial.print(attempt);
-    Serial.print("/3 at ");
-    Serial.print(frequency);
-    Serial.println(" Hz");
+    Debug.print("LCR sweep retry ");
+    Debug.print(attempt);
+    Debug.print("/3 at ");
+    Debug.print(frequency);
+    Debug.println(" Hz");
 
     delay(5);
   }
 
   if (!pointAcquired) {
-    Serial.print("LCR sweep invalid ");
-    Serial.print(frequency);
-    Serial.println(" Hz after 3 failed attempts");
+    Debug.print("LCR sweep invalid ");
+    Debug.print(frequency);
+    Debug.println(" Hz after 3 failed attempts");
 
     if (lcrSweepPointCount < LCR_MAX_SWEEP_POINTS) {
       SweepPoint &point = lcrSweepPoints[lcrSweepPointCount];
@@ -1875,12 +1875,12 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
       break;
 
 #if LCR_CAPTURE_DEBUG
-    Serial.print("LCR autorange probe: current=");
-    Serial.print(currentPreset);
-    Serial.print(" amplitude=");
-    Serial.print(iAmplitude, 2);
-    Serial.print(" saturated=");
-    Serial.println(iSaturated ? "yes" : "no");
+    Debug.print("LCR autorange probe: current=");
+    Debug.print(currentPreset);
+    Debug.print(" amplitude=");
+    Debug.print(iAmplitude, 2);
+    Debug.print(" saturated=");
+    Debug.println(iSaturated ? "yes" : "no");
 #endif
 
     // If this is already the highest TIA feedback range and it is safe,
@@ -2005,14 +2005,14 @@ MeasurementPoint measureImpedance(const MeasurementSettings &settings)
 void enterLCRMode()
 {
 #if LCR_CAPTURE_DEBUG
-  Serial.print("LCR Sweep sprite at mode entry: ");
-  Serial.println(lcrSweepSprite.created() ? "yes" : "no");
+  Debug.print("LCR Sweep sprite at mode entry: ");
+  Debug.println(lcrSweepSprite.created() ? "yes" : "no");
 
-  Serial.print("LCR Measure sprite at mode entry: ");
-  Serial.println(lcrValueSprite.created() ? "yes" : "no");
+  Debug.print("LCR Measure sprite at mode entry: ");
+  Debug.println(lcrValueSprite.created() ? "yes" : "no");
 
-  Serial.print("LCR free heap at mode entry: ");
-  Serial.println(rp2040.getFreeHeap());
+  Debug.print("LCR free heap at mode entry: ");
+  Debug.println(rp2040.getFreeHeap());
 #endif
 
   // Stop Scope acquisition before LCR changes shared ADC state.
@@ -2222,10 +2222,10 @@ void processLCRWebTouch()
   lcrWebTouch.pending = false;
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("LCR web touch: x=");
-  Serial.print(x);
-  Serial.print(" y=");
-  Serial.println(y);
+  Debug.print("LCR web touch: x=");
+  Debug.print(x);
+  Debug.print(" y=");
+  Debug.println(y);
 #endif
 
   handleLCRInputTouch(x, y);
@@ -2369,7 +2369,9 @@ void initializeLCRGenerator()
   // is not contaminated by the LCR excitation signal.
   lcrDDS.stop();
 
-  Serial.println("LCR AD9833 initialized at 1 kHz");
+#if LCR_CAPTURE_DEBUG
+  Debug.println("LCR AD9833 initialized at 1 kHz");
+#endif
 }
 
 
@@ -2391,13 +2393,15 @@ void configureLCRAdcClock()
   lcrAdcClockHz = clock_get_hz(clk_adc);
   lcrAdcMaxAggregateRate = LCR_ADC_MAX_AGGREGATE_RATE;
 
-  Serial.print("LCR ADC clock: ");
-  Serial.print(lcrAdcClockHz / 1000000.0f, 2);
-  Serial.println(" MHz");
+#if LCR_CAPTURE_DEBUG
+  Debug.print("LCR ADC clock: ");
+  Debug.print(lcrAdcClockHz / 1000000.0f, 2);
+  Debug.println(" MHz");
 
-  Serial.print("LCR ADC aggregate ceiling: ");
-  Serial.print(lcrAdcMaxAggregateRate / 1000.0f, 1);
-  Serial.println(" kS/s");
+  Debug.print("LCR ADC aggregate ceiling: ");
+  Debug.print(lcrAdcMaxAggregateRate / 1000.0f, 1);
+  Debug.println(" kS/s");
+#endif
 }
 
 
@@ -2434,8 +2438,8 @@ void initializeLCRCapture()
     lcrAdcDmaChannel = dma_claim_unused_channel(true);
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("LCR ADC DMA channel: ");
-  Serial.println(lcrAdcDmaChannel);
+  Debug.print("LCR ADC DMA channel: ");
+  Debug.println(lcrAdcDmaChannel);
 #endif
 }
 
@@ -2475,12 +2479,12 @@ LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency)
 
     // Nyquist spike troubleshooting
 #if LCR_CAPTURE_DEBUG
-    Serial.print("LCR Nyquist avoid: ");
-    Serial.print(frequency);
-    Serial.print(" Hz  normal_spc=");
-    Serial.print(targetSamplesPerCycle, 3);
-    Serial.print(" -> target_spc=");
-    Serial.println(LCR_NYQUIST_SAFE_SPC, 3);
+    Debug.print("LCR Nyquist avoid: ");
+    Debug.print(frequency);
+    Debug.print(" Hz  normal_spc=");
+    Debug.print(targetSamplesPerCycle, 3);
+    Debug.print(" -> target_spc=");
+    Debug.println(LCR_NYQUIST_SAFE_SPC, 3);
 #endif
 
     // Move the excitation away from exactly two samples/cycle. We deliberately
@@ -2577,128 +2581,128 @@ void printLCRCaptureFailureState(uint32_t frequency,
                                  const LCRCapturePlan &plan,
                                  uint32_t fifoStatus)
 {
-  Serial.println();
-  Serial.println("=== LCR CAPTURE FAILURE STATE ===");
+  Debug.println();
+  Debug.println("=== LCR CAPTURE FAILURE STATE ===");
 
-  Serial.print("frequency: ");
-  Serial.print(frequency);
-  Serial.println(" Hz");
+  Debug.print("frequency: ");
+  Debug.print(frequency);
+  Debug.println(" Hz");
 
-  Serial.print("DMA channel: ");
-  Serial.println(lcrAdcDmaChannel);
+  Debug.print("DMA channel: ");
+  Debug.println(lcrAdcDmaChannel);
 
-  Serial.print("DMA busy: ");
-  Serial.println(dma_channel_is_busy(lcrAdcDmaChannel) ? "yes" : "no");
+  Debug.print("DMA busy: ");
+  Debug.println(dma_channel_is_busy(lcrAdcDmaChannel) ? "yes" : "no");
 
-  Serial.print("DMA transfer_count: ");
-  Serial.println(dma_hw->ch[lcrAdcDmaChannel].transfer_count);
+  Debug.print("DMA transfer_count: ");
+  Debug.println(dma_hw->ch[lcrAdcDmaChannel].transfer_count);
 
-  Serial.print("DMA CTRL_TRIG: 0x");
-  Serial.println(dma_hw->ch[lcrAdcDmaChannel].ctrl_trig, HEX);
+  Debug.print("DMA CTRL_TRIG: 0x");
+  Debug.println(dma_hw->ch[lcrAdcDmaChannel].ctrl_trig, HEX);
 
-  Serial.print("ADC CS: 0x");
-  Serial.println(adc_hw->cs, HEX);
+  Debug.print("ADC CS: 0x");
+  Debug.println(adc_hw->cs, HEX);
 
-  Serial.print("ADC FCS: 0x");
-  Serial.println(fifoStatus, HEX);
+  Debug.print("ADC FCS: 0x");
+  Debug.println(fifoStatus, HEX);
 
-  Serial.print("ADC FIFO level: ");
-  Serial.println(
+  Debug.print("ADC FIFO level: ");
+  Debug.println(
     (fifoStatus & ADC_FCS_LEVEL_BITS) >> ADC_FCS_LEVEL_LSB
   );
 
-  Serial.print("ADC OVER: ");
-  Serial.println(
+  Debug.print("ADC OVER: ");
+  Debug.println(
     (fifoStatus & ADC_FCS_OVER_BITS) ? "yes" : "no"
   );
 
-  Serial.print("ADC UNDER: ");
-  Serial.println(
+  Debug.print("ADC UNDER: ");
+  Debug.println(
     (fifoStatus & ADC_FCS_UNDER_BITS) ? "yes" : "no"
   );
 
-  Serial.print("samples/channel: ");
-  Serial.println(plan.samplesPerChannel);
+  Debug.print("samples/channel: ");
+  Debug.println(plan.samplesPerChannel);
 
-  Serial.print("capture time: ");
-  Serial.print(plan.captureTimeUs);
-  Serial.println(" us");
+  Debug.print("capture time: ");
+  Debug.print(plan.captureTimeUs);
+  Debug.println(" us");
 
-  Serial.print("programmed aggregate rate: ");
-  Serial.print(plan.aggregateSampleRate / 1000.0f, 1);
-  Serial.println(" kS/s");
+  Debug.print("programmed aggregate rate: ");
+  Debug.print(plan.aggregateSampleRate / 1000.0f, 1);
+  Debug.println(" kS/s");
 
-  Serial.print("measured aggregate rate: ");
-  Serial.print(plan.measuredAggregateRate / 1000.0f, 1);
-  Serial.println(" kS/s");
+  Debug.print("measured aggregate rate: ");
+  Debug.print(plan.measuredAggregateRate / 1000.0f, 1);
+  Debug.println(" kS/s");
 
-  Serial.print("clk_adc: ");
-  Serial.print(clock_get_hz(clk_adc));
-  Serial.println(" Hz");
+  Debug.print("clk_adc: ");
+  Debug.print(clock_get_hz(clk_adc));
+  Debug.println(" Hz");
 
-  Serial.print("plan adcClockDiv: ");
-  Serial.println(plan.adcClockDiv, 6);
+  Debug.print("plan adcClockDiv: ");
+  Debug.println(plan.adcClockDiv, 6);
 
-  Serial.print("ADC DIV register: 0x");
-  Serial.println(adc_hw->div, HEX);
+  Debug.print("ADC DIV register: 0x");
+  Debug.println(adc_hw->div, HEX);
 
-  Serial.print("ADC DIV integer: ");
-  Serial.println(
+  Debug.print("ADC DIV integer: ");
+  Debug.println(
     (adc_hw->div & ADC_DIV_INT_BITS) >> ADC_DIV_INT_LSB
   );
 
-  Serial.print("ADC DIV frac: ");
-  Serial.println(
+  Debug.print("ADC DIV frac: ");
+  Debug.println(
     (adc_hw->div & ADC_DIV_FRAC_BITS) >> ADC_DIV_FRAC_LSB
   );
 
-  Serial.print("ADC FCS THRESH: ");
-  Serial.println(
+  Debug.print("ADC FCS THRESH: ");
+  Debug.println(
     (fifoStatus & ADC_FCS_THRESH_BITS) >> ADC_FCS_THRESH_LSB
   );
 
-  Serial.print("ADC FCS DREQ_EN: ");
-  Serial.println(
+  Debug.print("ADC FCS DREQ_EN: ");
+  Debug.println(
     (fifoStatus & ADC_FCS_DREQ_EN_BITS) ? "yes" : "no"
   );
 
-  Serial.println("DMA channel states:");
+  Debug.println("DMA channel states:");
 
   for (uint8_t ch = 0; ch < NUM_DMA_CHANNELS; ch++) {
     uint32_t ctrl = dma_hw->ch[ch].ctrl_trig;
 
-    Serial.print("  ch");
-    Serial.print(ch);
+    Debug.print("  ch");
+    Debug.print(ch);
 
-    Serial.print(" busy=");
-    Serial.print(
+    Debug.print(" busy=");
+    Debug.print(
       (ctrl & DMA_CH0_CTRL_TRIG_BUSY_BITS) ? 1 : 0
     );
 
-    Serial.print(" count=");
-    Serial.print(dma_hw->ch[ch].transfer_count);
+    Debug.print(" count=");
+    Debug.print(dma_hw->ch[ch].transfer_count);
 
-    Serial.print(" ctrl=0x");
-    Serial.println(ctrl, HEX);
+    Debug.print(" ctrl=0x");
+    Debug.println(ctrl, HEX);
   }
 
-  Serial.print("DMA INTR: 0x");
-  Serial.println(dma_hw->intr, HEX);
+  Debug.print("DMA INTR: 0x");
+  Debug.println(dma_hw->intr, HEX);
 
-  Serial.print("DMA INTE0: 0x");
-  Serial.println(dma_hw->inte0, HEX);
+  Debug.print("DMA INTE0: 0x");
+  Debug.println(dma_hw->inte0, HEX);
 
-  Serial.print("DMA INTS0: 0x");
-  Serial.println(dma_hw->ints0, HEX);
+  Debug.print("DMA INTS0: 0x");
+  Debug.println(dma_hw->ints0, HEX);
 
-  Serial.print("DMA INTE1: 0x");
-  Serial.println(dma_hw->inte1, HEX);
+  Debug.print("DMA INTE1: 0x");
+  Debug.println(dma_hw->inte1, HEX);
 
-  Serial.print("DMA INTS1: 0x");
-  Serial.println(dma_hw->ints1, HEX);
+  Debug.print("DMA INTS1: 0x");
+  Debug.println(dma_hw->ints1, HEX);
 
-  Serial.println("=== END CAPTURE FAILURE STATE ===");
-  Serial.println();
+  Debug.println("=== END CAPTURE FAILURE STATE ===");
+  Debug.println();
 }
 #endif
 
@@ -2780,7 +2784,7 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
   if (adc_hw->fcs &
       (ADC_FCS_OVER_BITS | ADC_FCS_UNDER_BITS)) {
 
-    Serial.println(
+    Debug.println(
       "LCR ADC error: FIFO status would not clear"
     );
 
@@ -2896,28 +2900,28 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
   // adc_run(false) takes effect. Report this for diagnostics, but do not reject
   // an otherwise clean DMA record solely because of final AINSEL state.
   if (!channelParityValid && !fifoError) {
-    Serial.print("LCR ADC note: final AINSEL=");
-    Serial.print(finalChannel);
-    Serial.println(" after clean DMA capture");
+    Debug.print("LCR ADC note: final AINSEL=");
+    Debug.print(finalChannel);
+    Debug.println(" after clean DMA capture");
   }
 
   // FIFO overflow/underflow means samples were actually lost, so that record
   // cannot be trusted.
   if (fifoError) {
-    Serial.print("LCR ADC capture error:");
+    Debug.print("LCR ADC capture error:");
 
     if (fifoStatus & ADC_FCS_OVER_BITS)
-      Serial.print(" FIFO_OVER");
+      Debug.print(" FIFO_OVER");
 
     if (fifoStatus & ADC_FCS_UNDER_BITS)
-      Serial.print(" FIFO_UNDER");
+      Debug.print(" FIFO_UNDER");
 
     if (!channelParityValid) {
-      Serial.print(" final=");
-      Serial.print(finalChannel);
+      Debug.print(" final=");
+      Debug.print(finalChannel);
     }
 
-    Serial.println();
+    Debug.println();
 
     // Preserve the first real FIFO failure for diagnosis instead of allowing
     // LIVE Measure to immediately hammer the broken capture path again.
@@ -2932,7 +2936,7 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
       );
       lcrMeasureState = LCR_MEASURE_HOLD;
 
-      Serial.println(
+      Debug.println(
         "LCR Measure forced to HOLD after ADC capture failure."
       );
 #endif
@@ -2954,16 +2958,16 @@ void printLCRCaptureRate(const LCRCapturePlan &plan)
   if (plan.aggregateSampleRate > 0.0f)
     ratio = plan.measuredAggregateRate / plan.aggregateSampleRate;
 
-  Serial.print("LCR rate: ");
-  Serial.print(plan.frequency);
-  Serial.print(" Hz  programmed=");
-  Serial.print(plan.aggregateSampleRate / 1000.0f, 1);
-  Serial.print(" kS/s  measured=");
-  Serial.print(plan.measuredAggregateRate / 1000.0f, 1);
-  Serial.print(" kS/s  ratio=");
-  Serial.print(ratio, 4);
-  Serial.print("  spc=");
-  Serial.println(plan.measuredSamplesPerCycle, 2);
+  Debug.print("LCR rate: ");
+  Debug.print(plan.frequency);
+  Debug.print(" Hz  programmed=");
+  Debug.print(plan.aggregateSampleRate / 1000.0f, 1);
+  Debug.print(" kS/s  measured=");
+  Debug.print(plan.measuredAggregateRate / 1000.0f, 1);
+  Debug.print(" kS/s  ratio=");
+  Debug.print(ratio, 4);
+  Debug.print("  spc=");
+  Debug.println(plan.measuredSamplesPerCycle, 2);
 }
 
 
@@ -3447,19 +3451,19 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
   iSaturated = iStats.minimum <= 0 || iStats.maximum >= 4095;
 
 #if LCR_CAPTURE_DEBUG
-    Serial.print("LCR I_MEAS ADC: min=");
-    Serial.print(iStats.minimum);
-    Serial.print("  max=");
-    Serial.print(iStats.maximum);
-    Serial.print("  saturated=");
-    Serial.println(iSaturated ? "yes" : "no");
+    Debug.print("LCR I_MEAS ADC: min=");
+    Debug.print(iStats.minimum);
+    Debug.print("  max=");
+    Debug.print(iStats.maximum);
+    Debug.print("  saturated=");
+    Debug.println(iSaturated ? "yes" : "no");
 
-    Serial.print("LCR V_MEAS ADC: min=");
-    Serial.print(vStats.minimum);
-    Serial.print("  max=");
-    Serial.print(vStats.maximum);
-    Serial.print("  saturated=");
-    Serial.println(
+    Debug.print("LCR V_MEAS ADC: min=");
+    Debug.print(vStats.minimum);
+    Debug.print("  max=");
+    Debug.print(vStats.maximum);
+    Debug.print("  saturated=");
+    Debug.println(
       (vStats.minimum <= 0 || vStats.maximum >= 4095)
         ? "yes"
         : "no"
@@ -3519,21 +3523,21 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
   vV = rotateLCRPhasor(vV, -skewRadians);
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("LCR I_MEAS amplitude: ");
-  Serial.print(iAmplitude, 3);
-  Serial.println(" ADC counts");
+  Debug.print("LCR I_MEAS amplitude: ");
+  Debug.print(iAmplitude, 3);
+  Debug.println(" ADC counts");
 
-  Serial.print("LCR V_MEAS amplitude: ");
-  Serial.print(vAmplitude, 3);
-  Serial.println(" ADC counts");
-  Serial.print("LCR phasor phase: I=");
-  Serial.print(phaseLCRPhasor(vI), 3);
+  Debug.print("LCR V_MEAS amplitude: ");
+  Debug.print(vAmplitude, 3);
+  Debug.println(" ADC counts");
+  Debug.print("LCR phasor phase: I=");
+  Debug.print(phaseLCRPhasor(vI), 3);
 
-  Serial.print("  V=");
-  Serial.print(phaseLCRPhasor(vV), 3);
+  Debug.print("  V=");
+  Debug.print(phaseLCRPhasor(vV), 3);
 
-  Serial.print("  V-I=");
-  Serial.print(
+  Debug.print("  V-I=");
+  Debug.print(
     normalizeLCRPhase(
       phaseLCRPhasor(vV) -
       phaseLCRPhasor(vI)
@@ -3541,7 +3545,7 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
     3
   );
 
-  Serial.println(" deg");
+  Debug.println(" deg");
 #endif
 
   // Four-wire Kelvin impedance calculation.
@@ -3687,12 +3691,12 @@ void selectLCRFeedbackPreset(uint8_t presetIndex)
     feedbackPresets[presetIndex].effectiveResistance;
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("LCR range: ");
-  Serial.print(feedbackPresets[presetIndex].label);
-  Serial.print("  channel=");
-  Serial.print(feedbackPresets[presetIndex].muxChannel);
-  Serial.print("  effective Rf=");
-  Serial.println(feedbackPresets[presetIndex].effectiveResistance, 2);
+  Debug.print("LCR range: ");
+  Debug.print(feedbackPresets[presetIndex].label);
+  Debug.print("  channel=");
+  Debug.print(feedbackPresets[presetIndex].muxChannel);
+  Debug.print("  effective Rf=");
+  Debug.println(feedbackPresets[presetIndex].effectiveResistance, 2);
 #endif
 }
 
@@ -3761,12 +3765,12 @@ void initializeLCRValueSprite()
   lcrValueSprite.setTextColor( LCR_SPRITE_WHITE, LCR_SPRITE_BLACK);
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("LCR Measure sprite allocated: ");
-  Serial.print(spriteW);
-  Serial.print(" x ");
-  Serial.print(spriteH);
-  Serial.print("  free heap=");
-  Serial.println(rp2040.getFreeHeap());
+  Debug.print("LCR Measure sprite allocated: ");
+  Debug.print(spriteW);
+  Debug.print(" x ");
+  Debug.print(spriteH);
+  Debug.print("  free heap=");
+  Debug.println(rp2040.getFreeHeap());
 #endif
 }
 
@@ -3797,7 +3801,7 @@ bool reserveLCRSweepSprite()
   );
 
   if (spriteBuffer == nullptr) {
-    Serial.println("ERROR: Unable to reserve LCR Sweep sprite");
+    Debug.println("ERROR: Unable to reserve LCR Sweep sprite");
     return false;
   }
 
@@ -3806,12 +3810,12 @@ bool reserveLCRSweepSprite()
   lcrSweepSprite.setTextColor(LCR_SPRITE_WHITE, LCR_SPRITE_BLACK);
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("Reserved LCR Sweep sprite: ");
-  Serial.print(lcrLayout.content.w);
-  Serial.print(" x ");
-  Serial.print(lcrLayout.content.h);
-  Serial.print("  free heap=");
-  Serial.println(rp2040.getFreeHeap());
+  Debug.print("Reserved LCR Sweep sprite: ");
+  Debug.print(lcrLayout.content.w);
+  Debug.print(" x ");
+  Debug.print(lcrLayout.content.h);
+  Debug.print("  free heap=");
+  Debug.println(rp2040.getFreeHeap());
 #endif
 
   return true;
@@ -4738,10 +4742,10 @@ void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
 
 #if LCR_CAPTURE_DEBUG
     // Report the frequency selected before returning to the originating screen.
-    Serial.print("LCR frequency selected: ");
-    Serial.print(frequency);
-    Serial.print(" Hz  target=");
-    Serial.println(static_cast<uint8_t>(lcrFrequencyTarget));
+    Debug.print("LCR frequency selected: ");
+    Debug.print(frequency);
+    Debug.print(" Hz  target=");
+    Debug.println(static_cast<uint8_t>(lcrFrequencyTarget));
 #endif
 
     if (lcrFrequencyTarget == LCR_FREQ_MEASURE) {
