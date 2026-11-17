@@ -17,6 +17,132 @@
 #include <hardware/clocks.h>
 #include <hardware/dma.h>
 
+// ====================================================================
+// LCR USER / HARDWARE CONFIGURATION
+//
+// Values in this section may need adjustment for hardware revisions,
+// breadboard calibration, or measurement tuning.
+// ====================================================================
+
+// LCR excitation-generator hardware.
+// The AD9833 uses SPI0 independently from the TFT display bus.
+static const uint8_t AD9833_FSYNC_PIN = 3;  // GP3, physical pin 5
+static const uint8_t AD9833_SCK_PIN   = 6;  // GP6, physical pin 9
+static const uint8_t AD9833_DATA_PIN  = 7;  // GP7, physical pin 10
+
+// MAX4582 TIA feedback-range control.
+// These assignments match the PicoLCR production schematic.
+static const uint8_t LCR_RANGE_SEL_A_PIN = 8;  // GP8, physical pin 11
+static const uint8_t LCR_RANGE_SEL_B_PIN = 9;  // GP9, physical pin 12
+
+// MAX4052 voltage/current PGA gain control.
+// Each PGA has independent A/B address lines so the V_MEAS and I_MEAS
+// channels can eventually be ranged independently.
+static const uint8_t LCR_PGA_V_A_PIN = 18;  // GP18, physical pin 24
+static const uint8_t LCR_PGA_V_B_PIN = 19;  // GP19, physical pin 25
+static const uint8_t LCR_PGA_I_A_PIN = 20;  // GP20, physical pin 26
+static const uint8_t LCR_PGA_I_B_PIN = 21;  // GP21, physical pin 27
+
+// Raw dual-channel ADC capture used while integrating the LCR hardware.
+// Samples alternate ADC0/ADC1 in one DMA-filled buffer.
+static const uint8_t LCR_ADC_TOTAL_PIN = 26;  // GP26, physical pin 31
+static const uint8_t LCR_ADC_DUT_PIN   = 27;  // GP27, physical pin 32
+static const uint8_t LCR_ADC_CH_TOTAL  = 0;
+static const uint8_t LCR_ADC_CH_DUT    = 1;
+
+// ADC conditioning corrections.
+//
+// GP26 / I_MEAS:
+//   V_ADC(ac) ~= -0.354 * V_PGA_I(ac)
+//
+// GP27 / V_MEAS:
+//   V_ADC(ac) ~= -0.703 * V_PGA_V(ac)
+//
+// These restore each captured phasor to the corresponding PGA output.
+constexpr float LCR_I_MEAS_CORRECTION = -2.826f;
+constexpr float LCR_V_MEAS_CORRECTION = -1.422f;
+
+// Autorange thresholds for normalized I_MEAS peak amplitude.
+//
+// Measurements below the lower threshold should move toward a larger TIA
+// feedback resistance. Measurements above the upper threshold should move
+// toward a smaller feedback resistance.
+constexpr float LCR_AUTORANGE_LOW = 300.0f;
+
+// Maximum raw I_MEAS phasor amplitude considered safe during TIA
+// autoranging. Leave headroom below the nominal 12-bit ADC peak range.
+constexpr float LCR_AUTORANGE_HIGH = 1800.0f;
+
+// Component classification threshold used by both Measure and Sweep results.
+// Phase angles within +/- this value are treated as predominantly resistive.
+constexpr float LCR_COMPONENT_PHASE_THRESHOLD_DEG = 10.0f;
+
+// Default Measure configuration.
+constexpr uint32_t LCR_DEFAULT_MEASURE_FREQUENCY_HZ = 1000;
+constexpr float LCR_DEFAULT_FEEDBACK_RESISTANCE_OHMS = 1023.71f;
+constexpr bool LCR_DEFAULT_AUTORANGE = true;
+
+// Default Sweep configuration.
+constexpr uint32_t LCR_DEFAULT_SWEEP_START_HZ = 100;
+constexpr uint32_t LCR_DEFAULT_SWEEP_STOP_HZ = 110000;
+constexpr LCRSweepMode LCR_DEFAULT_SWEEP_MODE = LCR_SWEEP_LOG;
+constexpr uint32_t LCR_DEFAULT_SWEEP_STEP_HZ = 1000;
+constexpr uint16_t LCR_DEFAULT_SWEEP_POINTS_PER_DECADE = 10;
+
+// Initial LCR acquisition parameters derived from the POC Normal profile.
+static const uint16_t LCR_TARGET_SAMPLES_PER_CYCLE = 50;
+static const uint16_t LCR_TARGET_CYCLES = 16;
+static const uint16_t LCR_CAPTURE_MIN_SAMPLES = 512;
+static const uint16_t LCR_CAPTURE_MAX_SAMPLES = 4000;
+static const uint16_t LCR_MAX_POINT_MS = 20;
+
+// Maximum aggregate ADC rate validated by the standalone PicoLCR POC.
+static const float LCR_ADC_MAX_AGGREGATE_RATE = 250000.0f;
+
+// Avoid sampling the excitation too close to the per-channel Nyquist
+// frequency. Near 2 samples/cycle the round-robin Goertzel measurement
+// develops a large deterministic artifact.
+static const float LCR_NYQUIST_AVOID_SPC_LOW  = 1.90f;
+static const float LCR_NYQUIST_AVOID_SPC_HIGH = 2.10f;
+
+// When the normal plan lands in the avoidance region, deliberately move the
+// tone farther above Nyquist by targeting 1.60 samples/cycle/channel.
+static const float LCR_NYQUIST_SAFE_SPC = 1.60f;
+
+// ====================================================================
+
+
+// ====================================================================
+// TIA Range Calibration
+// ====================================================================
+
+// Defines one selectable TIA feedback-resistance preset.
+// The value represents the physical Rf installed or selected in the
+// current-measurement feedback path.
+struct FeedbackPreset
+{
+  const char *label;
+  float nominalResistance;
+  float effectiveResistance;
+  uint8_t muxChannel;
+};
+
+// Defines the selectable TIA feedback ranges used by the Kelvin
+// measurement frontend. Effective resistance values include calibration
+// of the complete selected feedback path.
+const FeedbackPreset feedbackPresets[] = {
+  { "100 Ohm",  100.0f,    100.75f,  0 },
+  { "1 kOhm",   1000.0f,   1024.05f, 1 },
+  { "10 kOhm",  10000.0f,  10081.92f, 2 },
+  { "100 kOhm", 100000.0f, 99217.90f, 3 }
+};
+
+constexpr uint8_t FEEDBACK_PRESET_COUNT =
+  sizeof(feedbackPresets) / sizeof(feedbackPresets[0]);
+
+// ====================================================================
+
+
 // Enable verbose LCR ADC/DMA diagnostics.
 // Set to 1 while debugging acquisition problems; 0 for normal operation.
 #define LCR_CAPTURE_DEBUG 1
@@ -55,23 +181,6 @@ const uint16_t lcrSpritePalette[16] = {
   TFT_BLACK
 };
 
-// LCR excitation-generator hardware.
-// The AD9833 uses SPI0 independently from the TFT display bus.
-static const uint8_t AD9833_FSYNC_PIN = 3;  // GP3, physical pin 5
-static const uint8_t AD9833_SCK_PIN   = 6;  // GP6, physical pin 9
-static const uint8_t AD9833_DATA_PIN  = 7;  // GP7, physical pin 10
-
-// MAX4582 TIA feedback-range control.
-// These assignments match the PicoLCR production schematic.
-static const uint8_t LCR_RANGE_SEL_A_PIN = 8;  // GP8, physical pin 11
-static const uint8_t LCR_RANGE_SEL_B_PIN = 9;  // GP9, physical pin 12
-
-// Raw dual-channel ADC capture used while integrating the LCR hardware.
-// Samples alternate ADC0/ADC1 in one DMA-filled buffer.
-static const uint8_t LCR_ADC_TOTAL_PIN = 26;  // GP26, physical pin 31
-static const uint8_t LCR_ADC_DUT_PIN   = 27;  // GP27, physical pin 32
-static const uint8_t LCR_ADC_CH_TOTAL  = 0;
-static const uint8_t LCR_ADC_CH_DUT    = 1;
 
 int lcrAdcDmaChannel = -1;
 static bool lcrCaptureFailureDumped = false;
@@ -79,12 +188,6 @@ static bool lcrCaptureFailureDumped = false;
 // flag for capture isolation
 volatile bool lcrCaptureWindowActive = false;
 
-// Initial LCR acquisition parameters derived from the POC Normal profile.
-static const uint16_t LCR_TARGET_SAMPLES_PER_CYCLE = 50;
-static const uint16_t LCR_TARGET_CYCLES = 16;
-static const uint16_t LCR_CAPTURE_MIN_SAMPLES = 512;
-static const uint16_t LCR_CAPTURE_MAX_SAMPLES = 4000;
-static const uint16_t LCR_MAX_POINT_MS = 20;
 static const uint16_t LCR_CAPTURE_BUFFER_SAMPLES =
   LCR_CAPTURE_MAX_SAMPLES * 2;
 
@@ -95,21 +198,8 @@ static const float LCR_PHASOR_CONJ = 1.0f;
 static const float LCR_HANN_COHERENT_GAIN = 0.5f;
 static const bool LCR_USE_HANN_WINDOW = true;
 
-// Maximum aggregate ADC rate validated by the standalone PicoLCR POC.
-static const float LCR_ADC_MAX_AGGREGATE_RATE = 250000.0f;
-
 // RP2040 ADC conversion floor used when calculating the hardware divisor.
 static const uint16_t LCR_ADC_MIN_PERIOD_CYCLES = 96;
-
-// Avoid sampling the excitation too close to the per-channel Nyquist
-// frequency. Near 2 samples/cycle the round-robin Goertzel measurement
-// develops a large deterministic artifact.
-static const float LCR_NYQUIST_AVOID_SPC_LOW  = 1.90f;
-static const float LCR_NYQUIST_AVOID_SPC_HIGH = 2.10f;
-
-// When the normal plan lands in the avoidance region, deliberately move the
-// tone farther above Nyquist by targeting 1.60 samples/cycle/channel.
-static const float LCR_NYQUIST_SAFE_SPC = 1.60f;
 
 // AD9833 excitation source for the LCR measurement hardware.
 AD9833_Driver lcrDDS(AD9833_FSYNC_PIN);
@@ -224,22 +314,20 @@ LCRRangeTarget lcrRangeTarget = LCR_RANGE_MEASURE;
 // The analyzer normally displays the active tab unless a selector is open.
 LCRUIState lcrUIState = LCR_UI_NORMAL;
 
-// Autorange thresholds for normalized I_MEAS peak amplitude.
-//
-// Measurements below the lower threshold should move toward a larger TIA
-// feedback resistance. Measurements above the upper threshold should move
-// toward a smaller feedback resistance.
-constexpr float LCR_AUTORANGE_LOW = 40.0f;
-constexpr float LCR_AUTORANGE_HIGH = 350.0f;
+// The common PGA selector defaults to the current-measurement path.
+LCRPGATarget lcrPGATarget = LCR_PGA_TARGET_CURRENT;
 
 // Stores the active measurement configuration used by the LCR analyzer.
 // UI controls modify these values and the measurement backend reads them
 // whenever a new impedance measurement is requested.
 MeasurementSettings lcrSettings = {
-  1000,      // Frequency: 1 kHz
-  1023.71f,  // Calibrated effective Rf for the 1 kOhm range
-  true       // Automatic TIA range selection by default
+  LCR_DEFAULT_MEASURE_FREQUENCY_HZ,
+  LCR_DEFAULT_FEEDBACK_RESISTANCE_OHMS,
+  LCR_DEFAULT_AUTORANGE,
+  LCR_PGA_GAIN_1,  // Voltage PGA gain
+  LCR_PGA_GAIN_1   // Current PGA gain
 };
+
 
 // Stores the most recently acquired LCR measurement.
 // LIVE updates this value continuously while HOLD preserves it for display.
@@ -249,11 +337,11 @@ MeasurementPoint lcrMeasurement = {};
 // Defaults provide a useful full-range log sweep while allowing the
 // Sweep Setup screen to modify these values later.
 SweepSettings lcrSweepSettings = {
-  100,                 // Start frequency: 100 Hz
-  110000,              // Stop frequency: 110 kHz
-  LCR_SWEEP_LOG,       // Sweep mode
-  1000,                // Linear step: 1 kHz
-  10                   // Logarithmic density: 10 points/decade
+  LCR_DEFAULT_SWEEP_START_HZ,
+  LCR_DEFAULT_SWEEP_STOP_HZ,
+  LCR_DEFAULT_SWEEP_MODE,
+  LCR_DEFAULT_SWEEP_STEP_HZ,
+  LCR_DEFAULT_SWEEP_POINTS_PER_DECADE
 };
 
 // Stores the results of the most recently completed or active sweep.
@@ -345,6 +433,16 @@ void publishLCRWebUIState()
 
   // Publish whether Range is controlled automatically or manually.
   lcrWebUIState.autoRange = lcrSettings.autoRange;
+
+  // Publish both independent PGA gain selections.
+  lcrWebUIState.voltagePgaGain =
+    static_cast<uint8_t>(lcrSettings.voltagePgaGain);
+
+  lcrWebUIState.currentPgaGain =
+    static_cast<uint8_t>(lcrSettings.currentPgaGain);
+
+  lcrWebUIState.pgaTarget =
+    static_cast<uint8_t>(lcrPGATarget);
 
   lcrWebUIState.sweepStartFrequency = lcrSweepSettings.startFrequency;
   lcrWebUIState.sweepStopFrequency = lcrSweepSettings.stopFrequency;
@@ -479,31 +577,6 @@ const FrequencyPreset frequencyPresets[] = {
 
 constexpr uint8_t FREQUENCY_PRESET_COUNT =
   sizeof(frequencyPresets) / sizeof(frequencyPresets[0]);
-
-
-// Defines one selectable TIA feedback-resistance preset.
-// The value represents the physical Rf installed or selected in the
-// current-measurement feedback path.
-struct FeedbackPreset
-{
-  const char *label;
-  float nominalResistance;
-  float effectiveResistance;
-  uint8_t muxChannel;
-};
-
-// Defines the selectable TIA feedback ranges used by the Kelvin
-// measurement frontend. Effective resistance values include calibration
-// of the complete selected feedback path.
-const FeedbackPreset feedbackPresets[] = {
-  { "100 Ohm", 100.0f,    139.17f,  0 },
-  { "1 kOhm",  1000.0f,   1023.71f, 1 },
-  { "10 kOhm", 10000.0f,  10198.7f, 2 },
-  { "100 kOhm", 100000.0f, 98298.0f, 3 }
-};
-
-constexpr uint8_t FEEDBACK_PRESET_COUNT =
-  sizeof(feedbackPresets) / sizeof(feedbackPresets[0]);
 
 
 // Defines one selectable linear Sweep step.
@@ -1522,7 +1595,7 @@ bool startLCRSweep()
   // requires a large allocation while networking is active.
   //
   if (!lcrSweepSprite.created()) {
-    Serial.println("ERROR: LCR Sweep sprite was not reserved");
+    Debug.println("ERROR: LCR Sweep sprite was not reserved");
     return false;
   }
 
@@ -1554,8 +1627,6 @@ bool startLCRSweep()
 // resistive, capacitive, and inductive behavior.
 LCRSweepPlotType getLCRPrimarySweepPlotType()
 {
-  static const float COMPONENT_PHASE_THRESHOLD_DEG = 10.0f;
-
   if (lcrSweepPointCount == 0)
     return LCR_SWEEP_PLOT_IMPEDANCE;
 
@@ -1580,10 +1651,10 @@ LCRSweepPlotType getLCRPrimarySweepPlotType()
   float averagePhase =
     phaseSum / static_cast<float>(validCount);
 
-  if (averagePhase < -COMPONENT_PHASE_THRESHOLD_DEG)
+  if (averagePhase < -LCR_COMPONENT_PHASE_THRESHOLD_DEG)
     return LCR_SWEEP_PLOT_CAPACITANCE;
 
-  if (averagePhase > COMPONENT_PHASE_THRESHOLD_DEG)
+  if (averagePhase > LCR_COMPONENT_PHASE_THRESHOLD_DEG)
     return LCR_SWEEP_PLOT_INDUCTANCE;
 
   return LCR_SWEEP_PLOT_IMPEDANCE;
@@ -1681,19 +1752,19 @@ void updateLCRSweep()
       break;
     }
 
-    Serial.print("LCR sweep retry ");
-    Serial.print(attempt);
-    Serial.print("/3 at ");
-    Serial.print(frequency);
-    Serial.println(" Hz");
+    Debug.print("LCR sweep retry ");
+    Debug.print(attempt);
+    Debug.print("/3 at ");
+    Debug.print(frequency);
+    Debug.println(" Hz");
 
     delay(5);
   }
 
   if (!pointAcquired) {
-    Serial.print("LCR sweep invalid ");
-    Serial.print(frequency);
-    Serial.println(" Hz after 3 failed attempts");
+    Debug.print("LCR sweep invalid ");
+    Debug.print(frequency);
+    Debug.println(" Hz after 3 failed attempts");
 
     if (lcrSweepPointCount < LCR_MAX_SWEEP_POINTS) {
       SweepPoint &point = lcrSweepPoints[lcrSweepPointCount];
@@ -1776,9 +1847,12 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
   // without modifying the caller's const measurement settings.
   float feedbackResistance = settings.feedbackResistance;
 
-  // Track the previous autorange move so a boundary condition cannot
-  // oscillate repeatedly between two adjacent feedback ranges.
-  int8_t previousPreset = -1;
+  // Autoranging always starts at the lowest TIA gain and moves upward
+  // only when the measured current signal is too weak.
+  if (settings.autoRange) {
+    selectLCRFeedbackPreset(0);
+    feedbackResistance = feedbackPresets[0].effectiveResistance;
+  }
 
   for (uint8_t attempt = 0; attempt < FEEDBACK_PRESET_COUNT; attempt++) {
 
@@ -1790,54 +1864,81 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
       return measurement;
     }
 
-    // Manual range mode uses the first capture without changing ranges.
+    // Manual range mode uses the requested range without changing it.
     if (!settings.autoRange)
       break;
 
-    int8_t currentPreset = getLCRFeedbackPresetIndex(feedbackResistance);
+    int8_t currentPreset =
+      getLCRFeedbackPresetIndex(feedbackResistance);
 
     if (currentPreset < 0)
       break;
 
-    uint8_t nextPreset =
-      chooseLCRAutorangePreset(currentPreset,
-                               iAmplitude,
-                               iSaturated);
+#if LCR_CAPTURE_DEBUG
+    Debug.print("LCR autorange probe: current=");
+    Debug.print(currentPreset);
+    Debug.print(" amplitude=");
+    Debug.print(iAmplitude, 2);
+    Debug.print(" saturated=");
+    Debug.println(iSaturated ? "yes" : "no");
+#endif
 
-    // If the current signal is still too small on the highest-gain range,
-    // the DUT impedance is beyond the measurable range.
-    if (currentPreset == FEEDBACK_PRESET_COUNT - 1 &&
-        !iSaturated &&
-        iAmplitude < LCR_AUTORANGE_LOW) {
+    // If this is already the highest TIA feedback range and it is safe,
+    // use this capture.
+    if (!iSaturated &&
+        iAmplitude <= LCR_AUTORANGE_HIGH &&
+        currentPreset == FEEDBACK_PRESET_COUNT - 1) {
+      break;
+    }
 
+    // A safe range is not necessarily the best range. Move upward and
+    // try to obtain more ADC signal while preserving headroom.
+    if (!iSaturated &&
+        iAmplitude <= LCR_AUTORANGE_HIGH) {
+
+      currentPreset++;
+
+      selectLCRFeedbackPreset(currentPreset);
+
+      feedbackResistance =
+        feedbackPresets[currentPreset].effectiveResistance;
+
+      // Allow the analog feedback path to settle before retrying.
+      delay(2);
+
+      continue;
+    }
+
+    // The current range is too large. Return to the previous safe range.
+    //
+    // Autoranging begins at preset 0, so saturation at preset 0 means
+    // there is no lower TIA feedback range available.
+    if (currentPreset == 0) {
       measurement.frequency = settings.frequency;
-      measurement.status = LCR_MEASUREMENT_OL;
-
+      measurement.status = LCR_MEASUREMENT_ERROR;
       return measurement;
     }
 
-    // If the newly selected range immediately wants to return to the
-    // previous range, neither range lies completely inside the preferred
-    // amplitude window. Keep the current capture instead of oscillating
-    // between the two ranges.
-    if (previousPreset >= 0 &&
-        nextPreset == previousPreset) {
-      break;
+    currentPreset--;
+
+    selectLCRFeedbackPreset(currentPreset);
+
+    feedbackResistance =
+      feedbackPresets[currentPreset].effectiveResistance;
+
+    delay(2);
+
+    // Capture once more using the previous safe range so that the
+    // impedance returned below corresponds to the selected hardware.
+    if (!measureLCRHardwareImpedance( settings.frequency,
+                                      feedbackResistance,
+                                      impedance,
+                                      iAmplitude,
+                                      iSaturated)) {
+      return measurement;
     }
 
-    // The current range is already inside the desired amplitude window,
-    // or we have reached the end of the available feedback ranges.
-    if (nextPreset == currentPreset)
-      break;
-
-    previousPreset = currentPreset;
-
-    selectLCRFeedbackPreset(nextPreset);
-
-    feedbackResistance = feedbackPresets[nextPreset].effectiveResistance;
-
-    // Allow the analog feedback path to settle before the next capture.
-    delay(2);
+    break;
   }
 
   measurement.frequency = settings.frequency;
@@ -1904,14 +2005,14 @@ MeasurementPoint measureImpedance(const MeasurementSettings &settings)
 void enterLCRMode()
 {
 #if LCR_CAPTURE_DEBUG
-  Serial.print("LCR Sweep sprite at mode entry: ");
-  Serial.println(lcrSweepSprite.created() ? "yes" : "no");
+  Debug.print("LCR Sweep sprite at mode entry: ");
+  Debug.println(lcrSweepSprite.created() ? "yes" : "no");
 
-  Serial.print("LCR Measure sprite at mode entry: ");
-  Serial.println(lcrValueSprite.created() ? "yes" : "no");
+  Debug.print("LCR Measure sprite at mode entry: ");
+  Debug.println(lcrValueSprite.created() ? "yes" : "no");
 
-  Serial.print("LCR free heap at mode entry: ");
-  Serial.println(rp2040.getFreeHeap());
+  Debug.print("LCR free heap at mode entry: ");
+  Debug.println(rp2040.getFreeHeap());
 #endif
 
   // Stop Scope acquisition before LCR changes shared ADC state.
@@ -2001,6 +2102,16 @@ void handleLCRInputTouch(uint16_t x, uint16_t y)
 
   if (lcrUIState == LCR_UI_REF_SELECT) {
     handleLCRFeedbackSelectorTouch(x, y);
+    return;
+  }
+
+  if (lcrUIState == LCR_UI_MORE_SELECT) {
+    handleLCRMoreSelectorTouch(x, y);
+    return;
+  }
+
+  if (lcrUIState == LCR_UI_PGA_SELECT) {
+    handleLCRPGASelectorTouch(x, y);
     return;
   }
 
@@ -2111,10 +2222,10 @@ void processLCRWebTouch()
   lcrWebTouch.pending = false;
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("LCR web touch: x=");
-  Serial.print(x);
-  Serial.print(" y=");
-  Serial.println(y);
+  Debug.print("LCR web touch: x=");
+  Debug.print(x);
+  Debug.print(" y=");
+  Debug.println(y);
 #endif
 
   handleLCRInputTouch(x, y);
@@ -2258,7 +2369,9 @@ void initializeLCRGenerator()
   // is not contaminated by the LCR excitation signal.
   lcrDDS.stop();
 
-  Serial.println("LCR AD9833 initialized at 1 kHz");
+#if LCR_CAPTURE_DEBUG
+  Debug.println("LCR AD9833 initialized at 1 kHz");
+#endif
 }
 
 
@@ -2280,13 +2393,15 @@ void configureLCRAdcClock()
   lcrAdcClockHz = clock_get_hz(clk_adc);
   lcrAdcMaxAggregateRate = LCR_ADC_MAX_AGGREGATE_RATE;
 
-  Serial.print("LCR ADC clock: ");
-  Serial.print(lcrAdcClockHz / 1000000.0f, 2);
-  Serial.println(" MHz");
+#if LCR_CAPTURE_DEBUG
+  Debug.print("LCR ADC clock: ");
+  Debug.print(lcrAdcClockHz / 1000000.0f, 2);
+  Debug.println(" MHz");
 
-  Serial.print("LCR ADC aggregate ceiling: ");
-  Serial.print(lcrAdcMaxAggregateRate / 1000.0f, 1);
-  Serial.println(" kS/s");
+  Debug.print("LCR ADC aggregate ceiling: ");
+  Debug.print(lcrAdcMaxAggregateRate / 1000.0f, 1);
+  Debug.println(" kS/s");
+#endif
 }
 
 
@@ -2323,8 +2438,8 @@ void initializeLCRCapture()
     lcrAdcDmaChannel = dma_claim_unused_channel(true);
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("LCR ADC DMA channel: ");
-  Serial.println(lcrAdcDmaChannel);
+  Debug.print("LCR ADC DMA channel: ");
+  Debug.println(lcrAdcDmaChannel);
 #endif
 }
 
@@ -2364,12 +2479,12 @@ LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency)
 
     // Nyquist spike troubleshooting
 #if LCR_CAPTURE_DEBUG
-    Serial.print("LCR Nyquist avoid: ");
-    Serial.print(frequency);
-    Serial.print(" Hz  normal_spc=");
-    Serial.print(targetSamplesPerCycle, 3);
-    Serial.print(" -> target_spc=");
-    Serial.println(LCR_NYQUIST_SAFE_SPC, 3);
+    Debug.print("LCR Nyquist avoid: ");
+    Debug.print(frequency);
+    Debug.print(" Hz  normal_spc=");
+    Debug.print(targetSamplesPerCycle, 3);
+    Debug.print(" -> target_spc=");
+    Debug.println(LCR_NYQUIST_SAFE_SPC, 3);
 #endif
 
     // Move the excitation away from exactly two samples/cycle. We deliberately
@@ -2466,128 +2581,128 @@ void printLCRCaptureFailureState(uint32_t frequency,
                                  const LCRCapturePlan &plan,
                                  uint32_t fifoStatus)
 {
-  Serial.println();
-  Serial.println("=== LCR CAPTURE FAILURE STATE ===");
+  Debug.println();
+  Debug.println("=== LCR CAPTURE FAILURE STATE ===");
 
-  Serial.print("frequency: ");
-  Serial.print(frequency);
-  Serial.println(" Hz");
+  Debug.print("frequency: ");
+  Debug.print(frequency);
+  Debug.println(" Hz");
 
-  Serial.print("DMA channel: ");
-  Serial.println(lcrAdcDmaChannel);
+  Debug.print("DMA channel: ");
+  Debug.println(lcrAdcDmaChannel);
 
-  Serial.print("DMA busy: ");
-  Serial.println(dma_channel_is_busy(lcrAdcDmaChannel) ? "yes" : "no");
+  Debug.print("DMA busy: ");
+  Debug.println(dma_channel_is_busy(lcrAdcDmaChannel) ? "yes" : "no");
 
-  Serial.print("DMA transfer_count: ");
-  Serial.println(dma_hw->ch[lcrAdcDmaChannel].transfer_count);
+  Debug.print("DMA transfer_count: ");
+  Debug.println(dma_hw->ch[lcrAdcDmaChannel].transfer_count);
 
-  Serial.print("DMA CTRL_TRIG: 0x");
-  Serial.println(dma_hw->ch[lcrAdcDmaChannel].ctrl_trig, HEX);
+  Debug.print("DMA CTRL_TRIG: 0x");
+  Debug.println(dma_hw->ch[lcrAdcDmaChannel].ctrl_trig, HEX);
 
-  Serial.print("ADC CS: 0x");
-  Serial.println(adc_hw->cs, HEX);
+  Debug.print("ADC CS: 0x");
+  Debug.println(adc_hw->cs, HEX);
 
-  Serial.print("ADC FCS: 0x");
-  Serial.println(fifoStatus, HEX);
+  Debug.print("ADC FCS: 0x");
+  Debug.println(fifoStatus, HEX);
 
-  Serial.print("ADC FIFO level: ");
-  Serial.println(
+  Debug.print("ADC FIFO level: ");
+  Debug.println(
     (fifoStatus & ADC_FCS_LEVEL_BITS) >> ADC_FCS_LEVEL_LSB
   );
 
-  Serial.print("ADC OVER: ");
-  Serial.println(
+  Debug.print("ADC OVER: ");
+  Debug.println(
     (fifoStatus & ADC_FCS_OVER_BITS) ? "yes" : "no"
   );
 
-  Serial.print("ADC UNDER: ");
-  Serial.println(
+  Debug.print("ADC UNDER: ");
+  Debug.println(
     (fifoStatus & ADC_FCS_UNDER_BITS) ? "yes" : "no"
   );
 
-  Serial.print("samples/channel: ");
-  Serial.println(plan.samplesPerChannel);
+  Debug.print("samples/channel: ");
+  Debug.println(plan.samplesPerChannel);
 
-  Serial.print("capture time: ");
-  Serial.print(plan.captureTimeUs);
-  Serial.println(" us");
+  Debug.print("capture time: ");
+  Debug.print(plan.captureTimeUs);
+  Debug.println(" us");
 
-  Serial.print("programmed aggregate rate: ");
-  Serial.print(plan.aggregateSampleRate / 1000.0f, 1);
-  Serial.println(" kS/s");
+  Debug.print("programmed aggregate rate: ");
+  Debug.print(plan.aggregateSampleRate / 1000.0f, 1);
+  Debug.println(" kS/s");
 
-  Serial.print("measured aggregate rate: ");
-  Serial.print(plan.measuredAggregateRate / 1000.0f, 1);
-  Serial.println(" kS/s");
+  Debug.print("measured aggregate rate: ");
+  Debug.print(plan.measuredAggregateRate / 1000.0f, 1);
+  Debug.println(" kS/s");
 
-  Serial.print("clk_adc: ");
-  Serial.print(clock_get_hz(clk_adc));
-  Serial.println(" Hz");
+  Debug.print("clk_adc: ");
+  Debug.print(clock_get_hz(clk_adc));
+  Debug.println(" Hz");
 
-  Serial.print("plan adcClockDiv: ");
-  Serial.println(plan.adcClockDiv, 6);
+  Debug.print("plan adcClockDiv: ");
+  Debug.println(plan.adcClockDiv, 6);
 
-  Serial.print("ADC DIV register: 0x");
-  Serial.println(adc_hw->div, HEX);
+  Debug.print("ADC DIV register: 0x");
+  Debug.println(adc_hw->div, HEX);
 
-  Serial.print("ADC DIV integer: ");
-  Serial.println(
+  Debug.print("ADC DIV integer: ");
+  Debug.println(
     (adc_hw->div & ADC_DIV_INT_BITS) >> ADC_DIV_INT_LSB
   );
 
-  Serial.print("ADC DIV frac: ");
-  Serial.println(
+  Debug.print("ADC DIV frac: ");
+  Debug.println(
     (adc_hw->div & ADC_DIV_FRAC_BITS) >> ADC_DIV_FRAC_LSB
   );
 
-  Serial.print("ADC FCS THRESH: ");
-  Serial.println(
+  Debug.print("ADC FCS THRESH: ");
+  Debug.println(
     (fifoStatus & ADC_FCS_THRESH_BITS) >> ADC_FCS_THRESH_LSB
   );
 
-  Serial.print("ADC FCS DREQ_EN: ");
-  Serial.println(
+  Debug.print("ADC FCS DREQ_EN: ");
+  Debug.println(
     (fifoStatus & ADC_FCS_DREQ_EN_BITS) ? "yes" : "no"
   );
 
-  Serial.println("DMA channel states:");
+  Debug.println("DMA channel states:");
 
   for (uint8_t ch = 0; ch < NUM_DMA_CHANNELS; ch++) {
     uint32_t ctrl = dma_hw->ch[ch].ctrl_trig;
 
-    Serial.print("  ch");
-    Serial.print(ch);
+    Debug.print("  ch");
+    Debug.print(ch);
 
-    Serial.print(" busy=");
-    Serial.print(
+    Debug.print(" busy=");
+    Debug.print(
       (ctrl & DMA_CH0_CTRL_TRIG_BUSY_BITS) ? 1 : 0
     );
 
-    Serial.print(" count=");
-    Serial.print(dma_hw->ch[ch].transfer_count);
+    Debug.print(" count=");
+    Debug.print(dma_hw->ch[ch].transfer_count);
 
-    Serial.print(" ctrl=0x");
-    Serial.println(ctrl, HEX);
+    Debug.print(" ctrl=0x");
+    Debug.println(ctrl, HEX);
   }
 
-  Serial.print("DMA INTR: 0x");
-  Serial.println(dma_hw->intr, HEX);
+  Debug.print("DMA INTR: 0x");
+  Debug.println(dma_hw->intr, HEX);
 
-  Serial.print("DMA INTE0: 0x");
-  Serial.println(dma_hw->inte0, HEX);
+  Debug.print("DMA INTE0: 0x");
+  Debug.println(dma_hw->inte0, HEX);
 
-  Serial.print("DMA INTS0: 0x");
-  Serial.println(dma_hw->ints0, HEX);
+  Debug.print("DMA INTS0: 0x");
+  Debug.println(dma_hw->ints0, HEX);
 
-  Serial.print("DMA INTE1: 0x");
-  Serial.println(dma_hw->inte1, HEX);
+  Debug.print("DMA INTE1: 0x");
+  Debug.println(dma_hw->inte1, HEX);
 
-  Serial.print("DMA INTS1: 0x");
-  Serial.println(dma_hw->ints1, HEX);
+  Debug.print("DMA INTS1: 0x");
+  Debug.println(dma_hw->ints1, HEX);
 
-  Serial.println("=== END CAPTURE FAILURE STATE ===");
-  Serial.println();
+  Debug.println("=== END CAPTURE FAILURE STATE ===");
+  Debug.println();
 }
 #endif
 
@@ -2669,7 +2784,7 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
   if (adc_hw->fcs &
       (ADC_FCS_OVER_BITS | ADC_FCS_UNDER_BITS)) {
 
-    Serial.println(
+    Debug.println(
       "LCR ADC error: FIFO status would not clear"
     );
 
@@ -2785,28 +2900,28 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
   // adc_run(false) takes effect. Report this for diagnostics, but do not reject
   // an otherwise clean DMA record solely because of final AINSEL state.
   if (!channelParityValid && !fifoError) {
-    Serial.print("LCR ADC note: final AINSEL=");
-    Serial.print(finalChannel);
-    Serial.println(" after clean DMA capture");
+    Debug.print("LCR ADC note: final AINSEL=");
+    Debug.print(finalChannel);
+    Debug.println(" after clean DMA capture");
   }
 
   // FIFO overflow/underflow means samples were actually lost, so that record
   // cannot be trusted.
   if (fifoError) {
-    Serial.print("LCR ADC capture error:");
+    Debug.print("LCR ADC capture error:");
 
     if (fifoStatus & ADC_FCS_OVER_BITS)
-      Serial.print(" FIFO_OVER");
+      Debug.print(" FIFO_OVER");
 
     if (fifoStatus & ADC_FCS_UNDER_BITS)
-      Serial.print(" FIFO_UNDER");
+      Debug.print(" FIFO_UNDER");
 
     if (!channelParityValid) {
-      Serial.print(" final=");
-      Serial.print(finalChannel);
+      Debug.print(" final=");
+      Debug.print(finalChannel);
     }
 
-    Serial.println();
+    Debug.println();
 
     // Preserve the first real FIFO failure for diagnosis instead of allowing
     // LIVE Measure to immediately hammer the broken capture path again.
@@ -2821,7 +2936,7 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
       );
       lcrMeasureState = LCR_MEASURE_HOLD;
 
-      Serial.println(
+      Debug.println(
         "LCR Measure forced to HOLD after ADC capture failure."
       );
 #endif
@@ -2843,16 +2958,16 @@ void printLCRCaptureRate(const LCRCapturePlan &plan)
   if (plan.aggregateSampleRate > 0.0f)
     ratio = plan.measuredAggregateRate / plan.aggregateSampleRate;
 
-  Serial.print("LCR rate: ");
-  Serial.print(plan.frequency);
-  Serial.print(" Hz  programmed=");
-  Serial.print(plan.aggregateSampleRate / 1000.0f, 1);
-  Serial.print(" kS/s  measured=");
-  Serial.print(plan.measuredAggregateRate / 1000.0f, 1);
-  Serial.print(" kS/s  ratio=");
-  Serial.print(ratio, 4);
-  Serial.print("  spc=");
-  Serial.println(plan.measuredSamplesPerCycle, 2);
+  Debug.print("LCR rate: ");
+  Debug.print(plan.frequency);
+  Debug.print(" Hz  programmed=");
+  Debug.print(plan.aggregateSampleRate / 1000.0f, 1);
+  Debug.print(" kS/s  measured=");
+  Debug.print(plan.measuredAggregateRate / 1000.0f, 1);
+  Debug.print(" kS/s  ratio=");
+  Debug.print(ratio, 4);
+  Debug.print("  spc=");
+  Debug.println(plan.measuredSamplesPerCycle, 2);
 }
 
 
@@ -3326,18 +3441,33 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
 
   LCRCaptureStats iStats = calculateLCRCaptureStats(0, n);
 
+#if LCR_CAPTURE_DEBUG
+    LCRCaptureStats vStats = calculateLCRCaptureStats(1, n);
+#endif
+
   // Detect a TIA output driven against either ADC rail. A saturated
   // current-sense channel requires less TIA gain regardless of the
   // calculated Goertzel amplitude.
   iSaturated = iStats.minimum <= 0 || iStats.maximum >= 4095;
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("LCR I_MEAS ADC: min=");
-  Serial.print(iStats.minimum);
-  Serial.print("  max=");
-  Serial.print(iStats.maximum);
-  Serial.print("  saturated=");
-  Serial.println(iSaturated ? "yes" : "no");
+    Debug.print("LCR I_MEAS ADC: min=");
+    Debug.print(iStats.minimum);
+    Debug.print("  max=");
+    Debug.print(iStats.maximum);
+    Debug.print("  saturated=");
+    Debug.println(iSaturated ? "yes" : "no");
+
+    Debug.print("LCR V_MEAS ADC: min=");
+    Debug.print(vStats.minimum);
+    Debug.print("  max=");
+    Debug.print(vStats.maximum);
+    Debug.print("  saturated=");
+    Debug.println(
+      (vStats.minimum <= 0 || vStats.maximum >= 4095)
+        ? "yes"
+        : "no"
+    );
 #endif
 
   // ADC0/GP26 measures the TIA output representing DUT current.
@@ -3352,6 +3482,39 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
   LCRPhasor vV =
     calculateLCRGoertzel(n, 1, frequency, plan.channelSampleRate, dcV);
 
+  // Preserve the actual ADC-path current amplitude before applying any
+  // analog-path correction or PGA normalization. Autoranging must operate
+  // on the signal level physically present at the ADC.
+  iAmplitude = lcrPhasorAmplitude(vI, n);
+
+#if LCR_CAPTURE_DEBUG
+  float vAmplitude = lcrPhasorAmplitude(vV, n);
+#endif
+
+  // Undo the inversion and attenuation introduced by the GP26 and GP27
+  // ADC-conditioning stages.
+  vI = scaleLCRPhasor(vI, LCR_I_MEAS_CORRECTION);
+  vV = scaleLCRPhasor(vV, LCR_V_MEAS_CORRECTION);
+
+  // Normalize both measurement phasors back to their respective PGA inputs.
+  // This keeps the impedance calculation independent of the selected
+  // current and voltage PGA gains.
+  float currentPgaGain =
+    getLCRPGAGainValue(lcrSettings.currentPgaGain);
+
+  float voltagePgaGain =
+    getLCRPGAGainValue(lcrSettings.voltagePgaGain);
+
+  vI = scaleLCRPhasor(
+    vI,
+    1.0f / currentPgaGain
+  );
+
+  vV = scaleLCRPhasor(
+    vV,
+    1.0f / voltagePgaGain
+  );
+
   // ADC1/V_MEAS is sampled one aggregate conversion after ADC0/I_MEAS.
   float skewSeconds = 1.0f / plan.aggregateSampleRate;
   float skewRadians =
@@ -3359,14 +3522,30 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
 
   vV = rotateLCRPhasor(vV, -skewRadians);
 
-  // Calculate normalized I_MEAS sinusoidal peak amplitude in ADC counts.
-  // This is also used by the TIA autoranging logic.
-  iAmplitude = lcrPhasorAmplitude(vI, n);
-
 #if LCR_CAPTURE_DEBUG
-  Serial.print("LCR I_MEAS amplitude: ");
-  Serial.print(iAmplitude, 3);
-  Serial.println(" ADC counts");
+  Debug.print("LCR I_MEAS amplitude: ");
+  Debug.print(iAmplitude, 3);
+  Debug.println(" ADC counts");
+
+  Debug.print("LCR V_MEAS amplitude: ");
+  Debug.print(vAmplitude, 3);
+  Debug.println(" ADC counts");
+  Debug.print("LCR phasor phase: I=");
+  Debug.print(phaseLCRPhasor(vI), 3);
+
+  Debug.print("  V=");
+  Debug.print(phaseLCRPhasor(vV), 3);
+
+  Debug.print("  V-I=");
+  Debug.print(
+    normalizeLCRPhase(
+      phaseLCRPhasor(vV) -
+      phaseLCRPhasor(vI)
+    ),
+    3
+  );
+
+  Debug.println(" deg");
 #endif
 
   // Four-wire Kelvin impedance calculation.
@@ -3392,6 +3571,94 @@ void setLCRGeneratorFrequency(uint32_t frequency)
 
   lcrDDS.setFrequencyHz(frequency);
   lcrGeneratorFrequency = frequency;
+}
+
+
+// Convert one PGA gain selection into the MAX4052 A/B address state.
+//
+//   Gain    A B
+//    1x     0 0
+//    5x     0 1
+//   25x     1 1
+//  101x     1 0
+//
+void setLCRPGAGain(uint8_t pinA,
+                   uint8_t pinB,
+                   LCRPGAGain gain)
+{
+  bool addressA = false;
+  bool addressB = false;
+
+  switch (gain) {
+    case LCR_PGA_GAIN_1:
+      addressA = false;
+      addressB = false;
+      break;
+
+    case LCR_PGA_GAIN_5:
+      addressA = false;
+      addressB = true;
+      break;
+
+    case LCR_PGA_GAIN_25:
+      addressA = true;
+      addressB = true;
+      break;
+
+    case LCR_PGA_GAIN_101:
+      addressA = true;
+      addressB = false;
+      break;
+  }
+
+  digitalWrite(pinA, addressA ? HIGH : LOW);
+  digitalWrite(pinB, addressB ? HIGH : LOW);
+}
+
+
+// Return the nominal linear gain represented by one PGA selection.
+//
+// This value is used to normalize measured phasors back to the signal
+// present at the PGA input.
+float getLCRPGAGainValue(LCRPGAGain gain)
+{
+  switch (gain) {
+    case LCR_PGA_GAIN_1:
+      return 1.0f;
+
+    case LCR_PGA_GAIN_5:
+      return 5.0f;
+
+    case LCR_PGA_GAIN_25:
+      return 25.0f;
+
+    case LCR_PGA_GAIN_101:
+      return 101.0f;
+  }
+
+  return 1.0f;
+}
+
+
+// Select the voltage-measurement PGA gain.
+void setLCRVoltagePGAGain(LCRPGAGain gain)
+{
+  setLCRPGAGain(
+    LCR_PGA_V_A_PIN,
+    LCR_PGA_V_B_PIN,
+    gain
+  );
+}
+
+
+// Select the current-measurement PGA gain.
+void setLCRCurrentPGAGain(LCRPGAGain gain)
+{
+  setLCRPGAGain(
+    LCR_PGA_I_A_PIN,
+    LCR_PGA_I_B_PIN,
+    gain
+  );
 }
 
 
@@ -3424,12 +3691,12 @@ void selectLCRFeedbackPreset(uint8_t presetIndex)
     feedbackPresets[presetIndex].effectiveResistance;
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("LCR range: ");
-  Serial.print(feedbackPresets[presetIndex].label);
-  Serial.print("  channel=");
-  Serial.print(feedbackPresets[presetIndex].muxChannel);
-  Serial.print("  effective Rf=");
-  Serial.println(feedbackPresets[presetIndex].effectiveResistance, 2);
+  Debug.print("LCR range: ");
+  Debug.print(feedbackPresets[presetIndex].label);
+  Debug.print("  channel=");
+  Debug.print(feedbackPresets[presetIndex].muxChannel);
+  Debug.print("  effective Rf=");
+  Debug.println(feedbackPresets[presetIndex].effectiveResistance, 2);
 #endif
 }
 
@@ -3446,32 +3713,6 @@ int8_t getLCRFeedbackPresetIndex(float feedbackResistance)
   }
 
   return -1;
-}
-
-
-// Determine which TIA feedback preset should be used for the next capture.
-//
-// A low I_MEAS amplitude moves toward more TIA gain. A high amplitude moves
-// toward less TIA gain. The first and last presets naturally limit movement.
-uint8_t chooseLCRAutorangePreset(uint8_t currentPreset,
-                                 float iAmplitude,
-                                 bool iSaturated)
-{
-  // Saturation always means the TIA gain is too high.
-  if (iSaturated && currentPreset > 0)
-    return currentPreset - 1;
-
-  if (iAmplitude < LCR_AUTORANGE_LOW &&
-      currentPreset + 1 < FEEDBACK_PRESET_COUNT) {
-    return currentPreset + 1;
-  }
-
-  if (iAmplitude > LCR_AUTORANGE_HIGH &&
-      currentPreset > 0) {
-    return currentPreset - 1;
-  }
-
-  return currentPreset;
 }
 
 
@@ -3524,12 +3765,12 @@ void initializeLCRValueSprite()
   lcrValueSprite.setTextColor( LCR_SPRITE_WHITE, LCR_SPRITE_BLACK);
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("LCR Measure sprite allocated: ");
-  Serial.print(spriteW);
-  Serial.print(" x ");
-  Serial.print(spriteH);
-  Serial.print("  free heap=");
-  Serial.println(rp2040.getFreeHeap());
+  Debug.print("LCR Measure sprite allocated: ");
+  Debug.print(spriteW);
+  Debug.print(" x ");
+  Debug.print(spriteH);
+  Debug.print("  free heap=");
+  Debug.println(rp2040.getFreeHeap());
 #endif
 }
 
@@ -3560,7 +3801,7 @@ bool reserveLCRSweepSprite()
   );
 
   if (spriteBuffer == nullptr) {
-    Serial.println("ERROR: Unable to reserve LCR Sweep sprite");
+    Debug.println("ERROR: Unable to reserve LCR Sweep sprite");
     return false;
   }
 
@@ -3569,12 +3810,12 @@ bool reserveLCRSweepSprite()
   lcrSweepSprite.setTextColor(LCR_SPRITE_WHITE, LCR_SPRITE_BLACK);
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("Reserved LCR Sweep sprite: ");
-  Serial.print(lcrLayout.content.w);
-  Serial.print(" x ");
-  Serial.print(lcrLayout.content.h);
-  Serial.print("  free heap=");
-  Serial.println(rp2040.getFreeHeap());
+  Debug.print("Reserved LCR Sweep sprite: ");
+  Debug.print(lcrLayout.content.w);
+  Debug.print(" x ");
+  Debug.print(lcrLayout.content.h);
+  Debug.print("  free heap=");
+  Debug.println(rp2040.getFreeHeap());
 #endif
 
   return true;
@@ -4059,6 +4300,28 @@ void calculateFeedbackSelectorLayout()
 }
 
 
+// Calculate More-menu geometry using the shared selector grid.
+// The menu currently contains independent current and voltage PGA controls.
+void calculateMoreSelectorLayout()
+{
+  calculateSelectorButtonGrid(
+    lcrLayout.morePresets,
+    2
+  );
+}
+
+
+// Calculate PGA gain-selector geometry using the shared selector grid.
+// Both voltage and current PGA controls use the same four gain choices.
+void calculatePGASelectorLayout()
+{
+  calculateSelectorButtonGrid(
+    lcrLayout.pgaPresets,
+    4
+  );
+}
+
+
 // Calculate Sweep-mode selector geometry using the shared selector grid.
 // The two available modes are automatically positioned within the common
 // modal selector region.
@@ -4150,6 +4413,17 @@ void initializeLCR()
   pinMode(LCR_RANGE_SEL_A_PIN, OUTPUT);
   pinMode(LCR_RANGE_SEL_B_PIN, OUTPUT);
 
+  // Configure the independent MAX4052 voltage/current PGA address lines.
+  pinMode(LCR_PGA_V_A_PIN, OUTPUT);
+  pinMode(LCR_PGA_V_B_PIN, OUTPUT);
+  pinMode(LCR_PGA_I_A_PIN, OUTPUT);
+  pinMode(LCR_PGA_I_B_PIN, OUTPUT);
+
+  // Begin with both measurement PGAs at unity gain. This preserves the
+  // existing measurement model while giving the MAX4052s a defined state.
+  setLCRVoltagePGAGain(lcrSettings.voltagePgaGain);
+  setLCRCurrentPGAGain(lcrSettings.currentPgaGain);
+
   // Start on X1 / 1 kOhm so the physical feedback path and calibrated
   // effective resistance begin synchronized.
   selectLCRFeedbackPreset(1);
@@ -4159,8 +4433,9 @@ void initializeLCR()
   calculateSweepLayout();
   calculateSelectorLayout();
   calculateFrequencySelectorLayout();
-  // Calculate the button geometry for the selectable TIA feedback ranges.
   calculateFeedbackSelectorLayout();
+  calculateMoreSelectorLayout();
+  calculatePGASelectorLayout();
   calculateSweepModeSelectorLayout();
   calculateSweepStepSelectorLayout();
   calculateSweepDensitySelectorLayout();
@@ -4429,8 +4704,12 @@ void handleMeasureSoftKeyTouch(uint16_t x, uint16_t y)
     return;
   }
 
-  // More - implemented in a future milestone.
+  // Open the More menu for additional Measure controls.
   if (pointInLCRRect(x, y, lcrLayout.measureSoftKeys[3])) {
+    lcrUIState = LCR_UI_MORE_SELECT;
+
+    publishLCRWebUIState();
+    drawLCRMoreSelector();
     return;
   }
 }
@@ -4463,10 +4742,10 @@ void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
 
 #if LCR_CAPTURE_DEBUG
     // Report the frequency selected before returning to the originating screen.
-    Serial.print("LCR frequency selected: ");
-    Serial.print(frequency);
-    Serial.print(" Hz  target=");
-    Serial.println(static_cast<uint8_t>(lcrFrequencyTarget));
+    Debug.print("LCR frequency selected: ");
+    Debug.print(frequency);
+    Debug.print(" Hz  target=");
+    Debug.println(static_cast<uint8_t>(lcrFrequencyTarget));
 #endif
 
     if (lcrFrequencyTarget == LCR_FREQ_MEASURE) {
@@ -4495,6 +4774,70 @@ void handleLCRFrequencySelectorTouch(uint16_t x, uint16_t y)
       drawLCRScreen();
     }
 
+    return;
+  }
+}
+
+
+// Handle touch input while the Measure More menu is displayed.
+void handleLCRMoreSelectorTouch(uint16_t x, uint16_t y)
+{
+  // Current-measurement PGA.
+  if (pointInLCRRect(x, y, lcrLayout.morePresets[0])) {
+    lcrPGATarget = LCR_PGA_TARGET_CURRENT;
+    lcrUIState = LCR_UI_PGA_SELECT;
+
+    publishLCRWebUIState();
+    drawLCRPGASelector();
+    return;
+  }
+
+  // Voltage-measurement PGA.
+  if (pointInLCRRect(x, y, lcrLayout.morePresets[1])) {
+    lcrPGATarget = LCR_PGA_TARGET_VOLTAGE;
+    lcrUIState = LCR_UI_PGA_SELECT;
+
+    publishLCRWebUIState();
+    drawLCRPGASelector();
+    return;
+  }
+
+  // Close More and return to the Measure screen.
+  if (pointInLCRRect(x, y, lcrLayout.selectorCancel)) {
+    returnToLCRMeasureScreen();
+    return;
+  }
+}
+
+
+// Handle touch input while the shared PGA gain selector is displayed.
+void handleLCRPGASelectorTouch(uint16_t x, uint16_t y)
+{
+  for (uint8_t i = 0; i < 4; i++) {
+    if (!pointInLCRRect(x, y, lcrLayout.pgaPresets[i]))
+      continue;
+
+    LCRPGAGain gain = static_cast<LCRPGAGain>(i);
+
+    if (lcrPGATarget == LCR_PGA_TARGET_CURRENT) {
+      lcrSettings.currentPgaGain = gain;
+      setLCRCurrentPGAGain(gain);
+    } else {
+      lcrSettings.voltagePgaGain = gain;
+      setLCRVoltagePGAGain(gain);
+    }
+
+    // Publish the changed PGA state immediately so the browser front panel
+    // remains synchronized with the physical TFT.
+    publishLCRWebUIState();
+
+    returnToLCRMoreSelector();
+    return;
+  }
+
+  // Cancel returns to More without changing either PGA.
+  if (pointInLCRRect(x, y, lcrLayout.selectorCancel)) {
+    returnToLCRMoreSelector();
     return;
   }
 }
@@ -4943,11 +5286,9 @@ void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
     return;
   }
 
-  static const float COMPONENT_PHASE_THRESHOLD_DEG = 10.0f;
-
   LCRFormattedValue formatted;
 
-  if (m.phaseDeg < -COMPONENT_PHASE_THRESHOLD_DEG &&
+  if (m.phaseDeg < -LCR_COMPONENT_PHASE_THRESHOLD_DEG &&
       m.capacitance > 0.0f) {
 
     //
@@ -4955,7 +5296,7 @@ void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
     //
     formatted = formatCapacitance(m.capacitance);
   }
-  else if (m.phaseDeg > COMPONENT_PHASE_THRESHOLD_DEG &&
+  else if (m.phaseDeg > LCR_COMPONENT_PHASE_THRESHOLD_DEG &&
            m.inductance > 0.0f) {
 
     //
@@ -6236,6 +6577,121 @@ void drawLCRFrequencySelector()
 }
 
 
+// Draw the Measure More menu.
+//
+// Additional Measure controls that do not require permanent footer space
+// are presented here. Current and voltage PGA gain controls are kept
+// independent so both measurement paths can eventually be ranged
+// independently.
+void drawLCRMoreSelector()
+{
+  const LCRRect &r = lcrLayout.selector;
+
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  const char *title = "More";
+  int16_t titleWidth = strlen(title) * 6;
+
+  display.setCursor(
+    r.x + (r.w - titleWidth) / 2,
+    r.y + r.h * 7 / 100
+  );
+
+  display.print(title);
+
+  drawLCRSelectorButton(
+    lcrLayout.morePresets[0],
+    "Current PGA",
+    false
+  );
+
+  drawLCRSelectorButton(
+    lcrLayout.morePresets[1],
+    "Voltage PGA",
+    false
+  );
+
+  drawLCRSelectorButton(
+    lcrLayout.selectorCancel,
+    "Cancel",
+    false
+  );
+}
+
+
+// Draw the shared PGA gain selector.
+//
+// The same selector is used for both current and voltage measurement paths.
+// lcrPGATarget identifies which PGA is being edited.
+void drawLCRPGASelector()
+{
+  const LCRRect &r = lcrLayout.selector;
+
+  display.fillRect(
+    r.x,
+    r.y,
+    r.w,
+    r.h,
+    BGCOLOR
+  );
+
+  display.setTextSize(1);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
+
+  const char *title =
+    lcrPGATarget == LCR_PGA_TARGET_CURRENT
+      ? "Current PGA Gain"
+      : "Voltage PGA Gain";
+
+  int16_t titleWidth = strlen(title) * 6;
+
+  display.setCursor(
+    r.x + (r.w - titleWidth) / 2,
+    r.y + r.h * 7 / 100
+  );
+
+  display.print(title);
+
+  const char *labels[] = {
+    "1x",
+    "5x",
+    "25x",
+    "101x"
+  };
+
+  LCRPGAGain selectedGain =
+    lcrPGATarget == LCR_PGA_TARGET_CURRENT
+      ? lcrSettings.currentPgaGain
+      : lcrSettings.voltagePgaGain;
+
+  for (uint8_t i = 0; i < 4; i++) {
+    bool selected =
+      selectedGain == static_cast<LCRPGAGain>(i);
+
+    drawLCRSelectorButton(
+      lcrLayout.pgaPresets[i],
+      labels[i],
+      selected
+    );
+  }
+
+  drawLCRSelectorButton(
+    lcrLayout.selectorCancel,
+    "Cancel",
+    false
+  );
+}
+
+
 // Draw the reference-resistor preset selector over the Measure screen.
 // The currently selected reference is highlighted, while the shared
 // selector geometry keeps drawing and touch targets synchronized.
@@ -6288,6 +6744,16 @@ void drawLCRFeedbackSelector()
 }
 
 
+// Close the PGA selector and return to the Measure More menu.
+void returnToLCRMoreSelector()
+{
+  lcrUIState = LCR_UI_MORE_SELECT;
+
+  publishLCRWebUIState();
+  drawLCRMoreSelector();
+}
+
+
 // Close the shared feedback-range selector and restore the screen that
 // originally opened it.
 void returnFromLCRFeedbackSelector()
@@ -6308,6 +6774,10 @@ void returnFromLCRFeedbackSelector()
 void returnToLCRMeasureScreen()
 {
   lcrUIState = LCR_UI_NORMAL;
+
+  // Publish the navigation change immediately so the browser returns
+  // from any Measure selector at the same time as the physical TFT.
+  publishLCRWebUIState();
 
   drawLCRScreen();
 

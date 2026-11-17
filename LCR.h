@@ -126,6 +126,15 @@ constexpr uint16_t LCR_MAX_SWEEP_POINTS = 1200;
 extern SweepPoint lcrSweepPoints[LCR_MAX_SWEEP_POINTS];
 extern uint16_t lcrSweepPointCount;
 
+// Selectable gain states provided by each MAX4052 PGA network.
+enum LCRPGAGain
+{
+  LCR_PGA_GAIN_1,
+  LCR_PGA_GAIN_5,
+  LCR_PGA_GAIN_25,
+  LCR_PGA_GAIN_101
+};
+
 // Measurement configuration.
 //
 // Defines the parameters required to perform a single measurement.
@@ -133,9 +142,15 @@ extern uint16_t lcrSweepPointCount;
 // autoranging, and sweep support are added.
 struct MeasurementSettings
 {
-  uint32_t frequency;          // Test frequency (Hz)
-  float feedbackResistance;    // Active TIA feedback resistance Rf (Ohms)
-  bool autoRange;              // Automatically select the TIA feedback range
+  uint32_t frequency;           // Test frequency (Hz)
+  float feedbackResistance;     // Active TIA feedback resistance Rf (Ohms)
+  bool autoRange;               // Automatically select the TIA feedback range
+
+  // Measurement-path PGA gains.
+  // Voltage gain remains fixed at 1x for the current hardware revision,
+  // while current gain can be selected independently.
+  LCRPGAGain voltagePgaGain;
+  LCRPGAGain currentPgaGain;
 };
 
 // Stores the active measurement configuration for the LCR analyzer.
@@ -321,6 +336,13 @@ struct LCRWebUIState
   // True when the analyzer automatically selects the TIA feedback range.
   bool autoRange;
 
+  // Active voltage/current measurement PGA gains.
+  uint8_t voltagePgaGain;
+  uint8_t currentPgaGain;
+
+  // Identifies which PGA is being edited by the shared PGA selector.
+  uint8_t pgaTarget;
+
   // Sweep Setup configuration.
   uint32_t sweepStartFrequency;
   uint32_t sweepStopFrequency;
@@ -393,10 +415,22 @@ enum LCRUIState
   LCR_UI_SWEEP_MODE_SELECT,
   LCR_UI_SWEEP_STEP_SELECT,
   LCR_UI_SWEEP_DENSITY_SELECT,
-  LCR_UI_SWEEP_PLOT_SELECT
+  LCR_UI_SWEEP_PLOT_SELECT,
+  LCR_UI_MORE_SELECT,
+  LCR_UI_PGA_SELECT
 };
 
 extern LCRUIState lcrUIState;
+
+// Identifies which measurement PGA is being edited by the common
+// PGA gain selector.
+enum LCRPGATarget
+{
+  LCR_PGA_TARGET_CURRENT,
+  LCR_PGA_TARGET_VOLTAGE
+};
+
+extern LCRPGATarget lcrPGATarget;
 
 // Identifies which frequency setting is currently being edited.
 // The common frequency selector uses this target to update either the
@@ -484,8 +518,16 @@ struct LCRLayout
   // Softkey screen info
   LCRRect selector;
   LCRRect frequencyPresets[LCR_MAX_SELECTOR_BUTTONS];
+
   // Touch regions for the selectable TIA feedback ranges.
   LCRRect feedbackPresets[LCR_MAX_SELECTOR_BUTTONS];
+
+  // More-menu entries.
+  LCRRect morePresets[LCR_MAX_SELECTOR_BUTTONS];
+
+  // Shared PGA gain-selector entries.
+  LCRRect pgaPresets[LCR_MAX_SELECTOR_BUTTONS];
+
   LCRRect sweepStepPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect sweepDensityPresets[LCR_MAX_SELECTOR_BUTTONS];
   LCRRect sweepPlotPresets[LCR_MAX_SELECTOR_BUTTONS];
@@ -626,6 +668,15 @@ void runLCRChannelMatchTest();
 void printLCRChannelMatchTest(uint32_t frequency);
 
 LCRCapturePlan calculateLCRCapturePlan(uint32_t frequency);
+
+// LCR analog-front-end control.
+
+// Select the voltage-measurement PGA gain.
+void setLCRVoltagePGAGain(LCRPGAGain gain);
+
+// Select the current-measurement PGA gain.
+void setLCRCurrentPGAGain(LCRPGAGain gain);
+
 
 // Set the physical LCR excitation generator frequency.
 void setLCRGeneratorFrequency(uint32_t frequency);

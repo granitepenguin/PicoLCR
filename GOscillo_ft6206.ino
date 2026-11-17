@@ -199,6 +199,44 @@ volatile bool wfft, wdds;
 #define INFO_FRQ2 0x02
 #define INFO_FRQ1 0x01
 
+
+// Mirror diagnostic output to both the USB serial connection and UART0.
+//
+// USB:
+//   Serial
+//
+// UART0:
+//   GP0 / physical pin 1 = TX
+//   GP1 / physical pin 2 = RX
+class DebugPrint : public Print
+{
+public:
+  DebugPrint(Print &usb, Print &uart)
+    : usb_(usb), uart_(uart)
+  {
+  }
+
+  size_t write(uint8_t value) override
+  {
+    usb_.write(value);
+    uart_.write(value);
+    return 1;
+  }
+
+  size_t write(const uint8_t *buffer, size_t size) override
+  {
+    usb_.write(buffer, size);
+    uart_.write(buffer, size);
+    return size;
+  }
+
+private:
+  Print &usb_;
+  Print &uart_;
+};
+
+DebugPrint Debug(Serial, Serial1);
+
 void setup(){
   pinMode(CH0DCSW, INPUT_PULLUP);   // CH1 DC/AC
   pinMode(CH1DCSW, INPUT_PULLUP);   // CH2 DC/AC
