@@ -3043,6 +3043,10 @@ void handleNotFound(void) {
 
 void setup1() {
   Serial.begin(115200);
+  // Mirror USB diagnostics on UART0 for external capture and debugging.
+  Serial1.setTX(0);
+  Serial1.setRX(1);
+  Serial1.begin(115200);
 //  Serial.printf("CORE0 = %d\n", xPortGetCoreID());
 #ifdef WIFI_ACCESS_POINT
   WiFi.disconnect(true);
@@ -3059,7 +3063,7 @@ void setup1() {
   }
 #endif
   // print out the IP address of the Raspberry Pi Pico W
-  Serial.print("WiFi Connected. IP = "); Serial.println(WiFi.localIP());
+  Debug.print("WiFi Connected. IP = "); Debug.println(WiFi.localIP());
 //  Serial.print("WiFi Connected. GW = "); Serial.println(WiFi.gatewayIP());
 //  Serial.print("WiFi Connected. DNS = "); Serial.println(WiFi.dnsIP());
 
@@ -3322,8 +3326,8 @@ void sendLCRWebMeasurement(const LCRWebMeasurement &measurement)
   message += "}";
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("WEB TX LCR: ");
-  Serial.println(message);
+  Debug.print("WEB TX LCR: ");
+  Debug.println(message);
 #endif
 
   webSocket.broadcastTXT(message);
@@ -3408,8 +3412,8 @@ void sendLCRWebUIState(const LCRWebUIState &state)
   message += "}";
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("WEB TX LCR UI: ");
-  Serial.println(message);
+  Debug.print("WEB TX LCR UI: ");
+  Debug.println(message);
 #endif
 
   webSocket.broadcastTXT(message);
@@ -3443,8 +3447,8 @@ void sendLCRWebSweepProgress(const LCRWebSweepProgress &progress)
   message += "}";
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("WEB TX LCR SWEEP: ");
-  Serial.println(message);
+  Debug.print("WEB TX LCR SWEEP: ");
+  Debug.println(message);
 #endif
 
   webSocket.broadcastTXT(message);
@@ -3514,8 +3518,8 @@ void sendLCRWebSweepResult(const LCRWebSweepResult &result)
   message += "}";
 
 #if LCR_CAPTURE_DEBUG
-  Serial.print("WEB TX LCR RESULT: ");
-  Serial.println(message);
+  Debug.print("WEB TX LCR RESULT: ");
+  Debug.println(message);
 #endif
 
   webSocket.broadcastTXT(message);
@@ -3549,28 +3553,28 @@ void loop1() {
     // Optional Core 0 -> Core 1 snapshot diagnostic.
     //
 
-    Serial.print("WEB LCR seq=");
-    Serial.print(lcrSnapshot.sequence);
+    Debug.print("WEB LCR seq=");
+    Debug.print(lcrSnapshot.sequence);
 
-    Serial.print("  f=");
-    Serial.print(lcrSnapshot.frequency);
+    Debug.print("  f=");
+    Debug.print(lcrSnapshot.frequency);
 
-    Serial.print(" Hz  |Z|=");
-    Serial.print(lcrSnapshot.impedance);
+    Debug.print(" Hz  |Z|=");
+    Debug.print(lcrSnapshot.impedance);
 
-    Serial.print("  phase=");
-    Serial.print(lcrSnapshot.phaseDeg);
+    Debug.print("  phase=");
+    Debug.print(lcrSnapshot.phaseDeg);
 
-    Serial.print("  Cs=");
-    Serial.print(lcrSnapshot.seriesCapacitance, 9);
-    Serial.print("  Cp=");
-    Serial.print(lcrSnapshot.parallelCapacitance, 9);
-    Serial.print("  Rs=");
-    Serial.print(lcrSnapshot.seriesResistance, 3);
-    Serial.print("  Rp=");
-    Serial.print(lcrSnapshot.parallelResistance, 3);
+    Debug.print("  Cs=");
+    Debug.print(lcrSnapshot.seriesCapacitance, 9);
+    Debug.print("  Cp=");
+    Debug.print(lcrSnapshot.parallelCapacitance, 9);
+    Debug.print("  Rs=");
+    Debug.print(lcrSnapshot.seriesResistance, 3);
+    Debug.print("  Rp=");
+    Debug.print(lcrSnapshot.parallelResistance, 3);
 
-    Serial.println();
+    Debug.println();
 #endif
 
     //
