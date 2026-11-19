@@ -35,26 +35,32 @@ enum LCRMeasurementStatus
 // frequency Sweep measurement backend.
 struct MeasurementPoint
 {
-  uint32_t frequency;           // Measurement frequency (Hz)
-  LCRMeasurementStatus status;  // valid/OL/error
+   uint32_t frequency;           // Measurement frequency (Hz)
+   LCRMeasurementStatus status;  // valid/OL/error
 
-  float vrmsRef;                // RMS voltage across reference resistor
-  float vrmsDut;                // RMS voltage across DUT
+   float vrmsRef;                // RMS voltage across reference resistor
+   float vrmsDut;                // RMS voltage across DUT
 
-  float phaseDeg;               // DUT phase angle (degrees)
+   float phaseDeg;               // DUT phase angle (degrees)
 
-  float impedance;              // |Z| Magnitude (Ohms)
+   // Fundamental complex impedance.
+   float impedance;              // |Z| magnitude (Ohms)
+   float resistance;             // R = Re(Z) (Ohms)
+   float reactance;              // X = Im(Z) (Ohms), signed
 
-  float resistance;             // Real component (Ohms)
-  float reactance;              // Imaginary component (Ohms)
+   // Series-equivalent model.
+   float seriesResistance;       // Rs (Ohms); ESR for a capacitor
+   float seriesCapacitance;      // Cs (Farads)
+   float seriesInductance;       // Ls (Henries)
 
-  float capacitance;            // Equivalent capacitance (Farads)
-  float inductance;             // Equivalent inductance (Henries)
+   // Parallel-equivalent model.
+   float parallelResistance;     // Rp (Ohms)
+   float parallelCapacitance;    // Cp (Farads)
+   float parallelInductance;     // Lp (Henries)
 
-  float esr;                    // Equivalent Series Resistance (Ohms)
-
-  float q;                      // Quality factor
-  float dissipation;            // Dissipation factor
+   // Loss quantities.
+   float q;                      // Quality factor
+   float dissipation;            // Dissipation factor D = 1/Q
 };
 
 
@@ -63,20 +69,25 @@ struct MeasurementPoint
 // be retained in RAM without storing intermediate acquisition values.
 struct SweepPoint
 {
-  uint32_t frequency;
-  bool valid;
+   uint32_t frequency;
+   bool valid;
 
-  float impedance;
-  float phaseDeg;
+   float impedance;
+   float phaseDeg;
 
-  float resistance;
-  float reactance;
+   float resistance;
+   float reactance;
 
-  float capacitance;
-  float inductance;
+   float seriesResistance;
+   float seriesCapacitance;
+   float seriesInductance;
 
-  float esr;
-  float q;
+   float parallelResistance;
+   float parallelCapacitance;
+   float parallelInductance;
+
+   float q;
+   float dissipation;
 };
 
 
@@ -105,10 +116,16 @@ enum LCRSweepPlotType
   LCR_SWEEP_PLOT_PHASE,
   LCR_SWEEP_PLOT_RESISTANCE,
   LCR_SWEEP_PLOT_REACTANCE,
-  LCR_SWEEP_PLOT_ESR,
+
+  LCR_SWEEP_PLOT_RS,
+  LCR_SWEEP_PLOT_RP,
   LCR_SWEEP_PLOT_Q,
-  LCR_SWEEP_PLOT_CAPACITANCE,
-  LCR_SWEEP_PLOT_INDUCTANCE,
+  LCR_SWEEP_PLOT_D,
+
+  LCR_SWEEP_PLOT_CS,
+  LCR_SWEEP_PLOT_CP,
+  LCR_SWEEP_PLOT_LS,
+  LCR_SWEEP_PLOT_LP
 };
 
 extern LCRSweepPlotType lcrSweepPlotType;
@@ -146,9 +163,7 @@ struct MeasurementSettings
   float feedbackResistance;     // Active TIA feedback resistance Rf (Ohms)
   bool autoRange;               // Automatically select the TIA feedback range
 
-  // Measurement-path PGA gains.
-  // Voltage gain remains fixed at 1x for the current hardware revision,
-  // while current gain can be selected independently.
+  // Independently selectable voltage and current measurement-path PGA gains.
   LCRPGAGain voltagePgaGain;
   LCRPGAGain currentPgaGain;
 };
@@ -236,13 +251,23 @@ struct LCRWebMeasurement
   // TIA feedback resistance used to calculate this Kelvin measurement.
   float feedbackResistance;
 
+  float voltagePgaGain;
+  float currentPgaGain;
+
   float impedance;
   float phaseDeg;
+
   float resistance;
   float reactance;
-  float capacitance;
-  float inductance;
-  float esr;
+
+  float seriesResistance;
+  float seriesCapacitance;
+  float seriesInductance;
+
+  float parallelResistance;
+  float parallelCapacitance;
+  float parallelInductance;
+
   float q;
   float dissipation;
 
@@ -283,12 +308,21 @@ struct LCRWebSweepResult
 
   float impedance;
   float phaseDeg;
+
   float resistance;
   float reactance;
-  float capacitance;
-  float inductance;
-  float esr;
+
+  float seriesResistance;
+  float seriesCapacitance;
+  float seriesInductance;
+
+  float parallelResistance;
+  float parallelCapacitance;
+  float parallelInductance;
+
   float q;
+  float dissipation;
+
   // True until Core 1 consumes this published result point.
   volatile bool pending;
 };
@@ -465,7 +499,7 @@ struct LCRRect
 
 // Maximum number of preset buttons supported by an LCR selector.
 // Actual button counts are derived from their preset data tables.
-constexpr uint8_t LCR_MAX_SELECTOR_BUTTONS = 8;
+constexpr uint8_t LCR_MAX_SELECTOR_BUTTONS = 122;
 
 
 // Defines the major screen regions used by the LCR analyzer
@@ -485,6 +519,7 @@ struct LCRLayout
   // Content subdivisions
   LCRRect primary;
   LCRRect secondary;
+  LCRRect impedance;
   LCRRect context;
 
   // Sweep setup tab
