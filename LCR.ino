@@ -235,8 +235,9 @@ constexpr int16_t LCR_BACK_BUTTON_WIDTH_PERCENT = 22;
 constexpr int16_t LCR_TAB_HEIGHT_PERCENT = 10;
 constexpr int16_t LCR_FOOTER_HEIGHT_PERCENT = 12;
 
-constexpr int16_t LCR_PRIMARY_HEIGHT_PERCENT = 42;
+constexpr int16_t LCR_PRIMARY_HEIGHT_PERCENT = 37;
 constexpr int16_t LCR_SECONDARY_HEIGHT_PERCENT = 25;
+constexpr int16_t LCR_IMPEDANCE_HEIGHT_PERCENT = 20;
 
 constexpr int16_t LCR_SELECTOR_MARGIN_PERCENT = 6;
 constexpr int16_t LCR_SELECTOR_GAP_X_PERCENT = 4;
@@ -390,22 +391,23 @@ void publishLCRWebMeasurement(const MeasurementPoint &measurement,
   // Publish the active TIA feedback resistance used for this measurement.
   lcrWebMeasurement.feedbackResistance = settings.feedbackResistance;
 
+  lcrWebMeasurement.voltagePgaGain = getLCRPGAGainValue(settings.voltagePgaGain);
+  lcrWebMeasurement.currentPgaGain = getLCRPGAGainValue(settings.currentPgaGain);
+
   lcrWebMeasurement.impedance = measurement.impedance;
-
   lcrWebMeasurement.phaseDeg = measurement.phaseDeg;
-
   lcrWebMeasurement.resistance = measurement.resistance;
-
   lcrWebMeasurement.reactance = measurement.reactance;
 
-  lcrWebMeasurement.capacitance = measurement.capacitance;
+  lcrWebMeasurement.seriesResistance = measurement.seriesResistance;
+  lcrWebMeasurement.seriesCapacitance = measurement.seriesCapacitance;
+  lcrWebMeasurement.seriesInductance = measurement.seriesInductance;
 
-  lcrWebMeasurement.inductance = measurement.inductance;
-
-  lcrWebMeasurement.esr = measurement.esr;
+  lcrWebMeasurement.parallelResistance = measurement.parallelResistance;
+  lcrWebMeasurement.parallelCapacitance = measurement.parallelCapacitance;
+  lcrWebMeasurement.parallelInductance = measurement.parallelInductance;
 
   lcrWebMeasurement.q = measurement.q;
-
   lcrWebMeasurement.dissipation = measurement.dissipation;
 
   lcrWebMeasurement.measureState = static_cast<uint8_t>(lcrMeasureState);
@@ -502,10 +504,16 @@ void publishLCRWebSweepResult(uint16_t index)
   lcrWebSweepResult.phaseDeg = point.phaseDeg;
   lcrWebSweepResult.resistance = point.resistance;
   lcrWebSweepResult.reactance = point.reactance;
-  lcrWebSweepResult.capacitance = point.capacitance;
-  lcrWebSweepResult.inductance = point.inductance;
-  lcrWebSweepResult.esr = point.esr;
+  lcrWebSweepResult.seriesResistance = point.seriesResistance;
+  lcrWebSweepResult.seriesCapacitance = point.seriesCapacitance;
+  lcrWebSweepResult.seriesInductance = point.seriesInductance;
+
+  lcrWebSweepResult.parallelResistance = point.parallelResistance;
+  lcrWebSweepResult.parallelCapacitance = point.parallelCapacitance;
+  lcrWebSweepResult.parallelInductance = point.parallelInductance;
+
   lcrWebSweepResult.q = point.q;
+  lcrWebSweepResult.dissipation = point.dissipation;
 
   // Mark the completed point available before publishing its sequence.
   lcrWebSweepResult.pending = true;
@@ -627,15 +635,22 @@ struct SweepPlotPreset
 // Available quantities that can be displayed from retained Sweep results.
 // Adding another stored quantity later only requires extending this table
 // and teaching the plot-value helpers how to retrieve and scale it.
+// Available Sweep plots are ordered to match the 4-column selector grid.
 const SweepPlotPreset sweepPlotPresets[] = {
-  { "|Z|",   LCR_SWEEP_PLOT_IMPEDANCE   },
-  { "Phase", LCR_SWEEP_PLOT_PHASE       },
-  { "R",     LCR_SWEEP_PLOT_RESISTANCE  },
-  { "X",     LCR_SWEEP_PLOT_REACTANCE   },
-  { "ESR",   LCR_SWEEP_PLOT_ESR         },
-  { "Q",     LCR_SWEEP_PLOT_Q           },
-  { "C",     LCR_SWEEP_PLOT_CAPACITANCE },
-  { "L",     LCR_SWEEP_PLOT_INDUCTANCE  }
+  { "|Z|",   LCR_SWEEP_PLOT_IMPEDANCE  },
+  { "Phase", LCR_SWEEP_PLOT_PHASE      },
+  { "R",     LCR_SWEEP_PLOT_RESISTANCE },
+  { "X",     LCR_SWEEP_PLOT_REACTANCE  },
+
+  { "Rs",    LCR_SWEEP_PLOT_RS         },
+  { "Rp",    LCR_SWEEP_PLOT_RP         },
+  { "Q",     LCR_SWEEP_PLOT_Q          },
+  { "D",     LCR_SWEEP_PLOT_D          },
+
+  { "Cs",    LCR_SWEEP_PLOT_CS         },
+  { "Cp",    LCR_SWEEP_PLOT_CP         },
+  { "Ls",    LCR_SWEEP_PLOT_LS         },
+  { "Lp",    LCR_SWEEP_PLOT_LP         }
 };
 
 constexpr uint8_t SWEEP_PLOT_PRESET_COUNT =
@@ -655,17 +670,22 @@ SweepPoint makeSweepPoint(const MeasurementPoint &measurement)
   point.phaseDeg = measurement.phaseDeg;
   point.resistance = measurement.resistance;
   point.reactance = measurement.reactance;
-  point.capacitance = measurement.capacitance;
-  point.inductance = measurement.inductance;
-  point.esr = measurement.esr;
+  point.seriesResistance = measurement.seriesResistance;
+  point.seriesCapacitance = measurement.seriesCapacitance;
+  point.seriesInductance = measurement.seriesInductance;
+
+  point.parallelResistance = measurement.parallelResistance;
+  point.parallelCapacitance = measurement.parallelCapacitance;
+  point.parallelInductance = measurement.parallelInductance;
+
   point.q = measurement.q;
+  point.dissipation = measurement.dissipation;
 
   return point;
 }
 
 
-// Return the value from one SweepPoint that corresponds to the currently
-// selected Results plot type.
+// Return the stored Sweep value for the currently selected plot quantity.
 float getLCRSweepPlotValue(const SweepPoint &point)
 {
   switch (lcrSweepPlotType) {
@@ -678,17 +698,29 @@ float getLCRSweepPlotValue(const SweepPoint &point)
     case LCR_SWEEP_PLOT_REACTANCE:
       return point.reactance;
 
-    case LCR_SWEEP_PLOT_CAPACITANCE:
-    return point.capacitance;
+    case LCR_SWEEP_PLOT_RS:
+      return point.seriesResistance;
 
-    case LCR_SWEEP_PLOT_INDUCTANCE:
-      return point.inductance;
-
-    case LCR_SWEEP_PLOT_ESR:
-      return point.esr;
+    case LCR_SWEEP_PLOT_RP:
+      return point.parallelResistance;
 
     case LCR_SWEEP_PLOT_Q:
       return point.q;
+
+    case LCR_SWEEP_PLOT_D:
+      return point.dissipation;
+
+    case LCR_SWEEP_PLOT_CS:
+      return point.seriesCapacitance;
+
+    case LCR_SWEEP_PLOT_CP:
+      return point.parallelCapacitance;
+
+    case LCR_SWEEP_PLOT_LS:
+      return point.seriesInductance;
+
+    case LCR_SWEEP_PLOT_LP:
+      return point.parallelInductance;
 
     case LCR_SWEEP_PLOT_IMPEDANCE:
     default:
@@ -764,13 +796,17 @@ SweepPlotRange padLCRSweepPlotRange(SweepPlotRange range)
   range.minimum -= padding;
   range.maximum += padding;
 
-  // Magnitude-only quantities cannot be negative.
+  // Only phase, R, and X can meaningfully cross zero in the current model.
   if ((lcrSweepPlotType == LCR_SWEEP_PLOT_IMPEDANCE ||
-     lcrSweepPlotType == LCR_SWEEP_PLOT_ESR ||
-     lcrSweepPlotType == LCR_SWEEP_PLOT_Q ||
-     lcrSweepPlotType == LCR_SWEEP_PLOT_CAPACITANCE ||
-     lcrSweepPlotType == LCR_SWEEP_PLOT_INDUCTANCE) &&
-    range.minimum < 0.0f) {
+       lcrSweepPlotType == LCR_SWEEP_PLOT_RS ||
+       lcrSweepPlotType == LCR_SWEEP_PLOT_RP ||
+       lcrSweepPlotType == LCR_SWEEP_PLOT_Q ||
+       lcrSweepPlotType == LCR_SWEEP_PLOT_D ||
+       lcrSweepPlotType == LCR_SWEEP_PLOT_CS ||
+       lcrSweepPlotType == LCR_SWEEP_PLOT_CP ||
+       lcrSweepPlotType == LCR_SWEEP_PLOT_LS ||
+       lcrSweepPlotType == LCR_SWEEP_PLOT_LP) &&
+      range.minimum < 0.0f) {
 
     range.minimum = 0.0f;
   }
@@ -785,7 +821,8 @@ SweepPlotRange padLCRSweepPlotRange(SweepPlotRange range)
 SweepAxisScale getLCRSweepAxisScale(const SweepPlotRange &range)
 {
   switch (lcrSweepPlotType) {
-    case LCR_SWEEP_PLOT_CAPACITANCE: {
+    case LCR_SWEEP_PLOT_CS:
+    case LCR_SWEEP_PLOT_CP: {
       float largest =
         max(fabsf(range.minimum), fabsf(range.maximum));
 
@@ -801,7 +838,8 @@ SweepAxisScale getLCRSweepAxisScale(const SweepPlotRange &range)
       return { 1.0f, "F" };
     }
 
-    case LCR_SWEEP_PLOT_INDUCTANCE: {
+    case LCR_SWEEP_PLOT_LS:
+    case LCR_SWEEP_PLOT_LP: {
       float largest =
         max(fabsf(range.minimum), fabsf(range.maximum));
 
@@ -821,12 +859,14 @@ SweepAxisScale getLCRSweepAxisScale(const SweepPlotRange &range)
       return { 1.0f, "deg" };
 
     case LCR_SWEEP_PLOT_Q:
+    case LCR_SWEEP_PLOT_D:
       return { 1.0f, "" };
 
     case LCR_SWEEP_PLOT_IMPEDANCE:
     case LCR_SWEEP_PLOT_RESISTANCE:
     case LCR_SWEEP_PLOT_REACTANCE:
-    case LCR_SWEEP_PLOT_ESR:
+    case LCR_SWEEP_PLOT_RS:
+    case LCR_SWEEP_PLOT_RP:
     default:
       break;
   }
@@ -1651,11 +1691,12 @@ LCRSweepPlotType getLCRPrimarySweepPlotType()
   float averagePhase =
     phaseSum / static_cast<float>(validCount);
 
+  // Default reactive DUTs to their series-equivalent Sweep representation.
   if (averagePhase < -LCR_COMPONENT_PHASE_THRESHOLD_DEG)
-    return LCR_SWEEP_PLOT_CAPACITANCE;
+    return LCR_SWEEP_PLOT_CS;
 
   if (averagePhase > LCR_COMPONENT_PHASE_THRESHOLD_DEG)
-    return LCR_SWEEP_PLOT_INDUCTANCE;
+    return LCR_SWEEP_PLOT_LS;
 
   return LCR_SWEEP_PLOT_IMPEDANCE;
 }
@@ -1793,6 +1834,101 @@ void updateLCRSweep()
 }
 
 
+void calculateLCREquivalentModel(MeasurementPoint &measurement)
+{
+   const float epsilon = 1.0e-12f;
+
+   // Clear all derived equivalent-model values before calculating them.
+   measurement.seriesResistance = measurement.resistance;
+   measurement.seriesCapacitance = 0.0f;
+   measurement.seriesInductance = 0.0f;
+
+   measurement.parallelResistance = 0.0f;
+   measurement.parallelCapacitance = 0.0f;
+   measurement.parallelInductance = 0.0f;
+
+   measurement.q = 0.0f;
+   measurement.dissipation = 0.0f;
+
+   if (measurement.frequency == 0)
+      return;
+
+   float omega =
+      2.0f * PI * static_cast<float>(measurement.frequency);
+
+   //
+   // Series-equivalent model.
+   //
+   // Z = Rs + jXs
+   //
+   // Capacitive reactance is negative.
+   // Inductive reactance is positive.
+   //
+   if (measurement.reactance < -epsilon) {
+      measurement.seriesCapacitance =
+         -1.0f / (omega * measurement.reactance);
+   }
+   else if (measurement.reactance > epsilon) {
+      measurement.seriesInductance =
+         measurement.reactance / omega;
+   }
+
+   //
+   // Parallel-equivalent model.
+   //
+   // Convert impedance to admittance:
+   //
+   //        1       R - jX
+   // Y = ------- = --------
+   //      R + jX    R^2+X^2
+   //
+   // Y = G + jB
+   //
+   float impedanceSquared =
+      measurement.resistance * measurement.resistance +
+      measurement.reactance * measurement.reactance;
+
+   if (impedanceSquared > epsilon) {
+
+      float conductance =
+         measurement.resistance / impedanceSquared;
+
+      float susceptance =
+         -measurement.reactance / impedanceSquared;
+
+      if (fabsf(conductance) > epsilon) {
+         measurement.parallelResistance =
+            1.0f / conductance;
+      }
+
+      if (susceptance > epsilon) {
+         measurement.parallelCapacitance =
+            susceptance / omega;
+      }
+      else if (susceptance < -epsilon) {
+         measurement.parallelInductance =
+            -1.0f / (omega * susceptance);
+      }
+   }
+
+   //
+   // Loss quantities.
+   //
+   // Q = |X| / Rs
+   // D = 1/Q = Rs / |X|
+   //
+   if (fabsf(measurement.resistance) > epsilon) {
+      measurement.q =
+         fabsf(measurement.reactance /
+               measurement.resistance);
+   }
+
+   if (fabsf(measurement.reactance) > epsilon) {
+      measurement.dissipation =
+         fabsf(measurement.resistance /
+               measurement.reactance);
+   }
+}
 
 // measurement objects
 MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings);
@@ -1812,16 +1948,11 @@ MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings)
   m.phaseDeg = phase;
   m.resistance = m.impedance * cos(radians(phase));
   m.reactance = m.impedance * sin(radians(phase));
+  calculateLCREquivalentModel(m);
 
   // Sweep the simulated capacitance across the nF/uF boundary so automatic
   // engineering-unit selection can be verified without measurement hardware.
   float simulationPosition = (sin(millis() / 2500.0f) + 1.0f) / 2.0f;
-  m.capacitance = (500.0e-9f + simulationPosition * 1.0e-6f);
-
-  m.inductance = 0.0f;
-  m.esr = 2.5f;
-  m.q = fabs(m.reactance) / m.resistance;
-  m.dissipation = 0.0012f;
 
   return m;
 }
@@ -1948,31 +2079,7 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
   measurement.phaseDeg = phaseLCRPhasor(impedance);
 
   // Series-equivalent quantities derived from complex impedance.
-  measurement.esr = measurement.resistance;
-
-  float omega = 2.0f * PI * settings.frequency;
-
-  if (measurement.reactance < 0.0f) {
-    measurement.capacitance = -1.0f / (omega * measurement.reactance);
-    measurement.inductance = 0.0f;
-  } else if (measurement.reactance > 0.0f) {
-    measurement.capacitance = 0.0f;
-    measurement.inductance = measurement.reactance / omega;
-  } else {
-    measurement.capacitance = 0.0f;
-    measurement.inductance = 0.0f;
-  }
-
-  if (fabsf(measurement.resistance) > 0.000001f)
-    measurement.q = fabsf(measurement.reactance / measurement.resistance);
-  else
-    measurement.q = 0.0f;
-
-  if (fabsf(measurement.reactance) > 0.000001f)
-    measurement.dissipation =
-      fabsf(measurement.resistance / measurement.reactance);
-  else
-    measurement.dissipation = 0.0f;
+  calculateLCREquivalentModel(measurement);
 
   measurement.status = LCR_MEASUREMENT_VALID;
   return measurement;
@@ -3877,35 +3984,39 @@ void calculateLCRLayout()
 
 
 
-// Divide the common content and footer regions into areas used by the
-// Measure tab, including primary/secondary measurements, context fields,
-// and the four Measure soft-key touch regions.
+// Divide the Measure content into primary, equivalent-model, impedance, and
+// operating-context regions plus the four Measure soft-key touch regions.
 void calculateMeasureLayout()
 {
   const LCRRect &content = lcrLayout.content;
   const LCRRect &footer = lcrLayout.footer;
 
-  const int16_t primaryH = content.h * LCR_PRIMARY_HEIGHT_PERCENT / 100;
-  const int16_t secondaryH = content.h * LCR_SECONDARY_HEIGHT_PERCENT / 100;
-  const int16_t secondaryY = content.y + primaryH;
-  const int16_t contextY = secondaryY + secondaryH;
-  const int16_t contextH = content.h - primaryH - secondaryH;
+  const int16_t primaryH =
+    content.h * LCR_PRIMARY_HEIGHT_PERCENT / 100;
+  const int16_t secondaryH =
+    content.h * LCR_SECONDARY_HEIGHT_PERCENT / 100;
+  const int16_t impedanceH =
+    content.h * LCR_IMPEDANCE_HEIGHT_PERCENT / 100;
 
-  lcrLayout.primary = { content.x, content.y, content.w, primaryH };
-  lcrLayout.secondary = { content.x, secondaryY, content.w, secondaryH };
-  lcrLayout.context = { content.x, contextY, content.w, contextH };
+  const int16_t secondaryY = content.y + primaryH;
+  const int16_t impedanceY = secondaryY + secondaryH;
+  const int16_t contextY = impedanceY + impedanceH;
+  const int16_t contextH = content.y + content.h - contextY;
+
+  lcrLayout.primary = {content.x, content.y, content.w, primaryH};
+  lcrLayout.secondary = {content.x, secondaryY, content.w, secondaryH};
+  lcrLayout.impedance = {content.x, impedanceY, content.w, impedanceH};
+  lcrLayout.context = {content.x, contextY, content.w, contextH};
 
   const int16_t softKeyCount = 4;
   const int16_t softKeyW = footer.w / softKeyCount;
 
   for (int16_t i = 0; i < softKeyCount; i++) {
     int16_t x = footer.x + i * softKeyW;
-
     int16_t w = (i == softKeyCount - 1)
-      ? footer.w - softKeyW * i
-      : softKeyW;
+      ? footer.w - softKeyW * i : softKeyW;
 
-    lcrLayout.measureSoftKeys[i] = { x, footer.y, w, footer.h };
+    lcrLayout.measureSoftKeys[i] = {x, footer.y, w, footer.h};
   }
 }
 
@@ -4221,12 +4332,15 @@ void calculateSelectorButtonGrid(LCRRect *buttons, uint8_t count)
 
   uint8_t columns;
 
+  // Preserve the existing layouts while allowing up to 12 choices in 3 rows.
   if (count <= 3)
     columns = count;
   else if (count == 4)
     columns = 2;
-  else
+  else if (count <= 9)
     columns = 3;
+  else
+    columns = 4;
 
   uint8_t rows = (count + columns - 1) / columns;
 
@@ -4529,7 +4643,7 @@ LCRFormattedValue formatInductance(float henries)
 
 // Format impedance or resistance using Ohm, kOhm, or MOhm.
 // This formatter can be reused for impedance magnitude, resistance,
-// reactance, ESR, and reference-resistor values.
+// reactance, series/parallel resistance, and reference-resistor values.
 LCRFormattedValue formatImpedance(float ohms)
 {
   float magnitude = fabs(ohms);
@@ -5264,24 +5378,8 @@ void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
   if (m.status == LCR_MEASUREMENT_OL) {
     lcrValueSprite.fillSprite(LCR_SPRITE_BLACK);
 
-    drawLCRSpriteMeasurement(
-      r.w,
-      r.h,
-      "OL",
-      "",
-      4,
-      2,
-      LCR_SPRITE_WHITE
-    );
-
-    lcrValueSprite.pushSprite(
-      r.x,
-      r.y,
-      0,
-      0,
-      r.w,
-      r.h
-    );
+    drawLCRSpriteMeasurement( r.w, r.h, "OL", "", 4, 2, LCR_SPRITE_WHITE);
+    lcrValueSprite.pushSprite( r.x, r.y, 0, 0, r.w, r.h);
 
     return;
   }
@@ -5289,20 +5387,20 @@ void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
   LCRFormattedValue formatted;
 
   if (m.phaseDeg < -LCR_COMPONENT_PHASE_THRESHOLD_DEG &&
-      m.capacitance > 0.0f) {
+      m.seriesCapacitance > 0.0f) {
 
     //
     // Predominantly capacitive DUT.
     //
-    formatted = formatCapacitance(m.capacitance);
+    formatted = formatCapacitance(m.seriesCapacitance);
   }
   else if (m.phaseDeg > LCR_COMPONENT_PHASE_THRESHOLD_DEG &&
-           m.inductance > 0.0f) {
+           m.seriesInductance > 0.0f) {
 
     //
     // Predominantly inductive DUT.
     //
-    formatted = formatInductance(m.inductance);
+    formatted = formatInductance(m.seriesInductance);
   }
   else {
 
@@ -5335,11 +5433,7 @@ void drawLCRPrimaryMeasurement(const MeasurementPoint &m)
 }
 
 
-// Render the detailed single-frequency measurement results.
-//
-// The backend already produces the complete complex impedance measurement.
-// This region exposes the derived C/L, phase, R, X, ESR, and Q values so the
-// Measure tab can be used to validate reactive DUTs directly.
+// Draw the series/parallel equivalent model and loss quantities.
 void drawLCRSecondaryMeasurement(const MeasurementPoint &m)
 {
   const LCRRect &r = lcrLayout.secondary;
@@ -5348,210 +5442,207 @@ void drawLCRSecondaryMeasurement(const MeasurementPoint &m)
   lcrValueSprite.setTextColor(LCR_SPRITE_WHITE, LCR_SPRITE_BLACK);
   lcrValueSprite.setTextSize(1);
 
-  const int16_t leftLabelX  = 8;
-  const int16_t leftValueX  = r.w * 18 / 100;
-
+  const int16_t leftLabelX = 8;
+  const int16_t leftValueX = r.w * 18 / 100;
   const int16_t rightLabelX = r.w * 53 / 100;
   const int16_t rightValueX = r.w * 68 / 100;
 
-  const int16_t row1Y = r.h * 8 / 100;
-  const int16_t row2Y = r.h * 40 / 100;
-  const int16_t row3Y = r.h * 72 / 100;
+  // Keep equivalent-model rows together regardless of region height.
+  const int16_t rowSpacing = 10;
+  const int16_t row1Y = 4;
+  const int16_t row2Y = row1Y + rowSpacing;
+  const int16_t row3Y = row2Y + rowSpacing;
 
   char value[24];
 
-  // No derived values are trustworthy when the measurement is over limit.
+  // Derived values are not valid when the measurement is over limit.
   if (m.status == LCR_MEASUREMENT_OL) {
+    const char *labels[] = {"Cs/Ls", "Rs", "Cp/Lp", "Rp", "Q", "D"};
+    const int16_t labelX[] = {
+      leftLabelX, rightLabelX, leftLabelX,
+      rightLabelX, leftLabelX, rightLabelX
+    };
+    const int16_t valueX[] = {
+      leftValueX, rightValueX, leftValueX,
+      rightValueX, leftValueX, rightValueX
+    };
+    const int16_t rowY[] = {
+      row1Y, row1Y, row2Y, row2Y, row3Y, row3Y
+    };
 
-    lcrValueSprite.setCursor(leftLabelX, row1Y);
-    lcrValueSprite.print("C/L");
-    lcrValueSprite.setCursor(leftValueX, row1Y);
-    lcrValueSprite.print("--");
+    for (uint8_t i = 0; i < 6; i++) {
+      lcrValueSprite.setCursor(labelX[i], rowY[i]);
+      lcrValueSprite.print(labels[i]);
+      lcrValueSprite.setCursor(valueX[i], rowY[i]);
+      lcrValueSprite.print("--");
+    }
 
-    lcrValueSprite.setCursor(rightLabelX, row1Y);
-    lcrValueSprite.print("Phase");
-    lcrValueSprite.setCursor(rightValueX, row1Y);
-    lcrValueSprite.print("--");
-
-    lcrValueSprite.setCursor(leftLabelX, row2Y);
-    lcrValueSprite.print("R");
-    lcrValueSprite.setCursor(leftValueX, row2Y);
-    lcrValueSprite.print("--");
-
-    lcrValueSprite.setCursor(rightLabelX, row2Y);
-    lcrValueSprite.print("X");
-    lcrValueSprite.setCursor(rightValueX, row2Y);
-    lcrValueSprite.print("--");
-
-    lcrValueSprite.setCursor(leftLabelX, row3Y);
-    lcrValueSprite.print("ESR");
-    lcrValueSprite.setCursor(leftValueX, row3Y);
-    lcrValueSprite.print("--");
-
-    lcrValueSprite.setCursor(rightLabelX, row3Y);
-    lcrValueSprite.print("Q");
-    lcrValueSprite.setCursor(rightValueX, row3Y);
-    lcrValueSprite.print("--");
-
-    lcrValueSprite.pushSprite(
-      r.x,
-      r.y,
-      0,
-      0,
-      r.w,
-      r.h
-    );
-
+    lcrValueSprite.pushSprite(r.x, r.y, 0, 0, r.w, r.h);
     return;
   }
 
-  //
-  // Row 1 left: capacitance or inductance.
-  //
+  // Show the appropriate series and parallel reactive model for the DUT.
   if (m.reactance < 0.0f) {
-    LCRFormattedValue formatted = formatCapacitance(m.capacitance);
+    LCRFormattedValue series = formatCapacitance(m.seriesCapacitance);
+    LCRFormattedValue parallel = formatCapacitance(m.parallelCapacitance);
 
     lcrValueSprite.setCursor(leftLabelX, row1Y);
-    lcrValueSprite.print("C");
+    lcrValueSprite.print("Cs");
+    snprintf(value, sizeof(value), "%s %s", series.value, series.unit);
+    lcrValueSprite.setCursor(leftValueX, row1Y);
+    lcrValueSprite.print(value);
 
-    snprintf(
-      value,
-      sizeof(value),
-      "%s %s",
-      formatted.value,
-      formatted.unit
-    );
+    lcrValueSprite.setCursor(leftLabelX, row2Y);
+    lcrValueSprite.print("Cp");
+    snprintf(value, sizeof(value), "%s %s", parallel.value, parallel.unit);
+    lcrValueSprite.setCursor(leftValueX, row2Y);
+    lcrValueSprite.print(value);
   }
   else if (m.reactance > 0.0f) {
-    LCRFormattedValue formatted = formatInductance(m.inductance);
+    LCRFormattedValue series = formatInductance(m.seriesInductance);
+    LCRFormattedValue parallel = formatInductance(m.parallelInductance);
 
     lcrValueSprite.setCursor(leftLabelX, row1Y);
-    lcrValueSprite.print("L");
+    lcrValueSprite.print("Ls");
+    snprintf(value, sizeof(value), "%s %s", series.value, series.unit);
+    lcrValueSprite.setCursor(leftValueX, row1Y);
+    lcrValueSprite.print(value);
 
-    snprintf(
-      value,
-      sizeof(value),
-      "%s %s",
-      formatted.value,
-      formatted.unit
-    );
+    lcrValueSprite.setCursor(leftLabelX, row2Y);
+    lcrValueSprite.print("Lp");
+    snprintf(value, sizeof(value), "%s %s", parallel.value, parallel.unit);
+    lcrValueSprite.setCursor(leftValueX, row2Y);
+    lcrValueSprite.print(value);
   }
   else {
     lcrValueSprite.setCursor(leftLabelX, row1Y);
-    lcrValueSprite.print("C/L");
+    lcrValueSprite.print("Cs/Ls");
+    lcrValueSprite.setCursor(leftValueX, row1Y);
+    lcrValueSprite.print("--");
 
-    snprintf(value, sizeof(value), "--");
+    lcrValueSprite.setCursor(leftLabelX, row2Y);
+    lcrValueSprite.print("Cp/Lp");
+    lcrValueSprite.setCursor(leftValueX, row2Y);
+    lcrValueSprite.print("--");
   }
 
-  lcrValueSprite.setCursor(leftValueX, row1Y);
-  lcrValueSprite.print(value);
-
-  //
-  // Row 1 right: phase.
-  //
+  // Rs is the series resistance and represents ESR for a capacitive DUT.
   lcrValueSprite.setCursor(rightLabelX, row1Y);
-  lcrValueSprite.print("Phase");
+  lcrValueSprite.print("Rs");
 
-  snprintf(
-    value,
-    sizeof(value),
-    "%.2f deg",
-    m.phaseDeg
-  );
+  LCRFormattedValue rs = formatImpedance(m.seriesResistance);
+  snprintf(value, sizeof(value), "%s %s", rs.value, rs.unit);
 
   lcrValueSprite.setCursor(rightValueX, row1Y);
   lcrValueSprite.print(value);
 
-  //
-  // Row 2 left: series resistance.
-  //
-  lcrValueSprite.setCursor(leftLabelX, row2Y);
-  lcrValueSprite.print("R");
-
-  LCRFormattedValue resistance =
-    formatImpedance(m.resistance);
-
-  snprintf(
-    value,
-    sizeof(value),
-    "%s %s",
-    resistance.value,
-    resistance.unit
-  );
-
-  lcrValueSprite.setCursor(leftValueX, row2Y);
-  lcrValueSprite.print(value);
-
-  //
-  // Row 2 right: reactance.
-  //
+  // Rp is the equivalent parallel loss resistance.
   lcrValueSprite.setCursor(rightLabelX, row2Y);
-  lcrValueSprite.print("X");
+  lcrValueSprite.print("Rp");
 
-  LCRFormattedValue reactance =
-    formatImpedance(m.reactance);
-
-  snprintf(
-    value,
-    sizeof(value),
-    "%s %s",
-    reactance.value,
-    reactance.unit
-  );
+  LCRFormattedValue rp = formatImpedance(m.parallelResistance);
+  snprintf(value, sizeof(value), "%s %s", rp.value, rp.unit);
 
   lcrValueSprite.setCursor(rightValueX, row2Y);
   lcrValueSprite.print(value);
 
-  //
-  // Row 3 left: ESR.
-  //
+  // Q and D describe the same loss relationship as reciprocal quantities.
   lcrValueSprite.setCursor(leftLabelX, row3Y);
-  lcrValueSprite.print("ESR");
-
-  LCRFormattedValue esr =
-    formatImpedance(m.esr);
-
-  snprintf(
-    value,
-    sizeof(value),
-    "%s %s",
-    esr.value,
-    esr.unit
-  );
-
+  lcrValueSprite.print("Q");
+  snprintf(value, sizeof(value), "%.3f", m.q);
   lcrValueSprite.setCursor(leftValueX, row3Y);
   lcrValueSprite.print(value);
 
-  //
-  // Row 3 right: Q.
-  //
   lcrValueSprite.setCursor(rightLabelX, row3Y);
-  lcrValueSprite.print("Q");
-
-  snprintf(
-    value,
-    sizeof(value),
-    "%.3f",
-    m.q
-  );
-
+  lcrValueSprite.print("D");
+  snprintf(value, sizeof(value), "%.4f", m.dissipation);
   lcrValueSprite.setCursor(rightValueX, row3Y);
   lcrValueSprite.print(value);
 
-  lcrValueSprite.pushSprite(
-    r.x,
-    r.y,
-    0,
-    0,
-    r.w,
-    r.h
-  );
+  lcrValueSprite.pushSprite(r.x, r.y, 0, 0, r.w, r.h);
 }
 
 
-// Update the dynamic measurement context fields shown beneath the main
-// measurement. Positions are derived from the context region so they remain
-// aligned with the static labels across different display resolutions.
+// Draw the fundamental complex-impedance values derived directly from Z.
+void drawLCRImpedanceMeasurement(const MeasurementPoint &m)
+{
+  const LCRRect &r = lcrLayout.impedance;
+
+  lcrValueSprite.fillSprite(LCR_SPRITE_BLACK);
+  lcrValueSprite.setTextColor(LCR_SPRITE_WHITE, LCR_SPRITE_BLACK);
+  lcrValueSprite.setTextSize(1);
+
+  const int16_t leftLabelX = 8;
+  const int16_t leftValueX = r.w * 18 / 100;
+  const int16_t rightLabelX = r.w * 53 / 100;
+  const int16_t rightValueX = r.w * 68 / 100;
+
+  // Keep the two complex-impedance rows together within their region.
+  const int16_t rowSpacing = 10;
+  const int16_t row1Y = 2;
+  const int16_t row2Y = row1Y + rowSpacing;
+
+  char value[24];
+
+  // Fundamental impedance values are unavailable for an over-limit reading.
+  if (m.status == LCR_MEASUREMENT_OL) {
+    const char *labels[] = {"|Z|", "Phase", "R", "X"};
+    const int16_t labelX[] = {
+      leftLabelX, rightLabelX, leftLabelX, rightLabelX
+    };
+    const int16_t valueX[] = {
+      leftValueX, rightValueX, leftValueX, rightValueX
+    };
+    const int16_t rowY[] = {row1Y, row1Y, row2Y, row2Y};
+
+    for (uint8_t i = 0; i < 4; i++) {
+      lcrValueSprite.setCursor(labelX[i], rowY[i]);
+      lcrValueSprite.print(labels[i]);
+      lcrValueSprite.setCursor(valueX[i], rowY[i]);
+      lcrValueSprite.print("--");
+    }
+
+    lcrValueSprite.pushSprite(r.x, r.y, 0, 0, r.w, r.h);
+    return;
+  }
+
+  lcrValueSprite.setCursor(leftLabelX, row1Y);
+  lcrValueSprite.print("|Z|");
+
+  LCRFormattedValue impedance = formatImpedance(m.impedance);
+  snprintf(value, sizeof(value), "%s %s", impedance.value, impedance.unit);
+  lcrValueSprite.setCursor(leftValueX, row1Y);
+  lcrValueSprite.print(value);
+
+  lcrValueSprite.setCursor(rightLabelX, row1Y);
+  lcrValueSprite.print("Phase");
+  snprintf(value, sizeof(value), "%.2f deg", m.phaseDeg);
+  lcrValueSprite.setCursor(rightValueX, row1Y);
+  lcrValueSprite.print(value);
+
+  lcrValueSprite.setCursor(leftLabelX, row2Y);
+  lcrValueSprite.print("R");
+
+  LCRFormattedValue resistance = formatImpedance(m.resistance);
+  snprintf(value, sizeof(value), "%s %s", resistance.value, resistance.unit);
+  lcrValueSprite.setCursor(leftValueX, row2Y);
+  lcrValueSprite.print(value);
+
+  // Preserve the sign of X so capacitive and inductive DUTs are distinguishable.
+  lcrValueSprite.setCursor(rightLabelX, row2Y);
+  lcrValueSprite.print("X");
+
+  LCRFormattedValue reactance = formatImpedance(m.reactance);
+  snprintf(value, sizeof(value), "%s %s", reactance.value, reactance.unit);
+  lcrValueSprite.setCursor(rightValueX, row2Y);
+  lcrValueSprite.print(value);
+
+  lcrValueSprite.pushSprite(r.x, r.y, 0, 0, r.w, r.h);
+}
+
+
+// Update the measurement frequency, Rref, and active PGA gains shown beneath
+// the measurement results.
 void drawLCRMeasurementContext(const MeasurementPoint &m,
                                const MeasurementSettings &settings)
 {
@@ -5560,30 +5651,39 @@ void drawLCRMeasurementContext(const MeasurementPoint &m,
   int16_t leftValueX = r.x + r.w * 22 / 100;
   int16_t rightValueX = r.x + r.w * 72 / 100;
 
-  int16_t row1Y = r.y + r.h * 20 / 100;
-  int16_t row2Y = r.y + r.h * 60 / 100;
+  // Match the row positions used by the static context labels.
+  const int16_t rowSpacing = 10;
+  int16_t row1Y = r.y + 2;
+  int16_t row2Y = row1Y + rowSpacing;
 
   display.setTextSize(1);
   display.setTextColor(TXTCOLOR, BGCOLOR);
 
-  // Frequency
-  // Format the active measurement frequency using engineering units
-  // so the context display remains compact and easy to read.
+  // Format the measurement frequency using compact engineering units.
   LCRFormattedValue frequency = formatFrequency(m.frequency);
+
   display.setCursor(leftValueX, row1Y);
   display.print(frequency.value);
   display.print(" ");
   display.print(frequency.unit);
 
-  // Format the active TIA feedback resistance using engineering units.
-  // This value must match the physical Rf used by the current-measurement path.
-  LCRFormattedValue feedback =
+  // Rref is the active reference resistance used by the measurement path.
+  LCRFormattedValue reference =
     formatImpedance(settings.feedbackResistance);
 
   display.setCursor(rightValueX, row1Y);
-  display.print(feedback.value);
+  display.print(reference.value);
   display.print(" ");
-  display.print(feedback.unit);
+  display.print(reference.unit);
+
+  // Show the actual voltage and current PGA gains currently selected.
+  display.setCursor(leftValueX, row2Y);
+  display.print(getLCRPGAGainValue(settings.voltagePgaGain), 0);
+  display.print("x");
+
+  display.setCursor(rightValueX, row2Y);
+  display.print(getLCRPGAGainValue(settings.currentPgaGain), 0);
+  display.print("x");
 }
 
 
@@ -5681,9 +5781,9 @@ void drawLCRSweepSetup()
   display.setCursor(leftX, y);
 
   if (lcrSettings.autoRange)
-    display.print("Range (Auto)");
+    display.print("Rref (Auto)");
   else
-    display.print("Range (Manual)");
+    display.print("Rref (Manual)");
 
   display.setCursor(valueX, y);
 
@@ -6355,7 +6455,7 @@ void drawLCRTabs()
 }
 
 
-// Draw the static portions of the Measure tab.
+// Draw the static labels for measurement context and operating state.
 // Measurement values themselves are not drawn here; they are refreshed
 // separately by updateLCRDisplay().
 void drawMeasureScreen()
@@ -6368,23 +6468,23 @@ void drawMeasureScreen()
   int16_t leftX = context.x + context.w * 5 / 100;
   int16_t rightX = context.x + context.w * 55 / 100;
 
-  int16_t row1Y = context.y + context.h * 20 / 100;
-  int16_t row2Y = context.y + context.h * 60 / 100;
+  // Keep operating-state rows together near the top of the context region.
+  const int16_t rowSpacing = 10;
+  int16_t row1Y = context.y + 2;
+  int16_t row2Y = row1Y + rowSpacing;
 
   display.setCursor(leftX, row1Y);
   display.print("FREQ:");
 
+  // Rref identifies the active reference-resistance measurement range.
   display.setCursor(rightX, row1Y);
-
-  // Display the active TIA feedback resistance used by the Kelvin
-  // current-measurement path.
-  display.print("Rf:");
+  display.print("Rref:");
 
   display.setCursor(leftX, row2Y);
-  display.print("LEVEL:");
+  display.print("V PGA:");
 
   display.setCursor(rightX, row2Y);
-  display.print("AVG:");
+  display.print("I PGA:");
 }
 
 
@@ -6395,7 +6495,7 @@ void drawMeasureSoftKeys()
 {
   const char *labels[] = {
     "Freq",
-    lcrSettings.autoRange ? "Range (Auto)" : "Range",
+    lcrSettings.autoRange ? "Rref (Auto)" : "Rref",
     lcrMeasureState == LCR_MEASURE_LIVE ? "LIVE" : "HOLD",
     "More"
   };
@@ -6847,6 +6947,7 @@ void updateLCRDisplay(const MeasurementPoint &m,
 {
   drawLCRPrimaryMeasurement(m);
   drawLCRSecondaryMeasurement(m);
+  drawLCRImpedanceMeasurement(m);
   drawLCRMeasurementContext(m, settings);
 }
 

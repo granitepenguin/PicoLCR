@@ -369,11 +369,9 @@ void handle_lcr_touch()
   server.send(200, "text/plain", "OK");
 }
 
-void index_html(void * pvParameters) {
-String html;
-
-//<meta http-equiv="refresh" content="1; URL=">
-  html = R"=====(
+// Keep the large web-page template out of the heap. The page is streamed
+// directly to the client with runtime placeholders substituted as needed.
+static const char webPageTemplate[] = R"=====(
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><title>Raspberry Pi Pico W Web Oscilloscope</title>
@@ -649,11 +647,15 @@ function drawLCRMeasureCanvas(message) {
   const contentH = height - headerH - tabsH - footerH;
   const footerY = height - footerH;
 
-  const primaryH = Math.floor(contentH * 42 / 100);
+  // Match the physical Measure-screen layout.
+  const primaryH = Math.floor(contentH * 37 / 100);
   const secondaryH = Math.floor(contentH * 25 / 100);
+  const impedanceH = Math.floor(contentH * 20 / 100);
+
   const secondaryY = contentY + primaryH;
-  const contextY = secondaryY + secondaryH;
-  const contextH = contentH - primaryH - secondaryH;
+  const impedanceY = secondaryY + secondaryH;
+  const contextY = impedanceY + impedanceH;
+  const contextH = contentH - primaryH - secondaryH - impedanceH;
 
   const textColor = '#e8f6ff';
   const gridColor = '#606060';
@@ -672,30 +674,21 @@ function drawLCRMeasureCanvas(message) {
   //
   var phaseThreshold = 10.0;
   var primaryValue;
-  var componentLabel;
-  var componentValue;
 
   var measurementOL = message.status === 1;
 
+  // Use the series-equivalent value for the primary reactive measurement.
   if (measurementOL) {
     primaryValue = 'OL';
-    componentLabel = 'C/L';
-    componentValue = '--';
   }
   else if (message.phase < -phaseThreshold) {
-    primaryValue = formatEngineering(message.capacitance, 'F');
-    componentLabel = 'C';
-    componentValue = primaryValue;
+    primaryValue = formatEngineering(message.seriesCapacitance, 'F');
   }
   else if (message.phase > phaseThreshold) {
-    primaryValue = formatEngineering(message.inductance, 'H');
-    componentLabel = 'L';
-    componentValue = primaryValue;
+    primaryValue = formatEngineering(message.seriesInductance, 'H');
   }
   else {
     primaryValue = formatEngineering(message.resistance, 'Ohm');
-    componentLabel = '|Z|';
-    componentValue = formatEngineering(message.impedance, 'Ohm');
   }
 
   //
@@ -712,76 +705,156 @@ function drawLCRMeasureCanvas(message) {
   );
 
   //
-  // Secondary measurement rows.
+  // Series/parallel equivalent model.
   //
   var leftLabelX = 8;
   var leftValueX = 58;
   var rightLabelX = 170;
   var rightValueX = 218;
 
-  var row1Y = secondaryY + secondaryH * 8 / 100 + 6;
-  var row2Y = secondaryY + secondaryH * 40 / 100 + 6;
-  var row3Y = secondaryY + secondaryH * 72 / 100 + 6;
+  // Use fixed row spacing so additional region height becomes block padding.
+  // Keep equivalent-model rows compact with a small visual gap.
+  var row1Y = secondaryY + 5;
+  var row2Y = row1Y + 12;
+  var row3Y = row2Y + 12;
 
   ctx.font = '11px monospace';
   ctx.fillStyle = textColor;
   ctx.textBaseline = 'middle';
 
-  ctx.fillText(componentLabel, leftLabelX, row1Y);
-  ctx.fillText(componentValue, leftValueX, row1Y);
+  // Show the appropriate reactive equivalent model for the measured DUT.
+  if (measurementOL) {
+    ctx.fillText('Cs/Ls', leftLabelX, row1Y);
+    ctx.fillText('--', leftValueX, row1Y);
+    ctx.fillText('Cp/Lp', leftLabelX, row2Y);
+    ctx.fillText('--', leftValueX, row2Y);
+  }
+  else if (message.reactance < 0.0) {
+    ctx.fillText('Cs', leftLabelX, row1Y);
+    ctx.fillText(
+      formatEngineering(message.seriesCapacitance, 'F'),
+      leftValueX,
+      row1Y
+    );
 
-  ctx.fillText('Phase', rightLabelX, row1Y);
+    ctx.fillText('Cp', leftLabelX, row2Y);
+    ctx.fillText(
+      formatEngineering(message.parallelCapacitance, 'F'),
+      leftValueX,
+      row2Y
+    );
+  }
+  else if (message.reactance > 0.0) {
+    ctx.fillText('Ls', leftLabelX, row1Y);
+    ctx.fillText(
+      formatEngineering(message.seriesInductance, 'H'),
+      leftValueX,
+      row1Y
+    );
+
+    ctx.fillText('Lp', leftLabelX, row2Y);
+    ctx.fillText(
+      formatEngineering(message.parallelInductance, 'H'),
+      leftValueX,
+      row2Y
+    );
+  }
+  else {
+    ctx.fillText('Cs/Ls', leftLabelX, row1Y);
+    ctx.fillText('--', leftValueX, row1Y);
+    ctx.fillText('Cp/Lp', leftLabelX, row2Y);
+    ctx.fillText('--', leftValueX, row2Y);
+  }
+
+  ctx.fillText('Rs', rightLabelX, row1Y);
   ctx.fillText(
-    measurementOL ? '--' : message.phase.toFixed(2) + ' deg',
+    measurementOL ? '--' :
+      formatEngineering(message.seriesResistance, 'Ohm'),
     rightValueX,
     row1Y
   );
 
-  ctx.fillText('R', leftLabelX, row2Y);
+  ctx.fillText('Rp', rightLabelX, row2Y);
+  ctx.fillText(
+    measurementOL ? '--' :
+      formatEngineering(message.parallelResistance, 'Ohm'),
+    rightValueX,
+    row2Y
+  );
+
+  ctx.fillText('Q', leftLabelX, row3Y);
+  ctx.fillText(
+    measurementOL ? '--' : message.q.toFixed(3),
+    leftValueX,
+    row3Y
+  );
+
+  ctx.fillText('D', rightLabelX, row3Y);
+  ctx.fillText(
+    measurementOL ? '--' : message.dissipation.toFixed(4),
+    rightValueX,
+    row3Y
+  );
+
+  //
+  // Fundamental complex impedance.
+  //
+  // Keep the complex-impedance rows readable without spreading the block.
+  var impedanceRow1Y = impedanceY + 4;
+  var impedanceRow2Y = impedanceRow1Y + 12;
+
+  ctx.fillText('|Z|', leftLabelX, impedanceRow1Y);
+  ctx.fillText(
+    measurementOL ? '--' : formatEngineering(message.impedance, 'Ohm'),
+    leftValueX,
+    impedanceRow1Y
+  );
+
+  ctx.fillText('Phase', rightLabelX, impedanceRow1Y);
+  ctx.fillText(
+    measurementOL ? '--' : message.phase.toFixed(2) + ' deg',
+    rightValueX,
+    impedanceRow1Y
+  );
+
+  ctx.fillText('R', leftLabelX, impedanceRow2Y);
   ctx.fillText(
     measurementOL ? '--' : formatEngineering(message.resistance, 'Ohm'),
     leftValueX,
-    row2Y
+    impedanceRow2Y
   );
 
-  ctx.fillText('X', rightLabelX, row2Y);
+  ctx.fillText('X', rightLabelX, impedanceRow2Y);
   ctx.fillText(
     measurementOL ? '--' : formatEngineering(message.reactance, 'Ohm'),
     rightValueX,
-    row2Y
+    impedanceRow2Y
   );
 
-  ctx.fillText('ESR', leftLabelX, row3Y);
-  ctx.fillText(
-    measurementOL ? '--' : formatEngineering(message.esr, 'Ohm'),
-    leftValueX,
-    row3Y
-  );
-
-  ctx.fillText('Q', rightLabelX, row3Y);
-  ctx.fillText(
-    measurementOL ? '--' : message.q.toFixed(3),
-    rightValueX,
-    row3Y
-  );
 
   //
-  // Measurement context. Match the physical Measure screen with frequency
-  // and reference on the first row and reserved LEVEL/AVG fields below.
+  // Measurement operating state.
   //
-  var contextRow1Y = contextY + contextH * 20 / 100;
-  var contextRow2Y = contextY + contextH * 60 / 100;
+// Keep the operating-state rows together with clear vertical separation.
+  var contextRow1Y = contextY + 4;
+  var contextRow2Y = contextRow1Y + 12;
 
   ctx.fillText('FREQ:', 16, contextRow1Y);
-  ctx.fillText( formatLCRFrequency(message.frequency), 70, contextRow1Y);
+  ctx.fillText(formatLCRFrequency(message.frequency), 70, contextRow1Y);
 
-  // Show the active TIA feedback resistance used for the Kelvin measurement.
-  ctx.fillText('Rf:', 176, contextRow1Y);
-  ctx.fillText(formatEngineering(message.feedbackResistance, 'Ohm'),
-               224, contextRow1Y);
+  ctx.fillText('Rref:', 176, contextRow1Y);
+  ctx.fillText(
+    formatEngineering(message.feedbackResistance, 'Ohm'),
+    224,
+    contextRow1Y
+  );
 
-  ctx.fillText('LEVEL:', 16, contextRow2Y);
-  ctx.fillText('AVG:', 176, contextRow2Y);
+  ctx.fillText('V PGA:', 16, contextRow2Y);
+  ctx.fillText(String(message.voltagePgaGain) + 'x', 70, contextRow2Y);
+
+  ctx.fillText('I PGA:', 176, contextRow2Y);
+  ctx.fillText(String(message.currentPgaGain) + 'x', 224, contextRow2Y);
+
 
   //
   // Measure soft keys. These use the same four equal-width regions as the
@@ -791,9 +864,9 @@ function drawLCRMeasureCanvas(message) {
   // Auto ranging owns the TIA feedback selection, so identify the Range
   // control as automatic just as the physical TFT does.
   var rangeLabel =
-    (lcrUIState !== null && lcrUIState.autoRange)
-      ? 'Range (Auto)'
-      : 'Range';
+  (lcrUIState !== null && lcrUIState.autoRange)
+    ? 'Rref (Auto)'
+    : 'Rref';
 
   var softKeys = [
     'Freq',
@@ -825,7 +898,7 @@ function drawLCRMeasureCanvas(message) {
 
     // The Auto range label is longer than the other soft-key labels.
     // Reduce only this label slightly so it remains inside its button.
-    if (softKeys[i] === 'Range (Auto)')
+    if (softKeys[i] === 'Rref (Auto)')
       ctx.font = '10px monospace';
     else
       ctx.font = '12px monospace';
@@ -1134,16 +1207,28 @@ function getLCRSweepResultValue(point, plotType) {
       return point.reactance;
 
     case 4:
-      return point.esr;
+      return point.seriesResistance;
 
     case 5:
-      return point.q;
+      return point.parallelResistance;
 
     case 6:
-      return point.capacitance;
+      return point.q;
 
     case 7:
-      return point.inductance;
+      return point.dissipation;
+
+    case 8:
+      return point.seriesCapacitance;
+
+    case 9:
+      return point.parallelCapacitance;
+
+    case 10:
+      return point.seriesInductance;
+
+    case 11:
+      return point.parallelInductance;
 
     case 0:
     default:
@@ -1154,7 +1239,12 @@ function getLCRSweepResultValue(point, plotType) {
 
 // Return the label, engineering divisor, and unit for a Results plot.
 function getLCRSweepPlotInfo(plotType, minimum, maximum) {
-  var labels = ['|Z|', 'Phase', 'R', 'X', 'ESR', 'Q', 'C', 'L'];
+  var labels = [
+    '|Z|', 'Phase', 'R', 'X',
+    'Rs', 'Rp', 'Q', 'D',
+    'Cs', 'Cp', 'Ls', 'Lp'
+  ];
+
   var largest = Math.max(Math.abs(minimum), Math.abs(maximum));
   var info = {
     label: labels[plotType] || '|Z|',
@@ -1162,8 +1252,8 @@ function getLCRSweepPlotInfo(plotType, minimum, maximum) {
     unit: 'Ohm'
   };
 
-  // Capacitance.
-  if (plotType === 6) {
+  // Series and parallel capacitance use the same engineering units.
+  if (plotType === 8 || plotType === 9) {
     if (largest < 1e-9) {
       info.divisor = 1e-12;
       info.unit = 'pF';
@@ -1183,8 +1273,8 @@ function getLCRSweepPlotInfo(plotType, minimum, maximum) {
     return info;
   }
 
-  // Inductance.
-  if (plotType === 7) {
+  // Series and parallel inductance use the same engineering units.
+  if (plotType === 10 || plotType === 11) {
     if (largest < 1e-6) {
       info.divisor = 1e-9;
       info.unit = 'nH';
@@ -1204,18 +1294,18 @@ function getLCRSweepPlotInfo(plotType, minimum, maximum) {
     return info;
   }
 
-  // Phase and Q do not use engineering prefixes.
+  // Phase, Q, and D do not use engineering prefixes.
   if (plotType === 1) {
     info.unit = 'deg';
     return info;
   }
 
-  if (plotType === 5) {
+  if (plotType === 6 || plotType === 7) {
     info.unit = '';
     return info;
   }
 
-  // Resistance-like quantities use Ohm engineering prefixes.
+  // Impedance and resistance quantities use Ohm engineering prefixes.
   if (largest >= 1e6) {
     info.divisor = 1e6;
     info.unit = 'MOhm';
@@ -1291,7 +1381,11 @@ function drawLCRSweepResultsCanvas(message) {
   ctx.strokeRect(content.x, content.y, content.w, controlH);
 
   var plotType = message.sweepPlotType || 0;
-  var plotLabels = ['|Z|', 'Phase', 'R', 'X', 'ESR', 'Q', 'C', 'L'];
+  var plotLabels = [
+    '|Z|', 'Phase', 'R', 'X',
+    'Rs', 'Rp', 'Q', 'D',
+    'Cs', 'Cp', 'Ls', 'Lp'
+  ];
 
   ctx.fillStyle = textColor;
   ctx.font = '12px monospace';
@@ -1356,9 +1450,13 @@ function drawLCRSweepResultsCanvas(message) {
       minimum -= padding;
       maximum += padding;
 
-      // Magnitude-only quantities cannot display below zero.
-      if ((plotType === 0 || plotType === 4 || plotType === 5 ||
-           plotType === 6 || plotType === 7) && minimum < 0) {
+      // Match the TFT by keeping derived magnitude-only quantities non-negative.
+      if ((plotType === 0 ||
+           plotType === 4 || plotType === 5 ||
+           plotType === 6 || plotType === 7 ||
+           plotType === 8 || plotType === 9 ||
+           plotType === 10 || plotType === 11) &&
+          minimum < 0) {
 
         minimum = 0;
       }
@@ -1678,15 +1776,17 @@ function drawLCRSelector(title, presets, selectedValue, isEnabled) {
   var count = presets.length;
   var columns;
 
+  // Match the TFT selector layout, including the 12-choice Sweep selector.
   if (count <= 3)
     columns = count;
   else if (count === 4)
     columns = 2;
-  else
+  else if (count <= 9)
     columns = 3;
+  else
+    columns = 4;
 
-  var rows =
-    Math.floor((count + columns - 1) / columns);
+  var rows = Math.floor((count + columns - 1) / columns);
 
   var marginX =
     Math.floor(selector.w * marginXPercent / 100);
@@ -1936,17 +2036,23 @@ function drawLCRSweepDensitySelector(message) {
 }
 
 
-// Draw the Sweep Results quantity selector.
+// Draw the Sweep Results quantity selector using the TFT plot-type IDs.
 function drawLCRSweepPlotSelector(message) {
   var presets = [
     { label: '|Z|',   value: 0 },
     { label: 'Phase', value: 1 },
     { label: 'R',     value: 2 },
     { label: 'X',     value: 3 },
-    { label: 'ESR',   value: 4 },
-    { label: 'Q',     value: 5 },
-    { label: 'C',     value: 6 },
-    { label: 'L',     value: 7 }
+
+    { label: 'Rs',    value: 4 },
+    { label: 'Rp',    value: 5 },
+    { label: 'Q',     value: 6 },
+    { label: 'D',     value: 7 },
+
+    { label: 'Cs',    value: 8 },
+    { label: 'Cp',    value: 9 },
+    { label: 'Ls',    value: 10 },
+    { label: 'Lp',    value: 11 }
   ];
 
   drawLCRSelector(
@@ -2788,53 +2894,148 @@ Hz</label>
 </html>
 )=====";
 
-  String ch1acdc, ch2acdc;
-  if (digitalRead(CH0DCSW) == LOW)    // DC/AC input
-    ch1acdc = "AC ";
-  else
-    ch1acdc = "DC ";
-  if (digitalRead(CH1DCSW) == LOW)    // DC/AC input
-    ch2acdc = "AC ";
-  else
-    ch2acdc = "DC ";
 
-  html.replace("%RATE%", Rates[rate]);
-  html.replace("%REALDMA%", (rate > RATE_DMA)?"":((rate > RATE_MAG)?"DMA":"MAG"));
-  html.replace("%RANGE1%", ch1acdc + Ranges[range0]);
-  html.replace("%RANGE2%", ch2acdc + Ranges[range1]);
-  html.replace("%TRIGCH%", trig_ch==ad_ch0?"ch1":"ch2");
-  html.replace("%WAVEFORM1%", Modes[ch0_mode]);
-  html.replace("%WAVEFORM2%", Modes[ch1_mode]);
-  html.replace("%TRIGEDGE%", trig_edge==TRIG_E_DN?"down":"up");
-  html.replace("%TRIGGLEVEL%", String(trig_lv));
-  html.replace("%WAVEFFT%", fft_mode?"fft":"wave");
-  html.replace("%RUNHOLD%", Start?"run":"hold");
-  html.replace("%PULSEONOFF%", pulse_mode?"on":"off");
-  html.replace("%DDSONOFF%", dds_mode?"on":"off");
-  html.replace("%DDSFREQ%", String(dds_freq()));
-  if (ch0_mode == MODE_ON) {
-    html.replace("%CH1MODE%", "chon");
-  } else if (ch0_mode == MODE_INV) {
-    html.replace("%CH1MODE%", "chinv");
-  } else if (ch0_mode == MODE_OFF) {
-    html.replace("%CH1MODE%", "choff");
-  }
-  if (ch1_mode == MODE_ON) {
-    html.replace("%CH2MODE%", "chon");
-  } else if (ch1_mode == MODE_INV) {
-    html.replace("%CH2MODE%", "chinv");
-  } else if (ch1_mode == MODE_OFF) {
-    html.replace("%CH2MODE%", "choff");
-  }
-  html.replace("%CH1OFFSET%", String((ch0_off * VREF[range0]) / 4096));
-  html.replace("%CH2OFFSET%", String((ch1_off * VREF[range1]) / 4096));
-  html.replace("%PULSEDUTY%", String(duty*100.0/256.0, 1));
-  html.replace("%PULSEFREQ%", String(pulse_frq()));
+// Return the runtime value for one placeholder in the web-page template.
+String getWebTemplateValue(const String &key)
+{
+  if (key == "RATE")
+    return Rates[rate];
 
-  // send the HTML
-  server.send(200, "text/html", html);
-//  vTaskDelete(NULL);
+  if (key == "REALDMA")
+    return (rate > RATE_DMA) ? "" : ((rate > RATE_MAG) ? "DMA" : "MAG");
+
+  // Prefix each input range with its current AC/DC coupling state.
+  if (key == "RANGE1") {
+    String coupling = digitalRead(CH0DCSW) == LOW ? "AC " : "DC ";
+    return coupling + Ranges[range0];
+  }
+
+  if (key == "RANGE2") {
+    String coupling = digitalRead(CH1DCSW) == LOW ? "AC " : "DC ";
+    return coupling + Ranges[range1];
+  }
+
+  if (key == "TRIGCH")
+    return trig_ch == ad_ch0 ? "ch1" : "ch2";
+
+  if (key == "WAVEFORM1")
+    return Modes[ch0_mode];
+
+  if (key == "WAVEFORM2")
+    return Modes[ch1_mode];
+
+  if (key == "TRIGEDGE")
+    return trig_edge == TRIG_E_DN ? "down" : "up";
+
+  if (key == "TRIGGLEVEL")
+    return String(trig_lv);
+
+  if (key == "WAVEFFT")
+    return fft_mode ? "fft" : "wave";
+
+  if (key == "RUNHOLD")
+    return Start ? "run" : "hold";
+
+  if (key == "PULSEONOFF")
+    return pulse_mode ? "on" : "off";
+
+  if (key == "DDSONOFF")
+    return dds_mode ? "on" : "off";
+
+  if (key == "DDSFREQ")
+    return String(dds_freq());
+
+  // Channel modes use the same three-state encoding as the original page.
+  if (key == "CH1MODE") {
+    if (ch0_mode == MODE_ON)
+      return "chon";
+    if (ch0_mode == MODE_INV)
+      return "chinv";
+    return "choff";
+  }
+
+  if (key == "CH2MODE") {
+    if (ch1_mode == MODE_ON)
+      return "chon";
+    if (ch1_mode == MODE_INV)
+      return "chinv";
+    return "choff";
+  }
+
+  if (key == "CH1OFFSET")
+    return String((ch0_off * VREF[range0]) / 4096);
+
+  if (key == "CH2OFFSET")
+    return String((ch1_off * VREF[range1]) / 4096);
+
+  if (key == "PULSEDUTY")
+    return String(duty * 100.0 / 256.0, 1);
+
+  if (key == "PULSEFREQ")
+    return String(pulse_frq());
+
+  return "";
 }
+
+
+// Stream the web page without allocating the complete template in the heap.
+void index_html(void *pvParameters)
+{
+  constexpr size_t chunkSize = 512;
+  char chunk[chunkSize + 1];
+
+  const char *p = webPageTemplate;
+  size_t chunkLength = 0;
+
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/html", "");
+
+  while (*p != '\0') {
+
+    // Expand %PLACEHOLDER% tokens while streaming the static template.
+    if (*p == '%') {
+      const char *end = strchr(p + 1, '%');
+
+      if (end != nullptr) {
+        size_t keyLength = static_cast<size_t>(end - p - 1);
+
+        if (keyLength > 0 && keyLength < 32) {
+          if (chunkLength > 0) {
+            chunk[chunkLength] = '\0';
+            server.sendContent(chunk);
+            chunkLength = 0;
+          }
+
+          char key[32];
+          memcpy(key, p + 1, keyLength);
+          key[keyLength] = '\0';
+
+          server.sendContent(getWebTemplateValue(String(key)));
+          p = end + 1;
+          continue;
+        }
+      }
+    }
+
+    chunk[chunkLength++] = *p++;
+
+    // Flush the staging buffer without retaining the complete page in RAM.
+    if (chunkLength == chunkSize) {
+      chunk[chunkLength] = '\0';
+      server.sendContent(chunk);
+      chunkLength = 0;
+    }
+  }
+
+  if (chunkLength > 0) {
+    chunk[chunkLength] = '\0';
+    server.sendContent(chunk);
+  }
+
+  // Terminate the chunked HTTP response.
+  server.sendContent("");
+}
+
 
 void handleNotFound(void) {
   server.send(404, "text/plain", "Not Found.");
@@ -2907,13 +3108,18 @@ bool readLCRWebMeasurement(LCRWebMeasurement &snapshot)
   // Copy the active TIA feedback resistance into the local snapshot.
   snapshot.feedbackResistance = lcrWebMeasurement.feedbackResistance;
 
+  snapshot.voltagePgaGain = lcrWebMeasurement.voltagePgaGain;
+  snapshot.currentPgaGain = lcrWebMeasurement.currentPgaGain;
   snapshot.impedance = lcrWebMeasurement.impedance;
   snapshot.phaseDeg = lcrWebMeasurement.phaseDeg;
   snapshot.resistance = lcrWebMeasurement.resistance;
   snapshot.reactance = lcrWebMeasurement.reactance;
-  snapshot.capacitance = lcrWebMeasurement.capacitance;
-  snapshot.inductance = lcrWebMeasurement.inductance;
-  snapshot.esr = lcrWebMeasurement.esr;
+  snapshot.seriesResistance = lcrWebMeasurement.seriesResistance;
+  snapshot.seriesCapacitance = lcrWebMeasurement.seriesCapacitance;
+  snapshot.seriesInductance = lcrWebMeasurement.seriesInductance;
+  snapshot.parallelResistance = lcrWebMeasurement.parallelResistance;
+  snapshot.parallelCapacitance = lcrWebMeasurement.parallelCapacitance;
+  snapshot.parallelInductance = lcrWebMeasurement.parallelInductance;
   snapshot.q = lcrWebMeasurement.q;
   snapshot.dissipation = lcrWebMeasurement.dissipation;
   snapshot.measureState = lcrWebMeasurement.measureState;
@@ -3021,10 +3227,14 @@ bool readLCRWebSweepResult(LCRWebSweepResult &snapshot)
   snapshot.phaseDeg = lcrWebSweepResult.phaseDeg;
   snapshot.resistance = lcrWebSweepResult.resistance;
   snapshot.reactance = lcrWebSweepResult.reactance;
-  snapshot.capacitance = lcrWebSweepResult.capacitance;
-  snapshot.inductance = lcrWebSweepResult.inductance;
-  snapshot.esr = lcrWebSweepResult.esr;
+  snapshot.seriesResistance = lcrWebSweepResult.seriesResistance;
+  snapshot.seriesCapacitance = lcrWebSweepResult.seriesCapacitance;
+  snapshot.seriesInductance = lcrWebSweepResult.seriesInductance;
+  snapshot.parallelResistance = lcrWebSweepResult.parallelResistance;
+  snapshot.parallelCapacitance = lcrWebSweepResult.parallelCapacitance;
+  snapshot.parallelInductance = lcrWebSweepResult.parallelInductance;
   snapshot.q = lcrWebSweepResult.q;
+  snapshot.dissipation = lcrWebSweepResult.dissipation;
 
   // Reject the copy if Core 0 changed the snapshot while it was read.
   if (lcrWebSweepResult.sequence != sequence)
@@ -3064,6 +3274,12 @@ void sendLCRWebMeasurement(const LCRWebMeasurement &measurement)
   message += ",\"feedbackResistance\":";
   message += String(measurement.feedbackResistance, 3);
 
+  message += ",\"voltagePgaGain\":";
+  message += String(measurement.voltagePgaGain, 0);
+
+  message += ",\"currentPgaGain\":";
+  message += String(measurement.currentPgaGain, 0);
+
   message += ",\"impedance\":";
   message += String(measurement.impedance, 6);
 
@@ -3076,14 +3292,23 @@ void sendLCRWebMeasurement(const LCRWebMeasurement &measurement)
   message += ",\"reactance\":";
   message += String(measurement.reactance, 6);
 
-  message += ",\"capacitance\":";
-  message += String(measurement.capacitance, 12);
+  message += ",\"seriesResistance\":";
+  message += String(measurement.seriesResistance, 6);
 
-  message += ",\"inductance\":";
-  message += String(measurement.inductance, 12);
+  message += ",\"seriesCapacitance\":";
+  message += String(measurement.seriesCapacitance, 12);
 
-  message += ",\"esr\":";
-  message += String(measurement.esr, 6);
+  message += ",\"seriesInductance\":";
+  message += String(measurement.seriesInductance, 12);
+
+  message += ",\"parallelResistance\":";
+  message += String(measurement.parallelResistance, 6);
+
+  message += ",\"parallelCapacitance\":";
+  message += String(measurement.parallelCapacitance, 12);
+
+  message += ",\"parallelInductance\":";
+  message += String(measurement.parallelInductance, 12);
 
   message += ",\"q\":";
   message += String(measurement.q, 6);
@@ -3262,17 +3487,29 @@ void sendLCRWebSweepResult(const LCRWebSweepResult &result)
   message += ",\"reactance\":";
   message += String(result.reactance, 6);
 
-  message += ",\"capacitance\":";
-  message += String(result.capacitance, 10);
+  message += ",\"seriesResistance\":";
+  message += String(result.seriesResistance, 6);
 
-  message += ",\"inductance\":";
-  message += String(result.inductance, 10);
+  message += ",\"seriesCapacitance\":";
+  message += String(result.seriesCapacitance, 10);
 
-  message += ",\"esr\":";
-  message += String(result.esr, 6);
+  message += ",\"seriesInductance\":";
+  message += String(result.seriesInductance, 10);
+
+  message += ",\"parallelResistance\":";
+  message += String(result.parallelResistance, 6);
+
+  message += ",\"parallelCapacitance\":";
+  message += String(result.parallelCapacitance, 10);
+
+  message += ",\"parallelInductance\":";
+  message += String(result.parallelInductance, 10);
 
   message += ",\"q\":";
   message += String(result.q, 6);
+
+  message += ",\"dissipation\":";
+  message += String(result.dissipation, 6);
 
   message += "}";
 
@@ -3324,11 +3561,14 @@ void loop1() {
     Serial.print("  phase=");
     Serial.print(lcrSnapshot.phaseDeg);
 
-    Serial.print("  C=");
-    Serial.print(lcrSnapshot.capacitance, 9);
-
-    Serial.print("  L=");
-    Serial.print(lcrSnapshot.inductance, 9);
+    Serial.print("  Cs=");
+    Serial.print(lcrSnapshot.seriesCapacitance, 9);
+    Serial.print("  Cp=");
+    Serial.print(lcrSnapshot.parallelCapacitance, 9);
+    Serial.print("  Rs=");
+    Serial.print(lcrSnapshot.seriesResistance, 3);
+    Serial.print("  Rp=");
+    Serial.print(lcrSnapshot.parallelResistance, 3);
 
     Serial.println();
 #endif
