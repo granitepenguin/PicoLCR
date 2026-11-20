@@ -2358,9 +2358,7 @@ void updateLCR()
   processLCRWebTouch();
 
   // Active Sweep execution
-  if (lcrTab == LCR_TAB_SWEEP &&
-      lcrSweepState == LCR_SWEEP_RUNNING) {
-
+  if (lcrTab == LCR_TAB_SWEEP && lcrSweepState == LCR_SWEEP_RUNNING) {
     updateLCRSweep();
   }
 
@@ -2374,35 +2372,45 @@ void updateLCR()
   if (lcrTab == LCR_TAB_MEASURE &&
       lcrMeasureState == LCR_MEASURE_LIVE &&
       lcrUIState == LCR_UI_NORMAL) {
-    lcrMeasurement = measureImpedance(lcrSettings);
+
+    // Acquire into a temporary object so a transient capture failure cannot
+    // overwrite the last trustworthy measurement shown on either front panel.
+    MeasurementPoint newMeasurement =
+      measureImpedance(lcrSettings);
 
     // A hardware capture failure may force LIVE Measure into HOLD.
     // Synchronize both front panels immediately when that occurs.
     if (lcrMeasureState == LCR_MEASURE_HOLD) {
       drawMeasureSoftKeys();
       publishLCRWebUIState();
-      return;
     }
+    else if (newMeasurement.status != LCR_MEASUREMENT_ERROR) {
 
-    //
-    // Publish successful Measure results for the web interface.
-    //
-    if (lcrMeasurement.frequency == lcrSettings.frequency) {
-      publishLCRWebMeasurement(
-        lcrMeasurement,
-        lcrSettings
-      );
-    }
+      // Commit only a completed measurement. A transient acquisition error
+      // leaves the previous valid/OL result visible while LIVE retries.
+      lcrMeasurement = newMeasurement;
 
-    if (lcrDisplayDirty ||
-        now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
-      lastDisplayUpdate = now;
-      lcrDisplayDirty = false;
+      // Publish only completed measurements to the browser.
+      if (lcrMeasurement.status == LCR_MEASUREMENT_VALID ||
+          lcrMeasurement.status == LCR_MEASUREMENT_OL) {
 
-      updateLCRDisplay(
-        lcrMeasurement,
-        lcrSettings
-      );
+        publishLCRWebMeasurement(
+          lcrMeasurement,
+          lcrSettings
+        );
+      }
+
+      if (lcrDisplayDirty ||
+          now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
+
+        lastDisplayUpdate = now;
+        lcrDisplayDirty = false;
+
+        updateLCRDisplay(
+          lcrMeasurement,
+          lcrSettings
+        );
+      }
     }
   }
 
