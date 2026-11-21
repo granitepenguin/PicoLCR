@@ -64,6 +64,26 @@ struct MeasurementPoint
 };
 
 
+// Describes the signal quality observed on one ADC channel during an
+// impedance capture. These values are used by autoranging to select the
+// highest useful gain while preserving ADC headroom.
+struct LCRChannelQuality
+{
+  float amplitude;
+  uint16_t minimum;
+  uint16_t maximum;
+  bool saturated;
+};
+
+
+// Describes both measurement channels from one impedance capture.
+struct LCRCaptureQuality
+{
+  LCRChannelQuality current;
+  LCRChannelQuality voltage;
+};
+
+
 // Stores the measurement data retained for one frequency-sweep point.
 // This is intentionally smaller than MeasurementPoint so large sweeps can
 // be retained in RAM without storing intermediate acquisition values.
@@ -665,9 +685,12 @@ void handleLCRInputTouch(uint16_t x, uint16_t y);
 // Perform one impedance measurement using the currently selected backend.
 MeasurementPoint measureImpedance(const MeasurementSettings &settings);
 
-// Acquire one physical LCR measurement and return complex DUT impedance.
-bool measureLCRHardwareImpedance(uint32_t frequency, float senseResistance,
-                                 LCRPhasor &impedance);
+// Acquire one physical LCR measurement and return complex DUT impedance
+// together with the ADC signal quality used for autoranging.
+bool measureLCRHardwareImpedance(uint32_t frequency,
+                                 float feedbackResistance,
+                                 LCRPhasor &impedance,
+                                 LCRCaptureQuality &quality);
 
 // Reserve the full Sweep display sprite before networking can fragment heap.
 bool reserveLCRSweepSprite();

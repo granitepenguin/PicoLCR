@@ -1971,8 +1971,7 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
   delay(5);
 
   LCRPhasor impedance;
-  float iAmplitude = 0.0f;
-  bool iSaturated = false;
+  LCRCaptureQuality quality = {};
 
   // Use a local copy so autoranging can change the physical feedback range
   // without modifying the caller's const measurement settings.
@@ -1990,8 +1989,7 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
     if (!measureLCRHardwareImpedance( settings.frequency,
                                       feedbackResistance,
                                       impedance,
-                                      iAmplitude,
-                                      iSaturated)) {
+                                      quality)) {
       return measurement;
     }
 
@@ -2009,23 +2007,25 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
     Debug.print("LCR autorange probe: current=");
     Debug.print(currentPreset);
     Debug.print(" amplitude=");
-    Debug.print(iAmplitude, 2);
+    Debug.print(quality.current.amplitude, 2);
     Debug.print(" saturated=");
-    Debug.println(iSaturated ? "yes" : "no");
+    Debug.println(
+      quality.current.saturated ? "yes" : "no"
+    );
 #endif
 
     // If this is already the highest TIA feedback range and it is safe,
     // use this capture.
-    if (!iSaturated &&
-        iAmplitude <= LCR_AUTORANGE_HIGH &&
+    if (!quality.current.saturated &&
+        quality.current.amplitude <= LCR_AUTORANGE_HIGH &&
         currentPreset == FEEDBACK_PRESET_COUNT - 1) {
       break;
     }
 
     // A safe range is not necessarily the best range. Move upward and
     // try to obtain more ADC signal while preserving headroom.
-    if (!iSaturated &&
-        iAmplitude <= LCR_AUTORANGE_HIGH) {
+    if (!quality.current.saturated &&
+        quality.current.amplitude <= LCR_AUTORANGE_HIGH) {
 
       currentPreset++;
 
@@ -2064,8 +2064,7 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
     if (!measureLCRHardwareImpedance( settings.frequency,
                                       feedbackResistance,
                                       impedance,
-                                      iAmplitude,
-                                      iSaturated)) {
+                                      quality)) {
       return measurement;
     }
 
@@ -3530,8 +3529,7 @@ void printLCRChannelMatchTest(uint32_t frequency)
 bool measureLCRHardwareImpedance(uint32_t frequency,
                                  float feedbackResistance,
                                  LCRPhasor &impedance,
-                                 float &iAmplitude,
-                                 bool &iSaturated)
+                                 LCRCaptureQuality &quality)
 {
   LCRCapturePlan plan;
 
@@ -3555,34 +3553,35 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
     return false;
 
   LCRCaptureStats iStats = calculateLCRCaptureStats(0, n);
+  LCRCaptureStats vStats = calculateLCRCaptureStats(1, n);
+
+  // Preserve the raw ADC limits for both measurement channels. Autoranging
+  // uses these values to determine whether additional analog gain is safe.
+  quality.current.minimum = iStats.minimum;
+  quality.current.maximum = iStats.maximum;
+
+  quality.voltage.minimum = vStats.minimum;
+  quality.voltage.maximum = vStats.maximum;
+
+  // Detect either ADC channel driven against a rail. Hard saturation means
+  // the corresponding capture cannot safely accept additional analog gain.
+  quality.current.saturated = iStats.minimum <= 0 || iStats.maximum >= 4095;
+  quality.voltage.saturated = vStats.minimum <= 0 || vStats.maximum >= 4095;
 
 #if LCR_CAPTURE_DEBUG
-    LCRCaptureStats vStats = calculateLCRCaptureStats(1, n);
-#endif
+  Debug.print("LCR I_MEAS ADC: min=");
+  Debug.print(quality.current.minimum);
+  Debug.print("  max=");
+  Debug.print(quality.current.maximum);
+  Debug.print("  saturated=");
+  Debug.println( quality.current.saturated ? "yes" : "no");
 
-  // Detect a TIA output driven against either ADC rail. A saturated
-  // current-sense channel requires less TIA gain regardless of the
-  // calculated Goertzel amplitude.
-  iSaturated = iStats.minimum <= 0 || iStats.maximum >= 4095;
-
-#if LCR_CAPTURE_DEBUG
-    Debug.print("LCR I_MEAS ADC: min=");
-    Debug.print(iStats.minimum);
-    Debug.print("  max=");
-    Debug.print(iStats.maximum);
-    Debug.print("  saturated=");
-    Debug.println(iSaturated ? "yes" : "no");
-
-    Debug.print("LCR V_MEAS ADC: min=");
-    Debug.print(vStats.minimum);
-    Debug.print("  max=");
-    Debug.print(vStats.maximum);
-    Debug.print("  saturated=");
-    Debug.println(
-      (vStats.minimum <= 0 || vStats.maximum >= 4095)
-        ? "yes"
-        : "no"
-    );
+  Debug.print("LCR V_MEAS ADC: min=");
+  Debug.print(quality.voltage.minimum);
+  Debug.print("  max=");
+  Debug.print(quality.voltage.maximum);
+  Debug.print("  saturated=");
+  Debug.println( quality.voltage.saturated ? "yes" : "no");
 #endif
 
   // ADC0/GP26 measures the TIA output representing DUT current.
@@ -3597,14 +3596,11 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
   LCRPhasor vV =
     calculateLCRGoertzel(n, 1, frequency, plan.channelSampleRate, dcV);
 
-  // Preserve the actual ADC-path current amplitude before applying any
-  // analog-path correction or PGA normalization. Autoranging must operate
-  // on the signal level physically present at the ADC.
-  iAmplitude = lcrPhasorAmplitude(vI, n);
-
-#if LCR_CAPTURE_DEBUG
-  float vAmplitude = lcrPhasorAmplitude(vV, n);
-#endif
+  // Preserve the actual ADC-path amplitudes before applying any analog-path
+  // correction or PGA normalization. Autoranging must operate on the signal
+  // levels physically present at the ADC.
+  quality.current.amplitude = lcrPhasorAmplitude(vI, n);
+  quality.voltage.amplitude = lcrPhasorAmplitude(vV, n);
 
   // Undo the inversion and attenuation introduced by the GP26 and GP27
   // ADC-conditioning stages.
@@ -3639,11 +3635,11 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
 
 #if LCR_CAPTURE_DEBUG
   Debug.print("LCR I_MEAS amplitude: ");
-  Debug.print(iAmplitude, 3);
+  Debug.print(quality.current.amplitude, 3);
   Debug.println(" ADC counts");
 
   Debug.print("LCR V_MEAS amplitude: ");
-  Debug.print(vAmplitude, 3);
+  Debug.print(quality.voltage.amplitude, 3);
   Debug.println(" ADC counts");
   Debug.print("LCR phasor phase: I=");
   Debug.print(phaseLCRPhasor(vI), 3);
