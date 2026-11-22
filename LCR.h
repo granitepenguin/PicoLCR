@@ -73,6 +73,7 @@ struct LCRChannelQuality
   uint16_t minimum;
   uint16_t maximum;
   bool saturated;
+  bool headroomLimited;
 };
 
 
