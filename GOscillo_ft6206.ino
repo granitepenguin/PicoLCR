@@ -645,8 +645,14 @@ void loop() {
         }
         oad = ad;
 
-        if (rate > RATE_SLOW)
+        if (rate > RATE_SLOW) {
           CheckSW();      // no need for fast sampling
+
+          // Abort Scope processing if input switched the instrument into LCR mode.
+          if (instrumentMode == MODE_LCR)
+            return;
+        }
+
         if (trig_mode == TRIG_SCAN)
           break;
         if (trig_mode == TRIG_AUTO && (millis() - st) > auto_time)
@@ -684,9 +690,14 @@ void loop() {
     unsigned long st = micros();
     for (int i=0; i<disp_leng; i ++) {
       r = r_[rate - RATE_ROLL];  // rate may be changed in loop
-      while((st - micros())<r) {
+      while ((st - micros()) < r) {
         CheckSW();
-        if (rate<RATE_ROLL)
+
+        // LCR now owns the ADC and display; stop this Scope iteration immediately.
+        if (instrumentMode == MODE_LCR)
+          return;
+
+        if (rate < RATE_ROLL)
           break;
       }
       if (rate<RATE_ROLL) { // sampling rate has been changed

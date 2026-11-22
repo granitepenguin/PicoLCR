@@ -62,6 +62,16 @@ static const uint8_t LCR_ADC_CH_DUT    = 1;
 constexpr float LCR_I_MEAS_CORRECTION = -2.826f;
 constexpr float LCR_V_MEAS_CORRECTION = -1.422f;
 
+// Analog front-end transfer parameters.
+//
+// OPA-OLD D:
+//   DUT-LOW -> 21.9k -> TIA summing node.
+//
+// OPA-V A:
+//   Measured resistor network gives approximately 0.982 differential gain.
+constexpr float LCR_TIA_INPUT_RESISTANCE = 21900.0f;
+constexpr float LCR_VOLTAGE_DIFF_GAIN = 0.982f;
+
 // Autorange thresholds for normalized I_MEAS peak amplitude.
 //
 // Measurements below the lower threshold should move toward a larger TIA
@@ -72,6 +82,27 @@ constexpr float LCR_AUTORANGE_LOW = 300.0f;
 // Maximum raw I_MEAS phasor amplitude considered safe during TIA
 // autoranging. Leave headroom below the nominal 12-bit ADC peak range.
 constexpr float LCR_AUTORANGE_HIGH = 1800.0f;
+
+// Minimum current-channel amplitude considered a measurable DUT at the
+// highest available TIA feedback range. Signals below this level are
+// indistinguishable from an open circuit.
+constexpr float LCR_OL_CURRENT_MIN = 10.0f;
+
+// Minimum raw ADC distance from either rail considered safe for increasing
+// analog gain. Hard saturation remains 0/4095; this margin prevents the
+// autoranger from deliberately operating immediately adjacent to a rail.
+constexpr uint16_t LCR_ADC_HEADROOM_COUNTS = 200;
+
+// Number of voltage-PGA gain states available to automatic gain selection.
+//
+// Rev C has a persistent ~343 mV DC level at the voltage-PGA input. With
+// +/-3.5 V analog supplies, 25x and 101x cannot maintain their required DC
+// output operating point and rail the voltage-PGA amplifier. Therefore only
+// the 1x and 5x states are currently usable for automatic measurements.
+//
+// This remains configurable so later hardware with different biasing or
+// additional headroom can enable more gain states.
+constexpr uint8_t LCR_V_PGA_AUTORANGE_GAIN_COUNT = 4;
 
 // Component classification threshold used by both Measure and Sweep results.
 // Phase angles within +/- this value are treated as predominantly resistive.
@@ -123,6 +154,7 @@ struct FeedbackPreset
 {
   const char *label;
   float nominalResistance;
+  float physicalResistance;
   float effectiveResistance;
   uint8_t muxChannel;
 };
@@ -130,11 +162,15 @@ struct FeedbackPreset
 // Defines the selectable TIA feedback ranges used by the Kelvin
 // measurement frontend. Effective resistance values include calibration
 // of the complete selected feedback path.
+//
+// Characterized resistance values for the current breadboard prototype.
+// Production hardware should use values derived from the production
+// component network and/or stored calibration data.
 const FeedbackPreset feedbackPresets[] = {
-  { "100 Ohm",  100.0f,    100.75f,  0 },
-  { "1 kOhm",   1000.0f,   1024.05f, 1 },
-  { "10 kOhm",  10000.0f,  10081.92f, 2 },
-  { "100 kOhm", 100000.0f, 99217.90f, 3 }
+  { "100 Ohm",  100.0f,    102.3f,   100.75f,  0 },
+  { "1 kOhm",   1000.0f,   1001.0f,  1024.05f, 1 },
+  { "10 kOhm",  10000.0f,  10120.0f, 10081.92f, 2 },
+  { "100 kOhm", 100000.0f, 97900.0f, 99217.90f, 3 }
 };
 
 constexpr uint8_t FEEDBACK_PRESET_COUNT =
@@ -142,6 +178,9 @@ constexpr uint8_t FEEDBACK_PRESET_COUNT =
 
 // ====================================================================
 
+// Force a fixed voltage-PGA gain for analog hardware characterization.
+// Set to 0 for normal automatic V-PGA operation.
+#define LCR_FORCE_V_PGA 0
 
 // Enable verbose LCR ADC/DMA diagnostics.
 // Set to 1 while debugging acquisition problems; 0 for normal operation.
@@ -376,6 +415,10 @@ volatile LCRWebSweepProgress lcrWebSweepProgress = {};
 // Holds the latest completed Sweep point published for Core 1.
 volatile LCRWebSweepResult lcrWebSweepResult = {};
 
+#if LCR_FORCE_V_PGA
+constexpr LCRPGAGain LCR_FORCED_V_PGA_GAIN = LCR_PGA_GAIN_101;
+#endif
+
 // Publish one completed LCR measurement for the web interface.
 //
 // Core 0 calls this only after measurement processing is complete. The
@@ -576,9 +619,12 @@ struct FrequencyPreset
 // Adding or removing an entry automatically changes the selector button
 // count, layout, drawing, and touch handling.
 const FrequencyPreset frequencyPresets[] = {
-  { "100 Hz", 100 },
-  { "1 kHz", 1000 },
-  { "10 kHz", 10000 },
+  { "100 Hz",  100 },
+  { "1 kHz",   1000 },
+  { "5 kHz",   5000 },
+  { "10 kHz",  10000 },
+  { "20 kHz",  20000 },
+  { "50 kHz",  50000 },
   { "100 kHz", 100000 },
   { "110 kHz", 110000 }
 };
@@ -1971,12 +2017,28 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
   delay(5);
 
   LCRPhasor impedance;
-  float iAmplitude = 0.0f;
-  bool iSaturated = false;
+  LCRCaptureQuality quality = {};
 
   // Use a local copy so autoranging can change the physical feedback range
   // without modifying the caller's const measurement settings.
   float feedbackResistance = settings.feedbackResistance;
+
+#if LCR_FORCE_V_PGA
+  selectLCRVoltagePGAGain(LCR_FORCED_V_PGA_GAIN);
+
+#if LCR_CAPTURE_DEBUG
+  Debug.print("LCR DEBUG: V-PGA forced to ");
+  Debug.print( getLCRPGAGainValue(LCR_FORCED_V_PGA_GAIN), 0);
+  Debug.println("x");
+#endif
+
+#else
+  // Autoranging begins with the voltage PGA at unity gain so each measurement
+  // can walk upward to the highest gain that preserves ADC headroom.
+  if (settings.autoRange) {
+    selectLCRVoltagePGAGain(LCR_PGA_GAIN_1);
+  }
+#endif
 
   // Autoranging always starts at the lowest TIA gain and moves upward
   // only when the measured current signal is too weak.
@@ -1990,8 +2052,7 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
     if (!measureLCRHardwareImpedance( settings.frequency,
                                       feedbackResistance,
                                       impedance,
-                                      iAmplitude,
-                                      iSaturated)) {
+                                      quality)) {
       return measurement;
     }
 
@@ -2009,48 +2070,69 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
     Debug.print("LCR autorange probe: current=");
     Debug.print(currentPreset);
     Debug.print(" amplitude=");
-    Debug.print(iAmplitude, 2);
+    Debug.print(quality.current.amplitude, 2);
     Debug.print(" saturated=");
-    Debug.println(iSaturated ? "yes" : "no");
+    Debug.println(
+      quality.current.saturated ? "yes" : "no"
+    );
 #endif
 
-    // If this is already the highest TIA feedback range and it is safe,
-    // use this capture.
-    if (!iSaturated &&
-        iAmplitude <= LCR_AUTORANGE_HIGH &&
-        currentPreset == FEEDBACK_PRESET_COUNT - 1) {
-      break;
-    }
+    // A saturated or excessively large current signal means this Rref is
+    // unusable. Return to the previous safe range.
+    if (quality.current.saturated ||
+        quality.current.amplitude > LCR_AUTORANGE_HIGH) {
 
-    // A safe range is not necessarily the best range. Move upward and
-    // try to obtain more ADC signal while preserving headroom.
-    if (!iSaturated &&
-        iAmplitude <= LCR_AUTORANGE_HIGH) {
+      // The lowest Rref is already unusable, so there is no safer range.
+      if (currentPreset == 0) {
+        measurement.frequency = settings.frequency;
+        measurement.status = LCR_MEASUREMENT_ERROR;
+        return measurement;
+      }
 
-      currentPreset++;
+      currentPreset--;
 
       selectLCRFeedbackPreset(currentPreset);
 
       feedbackResistance =
         feedbackPresets[currentPreset].effectiveResistance;
 
-      // Allow the analog feedback path to settle before retrying.
       delay(2);
 
-      continue;
+      // Recapture at the restored safe range so the impedance result matches
+      // the physical range that will actually be used.
+      if (!measureLCRHardwareImpedance(
+            settings.frequency,
+            feedbackResistance,
+            impedance,
+            quality)) {
+        return measurement;
+      }
+
+      break;
     }
 
-    // The current range is too large. Return to the previous safe range.
-    //
-    // Autoranging begins at preset 0, so saturation at preset 0 means
-    // there is no lower TIA feedback range available.
-    if (currentPreset == 0) {
-      measurement.frequency = settings.frequency;
-      measurement.status = LCR_MEASUREMENT_ERROR;
-      return measurement;
+    // The current channel has reached the useful measurement region.
+    // Keep this Rref rather than increasing gain unnecessarily.
+    if (quality.current.amplitude >= LCR_AUTORANGE_LOW)
+      break;
+
+    // The highest Rref is already selected, so no additional TIA gain is
+    // available. Distinguish a weak but measurable DUT from an open circuit.
+    if (currentPreset == FEEDBACK_PRESET_COUNT - 1) {
+
+      if (quality.current.amplitude < LCR_OL_CURRENT_MIN) {
+        measurement.frequency = settings.frequency;
+        measurement.status = LCR_MEASUREMENT_OL;
+        return measurement;
+      }
+
+      // The signal is below the preferred autorange target but remains
+      // measurable. Keep the best available Rref and continue.
+      break;
     }
 
-    currentPreset--;
+    // Current signal is still weak. Move up one Rref range and retry.
+    currentPreset++;
 
     selectLCRFeedbackPreset(currentPreset);
 
@@ -2058,19 +2140,84 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
       feedbackPresets[currentPreset].effectiveResistance;
 
     delay(2);
-
-    // Capture once more using the previous safe range so that the
-    // impedance returned below corresponds to the selected hardware.
-    if (!measureLCRHardwareImpedance( settings.frequency,
-                                      feedbackResistance,
-                                      impedance,
-                                      iAmplitude,
-                                      iSaturated)) {
-      return measurement;
-    }
-
-    break;
   }
+
+#if !LCR_FORCE_V_PGA
+  // With the TIA feedback range selected, walk the voltage PGA upward and
+  // retain the highest gain that preserves the configured ADC headroom.
+  if (settings.autoRange) {
+
+    for (uint8_t gainIndex = 0;
+         gainIndex < LCR_V_PGA_AUTORANGE_GAIN_COUNT;
+         gainIndex++) {
+
+      LCRPGAGain gain = static_cast<LCRPGAGain>(gainIndex);
+      selectLCRVoltagePGAGain(gain);
+
+      // Allow the analog PGA path to settle before evaluating this gain.
+      delay(2);
+
+      if (!measureLCRHardwareImpedance(
+            settings.frequency,
+            feedbackResistance,
+            impedance,
+            quality)) {
+        return measurement;
+      }
+
+#if LCR_CAPTURE_DEBUG
+      Debug.print("LCR V autorange probe: gain=");
+      Debug.print(getLCRPGAGainValue(gain), 0);
+      Debug.print("x amplitude=");
+      Debug.print(quality.voltage.amplitude, 2);
+      Debug.print(" saturated=");
+      Debug.print(
+        quality.voltage.saturated ? "yes" : "no"
+      );
+      Debug.print(" headroom=");
+      Debug.println(
+        quality.voltage.headroomLimited ? "limited" : "safe"
+      );
+#endif
+
+      // This gain is safe. If it is the highest gain currently available to
+      // autoranging, retain it without probing an unsupported higher state.
+      if (!quality.voltage.headroomLimited) {
+        if (gainIndex == LCR_V_PGA_AUTORANGE_GAIN_COUNT - 1)
+          break;
+
+        continue;
+      }
+
+      // Unity gain is already too close to an ADC rail. There is no lower
+      // voltage PGA setting available.
+      if (gainIndex == 0)
+        break;
+
+      // The attempted gain consumed too much ADC headroom. Restore the
+      // previous safe gain and recapture so the impedance corresponds to
+      // the selected hardware state.
+      gainIndex--;
+
+      gain =
+        static_cast<LCRPGAGain>(gainIndex);
+
+      selectLCRVoltagePGAGain(gain);
+
+      delay(2);
+
+      if (!measureLCRHardwareImpedance(
+            settings.frequency,
+            feedbackResistance,
+            impedance,
+            quality)) {
+        return measurement;
+      }
+
+      break;
+    }
+  }
+#endif
 
   measurement.frequency = settings.frequency;
   measurement.resistance = impedance.re;
@@ -2358,9 +2505,7 @@ void updateLCR()
   processLCRWebTouch();
 
   // Active Sweep execution
-  if (lcrTab == LCR_TAB_SWEEP &&
-      lcrSweepState == LCR_SWEEP_RUNNING) {
-
+  if (lcrTab == LCR_TAB_SWEEP && lcrSweepState == LCR_SWEEP_RUNNING) {
     updateLCRSweep();
   }
 
@@ -2374,35 +2519,45 @@ void updateLCR()
   if (lcrTab == LCR_TAB_MEASURE &&
       lcrMeasureState == LCR_MEASURE_LIVE &&
       lcrUIState == LCR_UI_NORMAL) {
-    lcrMeasurement = measureImpedance(lcrSettings);
+
+    // Acquire into a temporary object so a transient capture failure cannot
+    // overwrite the last trustworthy measurement shown on either front panel.
+    MeasurementPoint newMeasurement =
+      measureImpedance(lcrSettings);
 
     // A hardware capture failure may force LIVE Measure into HOLD.
     // Synchronize both front panels immediately when that occurs.
     if (lcrMeasureState == LCR_MEASURE_HOLD) {
       drawMeasureSoftKeys();
       publishLCRWebUIState();
-      return;
     }
+    else if (newMeasurement.status != LCR_MEASUREMENT_ERROR) {
 
-    //
-    // Publish successful Measure results for the web interface.
-    //
-    if (lcrMeasurement.frequency == lcrSettings.frequency) {
-      publishLCRWebMeasurement(
-        lcrMeasurement,
-        lcrSettings
-      );
-    }
+      // Commit only a completed measurement. A transient acquisition error
+      // leaves the previous valid/OL result visible while LIVE retries.
+      lcrMeasurement = newMeasurement;
 
-    if (lcrDisplayDirty ||
-        now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
-      lastDisplayUpdate = now;
-      lcrDisplayDirty = false;
+      // Publish only completed measurements to the browser.
+      if (lcrMeasurement.status == LCR_MEASUREMENT_VALID ||
+          lcrMeasurement.status == LCR_MEASUREMENT_OL) {
 
-      updateLCRDisplay(
-        lcrMeasurement,
-        lcrSettings
-      );
+        publishLCRWebMeasurement(
+          lcrMeasurement,
+          lcrSettings
+        );
+      }
+
+      if (lcrDisplayDirty ||
+          now - lastDisplayUpdate >= LCR_DISPLAY_INTERVAL_MS) {
+
+        lastDisplayUpdate = now;
+        lcrDisplayDirty = false;
+
+        updateLCRDisplay(
+          lcrMeasurement,
+          lcrSettings
+        );
+      }
     }
   }
 
@@ -3522,8 +3677,7 @@ void printLCRChannelMatchTest(uint32_t frequency)
 bool measureLCRHardwareImpedance(uint32_t frequency,
                                  float feedbackResistance,
                                  LCRPhasor &impedance,
-                                 float &iAmplitude,
-                                 bool &iSaturated)
+                                 LCRCaptureQuality &quality)
 {
   LCRCapturePlan plan;
 
@@ -3547,34 +3701,47 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
     return false;
 
   LCRCaptureStats iStats = calculateLCRCaptureStats(0, n);
+  LCRCaptureStats vStats = calculateLCRCaptureStats(1, n);
+
+  // Preserve the raw ADC limits for both measurement channels. Autoranging
+  // uses these values to determine whether additional analog gain is safe.
+  quality.current.minimum = iStats.minimum;
+  quality.current.maximum = iStats.maximum;
+
+  quality.voltage.minimum = vStats.minimum;
+  quality.voltage.maximum = vStats.maximum;
+
+  // Detect either ADC channel driven against a rail. Hard saturation means
+  // the corresponding capture cannot safely accept additional analog gain.
+  quality.current.saturated = iStats.minimum <= 0 || iStats.maximum >= 4095;
+  quality.voltage.saturated = vStats.minimum <= 0 || vStats.maximum >= 4095;
+
+  quality.current.headroomLimited =
+    quality.current.minimum <= LCR_ADC_HEADROOM_COUNTS ||
+    quality.current.maximum >= 4095 - LCR_ADC_HEADROOM_COUNTS;
+
+  quality.voltage.headroomLimited =
+    quality.voltage.minimum <= LCR_ADC_HEADROOM_COUNTS ||
+    quality.voltage.maximum >= 4095 - LCR_ADC_HEADROOM_COUNTS;
 
 #if LCR_CAPTURE_DEBUG
-    LCRCaptureStats vStats = calculateLCRCaptureStats(1, n);
-#endif
+  Debug.print("LCR I_MEAS ADC: min=");
+  Debug.print(quality.current.minimum);
+  Debug.print("  max=");
+  Debug.print(quality.current.maximum);
+  Debug.print("  saturated=");
+  Debug.print( quality.current.saturated ? "yes" : "no");
+  Debug.print("  headroom=");
+  Debug.println( quality.current.headroomLimited ? "limited" : "safe");
 
-  // Detect a TIA output driven against either ADC rail. A saturated
-  // current-sense channel requires less TIA gain regardless of the
-  // calculated Goertzel amplitude.
-  iSaturated = iStats.minimum <= 0 || iStats.maximum >= 4095;
-
-#if LCR_CAPTURE_DEBUG
-    Debug.print("LCR I_MEAS ADC: min=");
-    Debug.print(iStats.minimum);
-    Debug.print("  max=");
-    Debug.print(iStats.maximum);
-    Debug.print("  saturated=");
-    Debug.println(iSaturated ? "yes" : "no");
-
-    Debug.print("LCR V_MEAS ADC: min=");
-    Debug.print(vStats.minimum);
-    Debug.print("  max=");
-    Debug.print(vStats.maximum);
-    Debug.print("  saturated=");
-    Debug.println(
-      (vStats.minimum <= 0 || vStats.maximum >= 4095)
-        ? "yes"
-        : "no"
-    );
+  Debug.print("LCR V_MEAS ADC: min=");
+  Debug.print(quality.voltage.minimum);
+  Debug.print("  max=");
+  Debug.print(quality.voltage.maximum);
+  Debug.print("  saturated=");
+  Debug.print( quality.voltage.saturated ? "yes" : "no");
+  Debug.print("  headroom=");
+  Debug.println( quality.voltage.headroomLimited ? "limited" : "safe");
 #endif
 
   // ADC0/GP26 measures the TIA output representing DUT current.
@@ -3589,14 +3756,11 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
   LCRPhasor vV =
     calculateLCRGoertzel(n, 1, frequency, plan.channelSampleRate, dcV);
 
-  // Preserve the actual ADC-path current amplitude before applying any
-  // analog-path correction or PGA normalization. Autoranging must operate
-  // on the signal level physically present at the ADC.
-  iAmplitude = lcrPhasorAmplitude(vI, n);
-
-#if LCR_CAPTURE_DEBUG
-  float vAmplitude = lcrPhasorAmplitude(vV, n);
-#endif
+  // Preserve the actual ADC-path amplitudes before applying any analog-path
+  // correction or PGA normalization. Autoranging must operate on the signal
+  // levels physically present at the ADC.
+  quality.current.amplitude = lcrPhasorAmplitude(vI, n);
+  quality.voltage.amplitude = lcrPhasorAmplitude(vV, n);
 
   // Undo the inversion and attenuation introduced by the GP26 and GP27
   // ADC-conditioning stages.
@@ -3631,11 +3795,11 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
 
 #if LCR_CAPTURE_DEBUG
   Debug.print("LCR I_MEAS amplitude: ");
-  Debug.print(iAmplitude, 3);
+  Debug.print(quality.current.amplitude, 3);
   Debug.println(" ADC counts");
 
   Debug.print("LCR V_MEAS amplitude: ");
-  Debug.print(vAmplitude, 3);
+  Debug.print(quality.voltage.amplitude, 3);
   Debug.println(" ADC counts");
   Debug.print("LCR phasor phase: I=");
   Debug.print(phaseLCRPhasor(vI), 3);
@@ -3644,15 +3808,18 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
   Debug.print(phaseLCRPhasor(vV), 3);
 
   Debug.print("  V-I=");
-  Debug.print(
-    normalizeLCRPhase(
-      phaseLCRPhasor(vV) -
-      phaseLCRPhasor(vI)
-    ),
-    3
-  );
+  Debug.print( normalizeLCRPhase( phaseLCRPhasor(vV) - phaseLCRPhasor(vI)), 3);
 
   Debug.println(" deg");
+
+  Debug.print("LCR normalized I amplitude: ");
+  Debug.println(lcrPhasorAmplitude(vI, n), 6);
+
+  Debug.print("LCR normalized V amplitude: ");
+  Debug.println(lcrPhasorAmplitude(vV, n), 6);
+
+  Debug.print("LCR normalized V/I ratio: ");
+  Debug.println( lcrPhasorAmplitude(vV, n) / lcrPhasorAmplitude(vI, n), 9);
 #endif
 
   // Four-wire Kelvin impedance calculation.
@@ -3661,8 +3828,46 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
   // TIA current-sense phasor. The active TIA feedback resistance converts
   // their complex voltage ratio into DUT impedance.
   //
-  // Z_DUT = -R_f * V_MEAS / I_MEAS
-  impedance = scaleLCRPhasor( divideLCRPhasor(vV, vI), -feedbackResistance);
+
+  int8_t presetIndex = getLCRFeedbackPresetIndex(feedbackResistance);
+
+  if (presetIndex < 0)
+    return false;
+
+  float physicalResistance = feedbackPresets[presetIndex].physicalResistance;
+  float currentSenseResistance = physicalResistance + LCR_TIA_INPUT_RESISTANCE;
+
+  // The current-measurement front end senses DUT-LOW through the TIA input
+  // resistance and the selected feedback resistance.
+  //
+  //   I_DUT = -V_I / (R_in + R_f)
+  //
+  // The voltage-measurement front end measures the differential DUT voltage
+  // with the characterized differential-stage gain.
+  //
+  //   V_DUT = V_V / G_diff
+  //
+  // Therefore:
+  //
+  //   Z_DUT = -(R_in + R_f) * V_V / (G_diff * V_I)
+  impedance = scaleLCRPhasor(
+    divideLCRPhasor(vV, vI),
+    -currentSenseResistance / LCR_VOLTAGE_DIFF_GAIN
+  );
+
+#if LCR_CAPTURE_DEBUG
+  LCRPhasor oldImpedance =
+    scaleLCRPhasor(
+      divideLCRPhasor(vV, vI),
+      -feedbackResistance
+    );
+
+  Debug.print("LCR impedance |Z|: ");
+  Debug.print(magnitudeLCRPhasor(impedance), 2);
+
+  Debug.print("  old model |Z|: ");
+  Debug.println(magnitudeLCRPhasor(oldImpedance), 2);
+#endif
 
   return true;
 }
@@ -3723,10 +3928,52 @@ void setLCRPGAGain(uint8_t pinA,
 }
 
 
-// Return the nominal linear gain represented by one PGA selection.
+// Select the voltage PGA gain and keep the active measurement settings
+// synchronized with the physical MAX4052 state.
+void selectLCRVoltagePGAGain(LCRPGAGain gain)
+{
+  lcrSettings.voltagePgaGain = gain;
+  setLCRVoltagePGAGain(gain);
+
+#if LCR_CAPTURE_DEBUG
+  Debug.print("LCR V PGA: ");
+  Debug.println(getLCRPGAGainLabel(gain));
+#endif
+}
+
+
+// Return the display label for one PGA range selection.
+//
+// These labels describe the hardware range category. They intentionally do
+// not reflect the characterized gain used internally for measurement math.
+const char *getLCRPGAGainLabel(LCRPGAGain gain)
+{
+  switch (gain) {
+    case LCR_PGA_GAIN_1:
+      return "1x";
+
+    case LCR_PGA_GAIN_5:
+      return "5x";
+
+    case LCR_PGA_GAIN_25:
+      return "25x";
+
+    case LCR_PGA_GAIN_101:
+      return "101x";
+  }
+
+  return "1x";
+}
+
+
+// Return the characterized linear gain for one PGA selection.
 //
 // This value is used to normalize measured phasors back to the signal
 // present at the PGA input.
+//
+// Characterized resistance values for the current breadboard prototype.
+// Production hardware should use values derived from the production
+// component network and/or stored calibration data.
 float getLCRPGAGainValue(LCRPGAGain gain)
 {
   switch (gain) {
@@ -3734,10 +3981,10 @@ float getLCRPGAGainValue(LCRPGAGain gain)
       return 1.0f;
 
     case LCR_PGA_GAIN_5:
-      return 5.0f;
+      return 5.22f;
 
     case LCR_PGA_GAIN_25:
-      return 25.0f;
+      return 25.61f;
 
     case LCR_PGA_GAIN_101:
       return 101.0f;
@@ -3830,9 +4077,22 @@ void testLCRGeneratorFrequency(uint32_t frequency)
 {
   lcrDDS.setFrequencyHz(frequency);
 
-  Serial.print("AD9833 frequency set to ");
-  Serial.print(frequency);
-  Serial.println(" Hz");
+  Debug.print("AD9833 frequency set to ");
+  Debug.print(frequency);
+  Debug.println(" Hz");
+}
+
+
+// Temporarily force the voltage PGA to a selected gain for scope
+// characterization. The selected state remains active until changed
+// elsewhere by normal LCR operation or another diagnostic call.
+void testLCRVoltagePGAGain(LCRPGAGain gain)
+{
+  selectLCRVoltagePGAGain(gain);
+
+  Debug.print("LCR diagnostic V-PGA set to ");
+  Debug.print(getLCRPGAGainValue(gain), 0);
+  Debug.println("x");
 }
 
 
@@ -5677,13 +5937,34 @@ void drawLCRMeasurementContext(const MeasurementPoint &m,
   display.print(reference.unit);
 
   // Show the actual voltage and current PGA gains currently selected.
+  //
+  // Clear each value field before redrawing it so a shorter gain string
+  // does not leave characters from the previous value (for example,
+  // "101x" changing to "5x").
+  int16_t centerX = r.x + r.w / 2;
+  int16_t bottomY = r.y + r.h;
+
+  display.fillRect(
+    leftValueX,
+    row2Y,
+    centerX - leftValueX,
+    bottomY - row2Y,
+    BGCOLOR
+  );
+
+  display.fillRect(
+    rightValueX,
+    row2Y,
+    r.x + r.w - rightValueX,
+    bottomY - row2Y,
+    BGCOLOR
+  );
+
   display.setCursor(leftValueX, row2Y);
-  display.print(getLCRPGAGainValue(settings.voltagePgaGain), 0);
-  display.print("x");
+  display.print(getLCRPGAGainLabel(settings.voltagePgaGain));
 
   display.setCursor(rightValueX, row2Y);
-  display.print(getLCRPGAGainValue(settings.currentPgaGain), 0);
-  display.print("x");
+  display.print(getLCRPGAGainLabel(settings.currentPgaGain));
 }
 
 
