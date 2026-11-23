@@ -743,6 +743,9 @@ void setLCRGeneratorFrequency(uint32_t frequency);
 // Set the AD9833 frequency directly during initial hardware testing.
 void testLCRGeneratorFrequency(uint32_t frequency);
 
+// Scope touch guard used when returning from another instrument mode.
+extern bool scopeWaitForTouchRelease;
+
 // Enter / leave LCR instrument mode.
 void enterLCRMode();
 void exitLCRMode();
