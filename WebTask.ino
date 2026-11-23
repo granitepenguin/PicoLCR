@@ -3536,10 +3536,32 @@ void loop1() {
   // timing-critical ADC/DMA record is being acquired. The window lasts only
   // for the raw capture; normal network servicing resumes immediately after.
   //
+
+  // Track how long LCR capture has continuously prevented network servicing.
+  static uint32_t captureBlockedSince = 0;
+
+  // Limit stuck-capture warnings to once per second.
+  static uint32_t lastCaptureBlockedWarning = 0;
+
   if (lcrCaptureWindowActive) {
+    if (captureBlockedSince == 0)
+      captureBlockedSince = millis();
+
+    uint32_t blockedMs = millis() - captureBlockedSince;
+
+    if (blockedMs >= 1000 &&
+        millis() - lastCaptureBlockedWarning >= 1000) {
+      Debug.print("WARNING: Web task blocked by LCR capture for ");
+      Debug.print(blockedMs);
+      Debug.println(" ms");
+      lastCaptureBlockedWarning = millis();
+    }
+
     delay(1);
     return;
   }
+
+  captureBlockedSince = 0;
 
   //
   // Forward newly completed LCR measurements to connected web clients.
@@ -3603,7 +3625,6 @@ void loop1() {
     sendLCRWebSweepResult(lcrSweepResult);
 
   server.handleClient();
-  MDNS.update();
 
   if (rp2040.fifo.available() > 0) {
 

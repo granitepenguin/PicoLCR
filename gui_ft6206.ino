@@ -223,11 +223,27 @@ static bool readTouch(uint16_t &x, uint16_t &y) {
 }
 
 #ifndef NOLCD
+// Ignore Scope touchscreen input until the current physical touch is released.
+// This prevents a touch from another instrument mode leaking into Scope input.
+bool scopeWaitForTouchRelease = false;
+
 void CheckTouch() {
   static bool lastPressed = false;
   uint16_t x = 0, y = 0;
 
   bool pressed = readTouch(x, y);
+
+  // A mode transition may occur while the previous screen is still touched.
+  // Wait for that touch to end before accepting new Scope touchscreen input.
+  if (scopeWaitForTouchRelease) {
+    if (!pressed) {
+      scopeWaitForTouchRelease = false;
+      lastPressed = false;
+    }
+
+    return;
+  }
+
   if (!pressed) {
     lastPressed = false;
     return;

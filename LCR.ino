@@ -83,6 +83,11 @@ constexpr float LCR_AUTORANGE_LOW = 300.0f;
 // autoranging. Leave headroom below the nominal 12-bit ADC peak range.
 constexpr float LCR_AUTORANGE_HIGH = 1800.0f;
 
+// Minimum voltage-channel amplitude considered large enough to keep the
+// current PGA gain. Below this level, autoranging tries the next higher gain
+// to improve measurement stability and signal-to-noise ratio.
+constexpr float LCR_V_AUTORANGE_LOW = 100.0f;
+
 // Minimum current-channel amplitude considered a measurable DUT at the
 // highest available TIA feedback range. Signals below this level are
 // indistinguishable from an open circuit.
@@ -300,6 +305,10 @@ constexpr int16_t LCR_SWEEP_PLOT_LEFT_PERCENT   = 16;
 constexpr int16_t LCR_SWEEP_PLOT_RIGHT_PERCENT  = 5;
 constexpr int16_t LCR_SWEEP_PLOT_TOP_PERCENT    = 8;
 constexpr int16_t LCR_SWEEP_PLOT_BOTTOM_PERCENT = 12;
+
+// delay to give some breathing room for touch interface so it doesn't
+// feel sluggish to use
+constexpr uint32_t LCR_MEASURE_INTERVAL_MS = 100;
 
 // Artificial interval between simulated Sweep measurements.
 // This makes progress and Cancel behavior observable during development.
@@ -2013,9 +2022,6 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
 
   setLCRGeneratorFrequency(settings.frequency);
 
-  // Allow the analog network to settle after an excitation-frequency change.
-  delay(5);
-
   LCRPhasor impedance;
   LCRCaptureQuality quality = {};
 
@@ -2031,20 +2037,22 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
   Debug.print( getLCRPGAGainValue(LCR_FORCED_V_PGA_GAIN), 0);
   Debug.println("x");
 #endif
-
-#else
-  // Autoranging begins with the voltage PGA at unity gain so each measurement
-  // can walk upward to the highest gain that preserves ADC headroom.
-  if (settings.autoRange) {
-    selectLCRVoltagePGAGain(LCR_PGA_GAIN_1);
-  }
 #endif
 
-  // Autoranging always starts at the lowest TIA gain and moves upward
-  // only when the measured current signal is too weak.
+  // Autoranging starts from the currently selected feedback range.
+  //
+  // LIVE measurements therefore retain the previous successful range and
+  // move only when the measured current signal requires a different range.
   if (settings.autoRange) {
-    selectLCRFeedbackPreset(0);
-    feedbackResistance = feedbackPresets[0].effectiveResistance;
+    int8_t currentPreset =
+      getLCRFeedbackPresetIndex(feedbackResistance);
+
+    // Fall back to the lowest range if the configured resistance does not
+    // correspond to one of the calibrated feedback presets.
+    if (currentPreset < 0) {
+      selectLCRFeedbackPreset(0);
+      feedbackResistance = feedbackPresets[0].effectiveResistance;
+    }
   }
 
   for (uint8_t attempt = 0; attempt < FEEDBACK_PRESET_COUNT; attempt++) {
@@ -2143,27 +2151,22 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
   }
 
 #if !LCR_FORCE_V_PGA
-  // With the TIA feedback range selected, walk the voltage PGA upward and
-  // retain the highest gain that preserves the configured ADC headroom.
+  // Start voltage autoranging from the previously successful gain.
+  //
+  // Move downward if ADC headroom is limited. Move upward if the voltage
+  // signal is too weak. Otherwise retain the current gain.
   if (settings.autoRange) {
 
-    for (uint8_t gainIndex = 0;
-         gainIndex < LCR_V_PGA_AUTORANGE_GAIN_COUNT;
-         gainIndex++) {
+    uint8_t gainIndex =
+      static_cast<uint8_t>(settings.voltagePgaGain);
 
-      LCRPGAGain gain = static_cast<LCRPGAGain>(gainIndex);
-      selectLCRVoltagePGAGain(gain);
+    if (gainIndex >= LCR_V_PGA_AUTORANGE_GAIN_COUNT)
+      gainIndex = 0;
 
-      // Allow the analog PGA path to settle before evaluating this gain.
-      delay(2);
+    while (true) {
 
-      if (!measureLCRHardwareImpedance(
-            settings.frequency,
-            feedbackResistance,
-            impedance,
-            quality)) {
-        return measurement;
-      }
+      LCRPGAGain gain =
+        static_cast<LCRPGAGain>(gainIndex);
 
 #if LCR_CAPTURE_DEBUG
       Debug.print("LCR V autorange probe: gain=");
@@ -2180,27 +2183,23 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
       );
 #endif
 
-      // This gain is safe. If it is the highest gain currently available to
-      // autoranging, retain it without probing an unsupported higher state.
-      if (!quality.voltage.headroomLimited) {
-        if (gainIndex == LCR_V_PGA_AUTORANGE_GAIN_COUNT - 1)
-          break;
-
-        continue;
+      // Too much gain. Move down one step and recapture.
+      if (quality.voltage.headroomLimited && gainIndex > 0) {
+        gainIndex--;
       }
 
-      // Unity gain is already too close to an ADC rail. There is no lower
-      // voltage PGA setting available.
-      if (gainIndex == 0)
+      // Signal is weak. Move up one step and recapture.
+      else if (quality.voltage.amplitude < LCR_V_AUTORANGE_LOW &&
+               gainIndex < LCR_V_PGA_AUTORANGE_GAIN_COUNT - 1) {
+        gainIndex++;
+      }
+
+      // Current gain is suitable.
+      else {
         break;
+      }
 
-      // The attempted gain consumed too much ADC headroom. Restore the
-      // previous safe gain and recapture so the impedance corresponds to
-      // the selected hardware state.
-      gainIndex--;
-
-      gain =
-        static_cast<LCRPGAGain>(gainIndex);
+      gain = static_cast<LCRPGAGain>(gainIndex);
 
       selectLCRVoltagePGAGain(gain);
 
@@ -2213,8 +2212,6 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
             quality)) {
         return measurement;
       }
-
-      break;
     }
   }
 #endif
@@ -2315,6 +2312,10 @@ void exitLCRMode()
 
   // Restore the ADC configuration expected by the oscilloscope.
   restoreScopeAdc();
+
+  // The touch that selected Back may still be held when Scope regains control.
+  // Ignore Scope touchscreen input until that physical touch is released.
+  scopeWaitForTouchRelease = true;
 
   instrumentMode = MODE_SCOPE;
 
@@ -2497,6 +2498,7 @@ void processLCRWebTouch()
 void updateLCR()
 {
   static uint32_t lastDisplayUpdate = 0;
+  static uint32_t lastMeasurementUpdate = 0;
   static bool lastPressed = false;
 
   uint32_t now = millis();
@@ -2518,7 +2520,10 @@ void updateLCR()
 
   if (lcrTab == LCR_TAB_MEASURE &&
       lcrMeasureState == LCR_MEASURE_LIVE &&
-      lcrUIState == LCR_UI_NORMAL) {
+      lcrUIState == LCR_UI_NORMAL &&
+      now - lastMeasurementUpdate >= LCR_MEASURE_INTERVAL_MS) {
+
+    lastMeasurementUpdate = now;
 
     // Acquire into a temporary object so a transient capture failure cannot
     // overwrite the last trustworthy measurement shown on either front panel.
@@ -3592,10 +3597,6 @@ void runLCRChannelMatchTest()
     uint32_t frequency = frequencies[i];
 
     setLCRGeneratorFrequency(frequency);
-
-    // Allow the excitation signal to settle after each frequency change.
-    delay(5);
-
     printLCRChannelMatchTest(frequency);
   }
 }
@@ -3874,8 +3875,10 @@ bool measureLCRHardwareImpedance(uint32_t frequency,
 
 
 // Set the physical LCR excitation frequency only when it actually changes.
-// Avoiding redundant AD9833 writes prevents unnecessary SPI traffic during
-// continuous single-frequency measurements.
+//
+// Frequency changes require time for the excitation source and analog signal
+// path to settle before acquisition. Keeping that delay here avoids paying
+// the settling penalty during continuous measurements at one frequency.
 void setLCRGeneratorFrequency(uint32_t frequency)
 {
   if (frequency == lcrGeneratorFrequency)
@@ -3883,6 +3886,9 @@ void setLCRGeneratorFrequency(uint32_t frequency)
 
   lcrDDS.setFrequencyHz(frequency);
   lcrGeneratorFrequency = frequency;
+
+  // Allow the analog network to settle after the excitation frequency changes.
+  delay(5);
 }
 
 
