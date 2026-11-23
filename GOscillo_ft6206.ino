@@ -237,7 +237,27 @@ private:
 
 DebugPrint Debug(Serial, Serial1);
 
+
+// Ensure the system clock used by the high-rate LCR ADC path is 192 MHz.
+// If the board is already configured for 192 MHz, no PLL change is needed.
+bool ensureLCRSystemClock()
+{
+  const uint32_t targetHz = 192000000UL;
+  uint32_t currentHz = clock_get_hz(clk_sys);
+
+  if (currentHz >= targetHz - targetHz / 100 &&
+      currentHz <= targetHz + targetHz / 100) {
+    return true;
+  }
+
+  return set_sys_clock_khz(192000, true);
+}
+
+
 void setup(){
+  // Establish the clock used by LCR acquisition before peripherals initialize.
+  ensureLCRSystemClock();
+
   pinMode(CH0DCSW, INPUT_PULLUP);   // CH1 DC/AC
   pinMode(CH1DCSW, INPUT_PULLUP);   // CH2 DC/AC
   pinMode(UPPIN, INPUT_PULLUP);     // up
