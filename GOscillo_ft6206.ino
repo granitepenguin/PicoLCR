@@ -621,6 +621,9 @@ void loop() {
   timeExec = 100;
   led_on();
 
+  // Apply browser mode changes on Core 0 before dispatching instrument work.
+  processLCRWebModeRequest();
+
   if (instrumentMode == MODE_LCR) {
     updateLCR();
     return;
