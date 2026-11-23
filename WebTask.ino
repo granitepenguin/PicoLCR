@@ -41,6 +41,7 @@ void handleRoot(void) {
 
   if (server.method() == HTTP_POST) {
     Serial.println(server.argName(0));
+    handle_instrument_mode();
     handle_rate();
     handle_range1();
     handle_range2();
@@ -343,6 +344,28 @@ void handle_pwm_freq() {
   }
 }
 
+// Queue a browser instrument-mode request for processing on Core 0.
+void handle_instrument_mode()
+{
+  if (!server.hasArg("instrument_mode"))
+    return;
+
+  String mode = server.arg("instrument_mode");
+
+  if (mode == "scope")
+    lcrWebModeRequest.mode = MODE_SCOPE;
+  else if (mode == "lcr")
+    lcrWebModeRequest.mode = MODE_LCR;
+  else
+    return;
+
+  // Publish the request only after the requested mode has been written.
+  lcrWebModeRequest.pending = true;
+
+  server.send(200, "text/plain", "OK");
+}
+
+
 // Queue one logical 320x240 canvas touch for the LCR task on Core 0.
 // WebTask only publishes the request; Core 0 owns all LCR UI state changes.
 void handle_lcr_touch()
@@ -401,6 +424,23 @@ canvas {
   border: 1px solid #404040;
   background: #000;
   image-rendering: auto;
+}
+#instrument-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid #ccc;
+}
+
+#instrument-nav strong {
+  margin-right: 12px;
+}
+
+#instrument-nav button {
+  padding: 6px 16px;
+  cursor: pointer;
 }
 </style>
 <script type="text/javascript">
@@ -518,6 +558,23 @@ function getLCRCanvasPosition(canvas, event) {
     x: Math.floor(x),
     y: Math.floor(y)
   };
+}
+
+
+// Request an instrument change while leaving hardware ownership to Core 0.
+async function selectInstrument(mode) {
+  try {
+    var form = new FormData();
+    form.append('instrument_mode', mode);
+
+    await fetch("/", {
+      method: "POST",
+      body: form
+    });
+  }
+  catch (error) {
+    console.log(error);
+  }
 }
 
 // Convert a canvas click into logical LCR coordinates and send the discrete
@@ -2745,6 +2802,12 @@ async function post_duty() {
 }
 </script>
 <body>
+
+<div id='instrument-nav'>
+  <strong>PicoLCR</strong>
+  <button type='button' onclick="selectInstrument('scope')">Scope</button>
+  <button type='button' onclick="selectInstrument('lcr')">LCR</button>
+</div>
 
 <div id='lcr-ui'>
   <canvas id='lcr-canvas' width='960' height='720'

@@ -371,6 +371,18 @@ extern LCRWebTouch lcrWebTouch;
 // Process a pending browser touch on Core 0 through the normal LCR UI path.
 void processLCRWebTouch();
 
+// Carries a pending browser instrument-mode request from Core 1 to Core 0.
+struct LCRWebModeRequest
+{
+  volatile uint8_t mode;
+  volatile bool pending;
+};
+
+extern LCRWebModeRequest lcrWebModeRequest;
+
+// Process a pending browser instrument-mode request on Core 0.
+void processLCRWebModeRequest();
+
 // Snapshot of LCR front-panel navigation state shared with the web task.
 // Core 1 uses this state to render the same active tab and selector as the TFT.
 struct LCRWebUIState

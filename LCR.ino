@@ -415,6 +415,8 @@ volatile LCRWebMeasurement lcrWebMeasurement = {};
 // Stores one pending browser touch until the LCR task on Core 0 consumes it.
 LCRWebTouch lcrWebTouch = {};
 
+LCRWebModeRequest lcrWebModeRequest = {};
+
 // Stores the latest LCR navigation state for the browser front panel.
 volatile LCRWebUIState lcrWebUIState = {};
 
@@ -2488,6 +2490,26 @@ void processLCRWebTouch()
   // Publish any navigation or selector change caused by the browser touch.
   if (instrumentMode == MODE_LCR)
     publishLCRWebUIState();
+}
+
+
+// Apply a browser-requested instrument change on Core 0 so ADC, display,
+// generator, and touch ownership follow the normal physical navigation path.
+void processLCRWebModeRequest()
+{
+  if (!lcrWebModeRequest.pending)
+    return;
+
+  uint8_t requestedMode = lcrWebModeRequest.mode;
+  lcrWebModeRequest.pending = false;
+
+  if (requestedMode == MODE_LCR && instrumentMode != MODE_LCR) {
+    enterLCRMode();
+    return;
+  }
+
+  if (requestedMode == MODE_SCOPE && instrumentMode != MODE_SCOPE)
+    exitLCRMode();
 }
 
 
