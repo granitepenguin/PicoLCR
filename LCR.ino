@@ -79,6 +79,10 @@ constexpr float LCR_VOLTAGE_DIFF_GAIN = 0.982f;
 // toward a smaller feedback resistance.
 constexpr float LCR_AUTORANGE_LOW = 300.0f;
 
+// Prefer a lower TIA range once the current signal is comfortably strong.
+// This preserves ADC headroom and avoids using more analog gain than needed.
+constexpr float LCR_AUTORANGE_TARGET_HIGH = 900.0f;
+
 // Maximum raw I_MEAS phasor amplitude considered safe during TIA
 // autoranging. Leave headroom below the nominal 12-bit ADC peak range.
 constexpr float LCR_AUTORANGE_HIGH = 1800.0f;
@@ -131,9 +135,6 @@ static const uint16_t LCR_TARGET_CYCLES = 16;
 static const uint16_t LCR_CAPTURE_MIN_SAMPLES = 512;
 static const uint16_t LCR_CAPTURE_MAX_SAMPLES = 4000;
 static const uint16_t LCR_MAX_POINT_MS = 20;
-
-// Maximum aggregate ADC rate validated by the standalone PicoLCR POC.
-static const float LCR_ADC_MAX_AGGREGATE_RATE = 250000.0f;
 
 // Avoid sampling the excitation too close to the per-channel Nyquist
 // frequency. Near 2 samples/cycle the round-robin Goertzel measurement
@@ -191,6 +192,10 @@ constexpr uint8_t FEEDBACK_PRESET_COUNT =
 // Set to 1 while debugging acquisition problems; 0 for normal operation.
 #define LCR_CAPTURE_DEBUG 1
 
+// Run the one-shot ADC channel-match diagnostic when entering LCR mode.
+// Both ADC measurement inputs must receive the same physical signal.
+#define LCR_RUN_CHANNEL_MATCH_TEST 0
+
 // Palette indexes used by 4-bit LCR sprites.
 // These indexes map the existing UI colors into the sprite's 16-color table.
 enum LCRSpriteColor
@@ -242,8 +247,12 @@ static const float LCR_PHASOR_CONJ = 1.0f;
 static const float LCR_HANN_COHERENT_GAIN = 0.5f;
 static const bool LCR_USE_HANN_WINDOW = true;
 
-// RP2040 ADC conversion floor used when calculating the hardware divisor.
-static const uint16_t LCR_ADC_MIN_PERIOD_CYCLES = 96;
+// Minimum validated programmed ADC conversion period in clk_adc cycles.
+// Shorter programmed periods silently ran slower during POC testing.
+static const uint16_t LCR_ADC_MIN_PERIOD_CYCLES = 192;
+
+// LCR uses the full 192 MHz system clock as clk_adc for higher-rate capture.
+static const uint32_t LCR_ADC_CLK_DIV = 1;
 
 // AD9833 excitation source for the LCR measurement hardware.
 AD9833_Driver lcrDDS(AD9833_FSYNC_PIN);
@@ -2087,6 +2096,51 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
     );
 #endif
 
+    // A clean signal above the preferred window may not require this much
+    // TIA gain. Probe one lower range and keep it only if the current signal
+    // remains strong enough for a useful measurement.
+    if (!quality.current.saturated &&
+        quality.current.amplitude > LCR_AUTORANGE_TARGET_HIGH &&
+        quality.current.amplitude <= LCR_AUTORANGE_HIGH &&
+        currentPreset > 0) {
+
+      int8_t higherPreset = currentPreset;
+      float higherFeedbackResistance = feedbackResistance;
+      LCRPhasor higherImpedance = impedance;
+      LCRCaptureQuality higherQuality = quality;
+
+      currentPreset--;
+
+      selectLCRFeedbackPreset(currentPreset);
+      feedbackResistance =
+        feedbackPresets[currentPreset].effectiveResistance;
+
+      delay(2);
+
+      if (!measureLCRHardwareImpedance(
+            settings.frequency,
+            feedbackResistance,
+            impedance,
+            quality)) {
+        return measurement;
+      }
+
+      // Keep probing downward while the lower range still provides enough
+      // current-channel amplitude for a useful measurement.
+      if (quality.current.amplitude >= LCR_AUTORANGE_LOW)
+        continue;
+
+      // The lower range sacrificed too much current-channel signal. Restore
+      // the previous range and its already captured result without requiring
+      // another ADC acquisition.
+      selectLCRFeedbackPreset(higherPreset);
+      feedbackResistance = higherFeedbackResistance;
+      impedance = higherImpedance;
+      quality = higherQuality;
+
+      break;
+    }
+
     // A saturated or excessively large current signal means this Rref is
     // unusable. Return to the previous safe range.
     if (quality.current.saturated ||
@@ -2121,8 +2175,8 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
       break;
     }
 
-    // The current channel has reached the useful measurement region.
-    // Keep this Rref rather than increasing gain unnecessarily.
+    // The current signal is inside the preferred measurement region. Retain
+    // this range rather than increasing TIA gain unnecessarily.
     if (quality.current.amplitude >= LCR_AUTORANGE_LOW)
       break;
 
@@ -2293,6 +2347,11 @@ void enterLCRMode()
 
   initializeLCR();
   initializeLCRCapture();
+
+#if LCR_RUN_CHANNEL_MATCH_TEST
+  // Characterize relative ADC-channel gain and phase before normal LCR use.
+  runLCRChannelMatchTest();
+#endif
 
   drawLCRScreen();
   publishLCRWebUIState();
@@ -2665,8 +2724,9 @@ void initializeLCRGenerator()
 
 
 // Configure clk_adc for the higher-rate LCR acquisition path.
-// With the current 192 MHz system clock, dividing PLL_SYS by two produces
-// the 96 MHz ADC clock validated by the standalone PicoLCR POC.
+//
+// clk_adc is sourced directly from PLL_SYS so the validated 192-cycle
+// conversion period provides up to 1 MS/s aggregate round-robin sampling.
 void configureLCRAdcClock()
 {
   uint32_t systemClock = clock_get_hz(clk_sys);
@@ -2676,14 +2736,21 @@ void configureLCRAdcClock()
     0,
     CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
     systemClock,
-    systemClock / 2
+    systemClock / LCR_ADC_CLK_DIV
   );
 
+  // Use the actual configured clock when calculating the acquisition ceiling.
   lcrAdcClockHz = clock_get_hz(clk_adc);
-  lcrAdcMaxAggregateRate = LCR_ADC_MAX_AGGREGATE_RATE;
+
+  lcrAdcMaxAggregateRate =
+    static_cast<float>(lcrAdcClockHz) / LCR_ADC_MIN_PERIOD_CYCLES;
 
 #if LCR_CAPTURE_DEBUG
-  Debug.print("LCR ADC clock: ");
+  Debug.print("LCR clk_sys: ");
+  Debug.print(systemClock / 1000000.0f, 2);
+  Debug.println(" MHz");
+
+  Debug.print("LCR clk_adc: ");
   Debug.print(lcrAdcClockHz / 1000000.0f, 2);
   Debug.println(" MHz");
 
@@ -2702,10 +2769,6 @@ void initializeLCRCapture()
   configureLCRAdcClock(); // Adjust for higher freq measurements
 
   adc_init();
-
-  // Clock diag output
-  lcrAdcClockHz = clock_get_hz(clk_adc);
-  lcrAdcMaxAggregateRate = LCR_ADC_MAX_AGGREGATE_RATE;
 
   adc_gpio_init(LCR_ADC_TOTAL_PIN);
   adc_gpio_init(LCR_ADC_DUT_PIN);

@@ -140,11 +140,31 @@ void stopScopeAdc()
     dma_channel_abort(dma_chan);
 }
 
+
+// Restore the stock 48 MHz ADC clock before Scope reclaims the ADC.
+//
+// Scope sampling divisors were designed around the normal PLL_USB-derived
+// ADC clock and would run too fast if the LCR 192 MHz clock remained active.
+void restoreScopeAdcClock()
+{
+  clock_configure(
+    clk_adc,
+    0,
+    CLOCKS_CLK_ADC_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+    48000000u,
+    48000000u
+  );
+}
+
+
 // Restore the ADC configuration expected by the oscilloscope after another
 // instrument has used the shared ADC peripheral.
 void restoreScopeAdc()
 {
   float clock_div;
+
+  // Restore the clock assumption used by the existing Scope ADC divisors.
+  restoreScopeAdcClock();
 
   if (rate == 4)
     clock_div = 192.0f;
