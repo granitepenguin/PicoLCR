@@ -184,17 +184,33 @@ constexpr uint8_t FEEDBACK_PRESET_COUNT =
 
 // ====================================================================
 
-// Force a fixed voltage-PGA gain for analog hardware characterization.
-// Set to 0 for normal automatic V-PGA operation.
-#define LCR_FORCE_V_PGA 0
+
+// ====================================================================
+// Debug config options
+// ====================================================================
 
 // Enable verbose LCR ADC/DMA diagnostics.
 // Set to 1 while debugging acquisition problems; 0 for normal operation.
 #define LCR_CAPTURE_DEBUG 1
 
+// Force a fixed voltage-PGA gain for analog hardware characterization.
+// Set to 0 for normal automatic V-PGA operation.
+#define LCR_FORCE_V_PGA 0
+
+// set LCR measure mode to hold if a FIFO is hit for diagnostics
+#define FIFO_HOLD 0
+
 // Run the one-shot ADC channel-match diagnostic when entering LCR mode.
 // Both ADC measurement inputs must receive the same physical signal.
 #define LCR_RUN_CHANNEL_MATCH_TEST 0
+
+#if LCR_FORCE_V_PGA
+constexpr LCRPGAGain LCR_FORCED_V_PGA_GAIN = LCR_PGA_GAIN_101;
+#endif
+
+// ====================================================================
+
+
 
 // Palette indexes used by 4-bit LCR sprites.
 // These indexes map the existing UI colors into the sprite's 16-color table.
@@ -434,10 +450,6 @@ volatile LCRWebSweepProgress lcrWebSweepProgress = {};
 
 // Holds the latest completed Sweep point published for Core 1.
 volatile LCRWebSweepResult lcrWebSweepResult = {};
-
-#if LCR_FORCE_V_PGA
-constexpr LCRPGAGain LCR_FORCED_V_PGA_GAIN = LCR_PGA_GAIN_101;
-#endif
 
 // Publish one completed LCR measurement for the web interface.
 //
@@ -3286,11 +3298,13 @@ bool captureLCRRawTest(uint32_t frequency, LCRCapturePlan &plan)
         plan,
         fifoStatus
       );
+#if FIFO_HOLD 
       lcrMeasureState = LCR_MEASURE_HOLD;
 
       Debug.println(
         "LCR Measure forced to HOLD after ADC capture failure."
       );
+#endif
 #endif
 
     }
