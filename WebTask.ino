@@ -613,68 +613,70 @@ async function handleLCRCanvasPointer(event) {
 }
 
 
-// Draw the common LCR header and tab bar for all analyzer screens.
+// Draw the common LCR tab bar at the top of the virtual front panel.
 function drawLCRHeaderAndTabs(ctx, activeTab) {
   const width = 320;
-  const headerH = 24;
-  const tabsH = 24;
+  const tabsH = 33;
 
   const textColor = '#e8f6ff';
   const gridColor = '#606060';
-  // Match the TFT HIGHCOLOR used for the active LCR tab.
   const highlightColor = '#00ffff';
 
-  // Draw the separator below the header.
-  ctx.strokeStyle = gridColor;
-  ctx.beginPath();
-  ctx.moveTo(0, headerH - 1);
-  ctx.lineTo(width, headerH - 1);
-  ctx.stroke();
+  // Clear the complete tab bar before drawing the new active state so the
+  // previous tab's cyan selection outline does not remain on the canvas.
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, width, tabsH);
 
-  // Draw the Back control and analyzer title.
-  ctx.font = '12px monospace';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = textColor;
-
-  drawLCRCenteredText(ctx, '< Back', 0, headerH / 2, 70);
-
-  ctx.font = 'bold 13px monospace';
-  drawLCRCenteredText(ctx, 'LCR ANALYZER', 70, headerH / 2, width - 70);
-
-  // Draw the four analyzer tabs and highlight the active one.
   var tabs = ['Measure', 'Sweep', 'Cal', 'Settings'];
   var tabW = width / tabs.length;
 
   ctx.font = '12px monospace';
+  ctx.textBaseline = 'middle';
 
   for (var i = 0; i < tabs.length; i++) {
-    ctx.fillStyle = (i === activeTab) ? highlightColor : textColor;
+    var x = i * tabW;
+    var selected = (i === activeTab);
+
+    // Match the TFT selected-tab treatment with a cyan outline.
+    if (selected) {
+      ctx.strokeStyle = highlightColor;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(
+        x + 2,
+        3,
+        tabW - 4,
+        tabsH - 6
+      );
+    }
+
+    ctx.fillStyle = selected ? highlightColor : textColor;
 
     drawLCRCenteredText(
       ctx,
       tabs[i],
-      i * tabW,
-      headerH + tabsH / 2,
+      x,
+      tabsH / 2,
       tabW
     );
 
     if (i < tabs.length - 1) {
       ctx.strokeStyle = gridColor;
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo((i + 1) * tabW, headerH + 3);
-      ctx.lineTo((i + 1) * tabW, headerH + tabsH - 3);
+      ctx.moveTo(x + tabW, 3);
+      ctx.lineTo(x + tabW, tabsH - 3);
       ctx.stroke();
     }
   }
 
   // Draw the separator below the tab bar.
   ctx.strokeStyle = gridColor;
+  ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(0, headerH + tabsH - 1);
-  ctx.lineTo(width, headerH + tabsH - 1);
+  ctx.moveTo(0, tabsH - 1);
+  ctx.lineTo(width, tabsH - 1);
   ctx.stroke();
 }
-
 
 
 // Draw the read-only LCR Measure screen on the 320x240 virtual front panel.
@@ -696,12 +698,11 @@ function drawLCRMeasureCanvas(message) {
   const width = 320;
   const height = 240;
 
-  const headerH = 24;
-  const tabsH = 24;
+  const tabsH = 33;
   const footerH = 28;
 
-  const contentY = headerH + tabsH;
-  const contentH = height - headerH - tabsH - footerH;
+  const contentY = tabsH;
+  const contentH = height - tabsH - footerH;
   const footerY = height - footerH;
 
   // Match the physical Measure-screen layout.
@@ -722,7 +723,7 @@ function drawLCRMeasureCanvas(message) {
   ctx.fillStyle = backgroundColor;
   ctx.fillRect(0, 0, width, height);
 
-  // Draw the common header with Measure as the active tab.
+  // Draw the common tab bar with Measure as the active tab.
   drawLCRHeaderAndTabs(ctx, 0);
 
   //
@@ -906,11 +907,38 @@ function drawLCRMeasureCanvas(message) {
     contextRow1Y
   );
 
+  var gainLabels = [
+    '1x',
+    '5x',
+    '25x',
+    '101x'
+  ];
+
+  var gainLabels = [
+    '1x',
+    '5x',
+    '25x',
+    '101x'
+  ];
+
+  // Display the nominal PGA selections from the retained UI-state enums.
+  // Measurement messages contain calibrated/effective gain values instead.
+  var voltageGain = '?';
+  var currentGain = '?';
+
+  if (lcrUIState !== null) {
+    voltageGain =
+      gainLabels[lcrUIState.voltagePgaGain] || '?';
+
+    currentGain =
+      gainLabels[lcrUIState.currentPgaGain] || '?';
+  }
+
   ctx.fillText('V PGA:', 16, contextRow2Y);
-  ctx.fillText(String(message.voltagePgaGain) + 'x', 70, contextRow2Y);
+  ctx.fillText(voltageGain, 70, contextRow2Y);
 
   ctx.fillText('I PGA:', 176, contextRow2Y);
-  ctx.fillText(String(message.currentPgaGain) + 'x', 224, contextRow2Y);
+  ctx.fillText(currentGain, 224, contextRow2Y);
 
 
   //
@@ -986,9 +1014,9 @@ function drawLCRSweepSetupCanvas(message) {
 
   var content = {
     x: 0,
-    y: 48,
+    y: 33,
     w: 320,
-    h: 164
+    h: 179
   };
 
   var footer = {
@@ -998,7 +1026,11 @@ function drawLCRSweepSetupCanvas(message) {
     h: 28
   };
 
-  var rowH = Math.floor(content.h / 6);
+  var verticalPadding = 8;
+  var rowsY = content.y + verticalPadding;
+  var rowsH = content.h - verticalPadding * 2;
+
+  var rowH = Math.floor(rowsH / 6);
   var leftX = content.x + Math.floor(content.w * 10 / 100);
   var valueX = content.x + Math.floor(content.w * 55 / 100);
 
@@ -1023,8 +1055,8 @@ function drawLCRSweepSetupCanvas(message) {
   var rows = [];
 
   for (var i = 0; i < 6; i++) {
-    var y = content.y + i * rowH;
-    var h = i === 5 ? content.h - rowH * i : rowH;
+    var y = rowsY + i * rowH;
+    var h = i === 5 ? rowsH - rowH * i : rowH;
 
     rows.push({
       x: content.x,
@@ -1133,9 +1165,9 @@ function drawLCRSweepRunningCanvas(progress) {
 
   var content = {
     x: 0,
-    y: 48,
+    y: 33,
     w: 320,
-    h: 164
+    h: 179
   };
 
   var footer = {
@@ -1400,7 +1432,7 @@ function drawLCRSweepResultsCanvas(message) {
   var ctx = canvas.getContext('2d');
 
   const width = 320;
-  const content = { x: 0, y: 48, w: 320, h: 164 };
+  const content = { x: 0, y: 33, w: 320, h: 179 };
   const footer = { x: 0, y: 212, w: 320, h: 28 };
 
   const textColor = '#e8f6ff';
@@ -1781,18 +1813,28 @@ function drawLCRSweepResultsCanvas(message) {
 
 
 // Draw a modal LCR preset selector using the same geometry as the TFT.
-function drawLCRSelector(title, presets, selectedValue, isEnabled) {
+function drawLCRSelector( title,
+                          presets,
+                          selectedValue,
+                          isEnabled,
+                          exitLabel
+                        ) {
   var canvas = document.getElementById('lcr-canvas');
   var ctx = canvas.getContext('2d');
 
+  // Most selectors retain Cancel. Menus with immediate changes can request
+  // Exit instead.
+  if (exitLabel === undefined)
+    exitLabel = 'Cancel';
+
   //
-  // Matches calculateSelectorLayout() for the 320x240 LCR display.
+  // Match the headerless TFT selector area below the 33-pixel tab bar.
   //
   var selector = {
     x: 0,
-    y: 48,
+    y: 33,
     w: 320,
-    h: 192
+    h: 207
   };
 
   //
@@ -1964,11 +2006,20 @@ function drawLCRSelector(title, presets, selectedValue, isEnabled) {
 
     ctx.strokeRect( x, y, buttonW, buttonH);
 
+    // Longer gain-status labels need a smaller font to fit the three-column
+    // More menu without changing the normal selector-button appearance.
+    if (presets[i].label.indexOf('I-Gain:') === 0 ||
+        presets[i].label.indexOf('V-Gain:') === 0) {
+      ctx.font = '10px monospace';
+    } else {
+      ctx.font = '12px monospace';
+    }
+
     ctx.fillText( presets[i].label, x + buttonW / 2, y + buttonH / 2);
   }
 
   //
-  // Cancel button.
+  // Selector exit button.
   //
   ctx.strokeStyle = '#ffffff';
   ctx.fillStyle = '#ffffff';
@@ -1982,7 +2033,7 @@ function drawLCRSelector(title, presets, selectedValue, isEnabled) {
   );
 
   ctx.fillText(
-    'Cancel',
+    exitLabel,
     cancelX + cancelW / 2,
     cancelY + cancelH / 2
   );
@@ -1996,7 +2047,10 @@ function drawLCRFrequencySelector(message) {
   var presets = [
     { label: '100 Hz',  value: 100 },
     { label: '1 kHz',   value: 1000 },
+    { label: '5 kHz',   value: 5000 },
     { label: '10 kHz',  value: 10000 },
+    { label: '20 kHz',  value: 20000 },
+    { label: '50 kHz',  value: 50000 },
     { label: '100 kHz', value: 100000 },
     { label: '110 kHz', value: 110000 }
   ];
@@ -2120,11 +2174,47 @@ function drawLCRSweepPlotSelector(message) {
 }
 
 
+// Draw the Calibration placeholder until calibration controls are implemented.
+function drawLCRCalibrationCanvas() {
+  var canvas = document.getElementById('lcr-canvas');
+
+  if (!canvas || !canvas.getContext)
+    return;
+
+  var ctx = canvas.getContext('2d');
+
+  const width = 320;
+  const tabsH = 33;
+  const footerH = 28;
+  const contentH = 240 - tabsH - footerH;
+
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, tabsH, width, contentH + footerH);
+
+  // Redraw common navigation with Calibration selected.
+  drawLCRHeaderAndTabs(ctx, 2);
+}
+
+
 // Draw the Measure More menu.
 function drawLCRMoreSelector(message) {
+  var gainLabels = [
+    '1x',
+    '5x',
+    '25x',
+    '101x'
+  ];
+
+  var currentGain =
+    gainLabels[message.currentPgaGain] || '?';
+
+  var voltageGain =
+    gainLabels[message.voltagePgaGain] || '?';
+
   var presets = [
-    { label: 'Current PGA', value: 0 },
-    { label: 'Voltage PGA', value: 1 }
+    { label: 'I-Gain: ' + currentGain, value: 0 },
+    { label: 'V-Gain: ' + voltageGain, value: 1 },
+    { label: 'Scope', value: 2 }
   ];
 
   // More is a navigation menu rather than a value selector,
@@ -2132,7 +2222,9 @@ function drawLCRMoreSelector(message) {
   drawLCRSelector(
     'More',
     presets,
-    -1
+    -1,
+    null,
+    'Exit'
   );
 }
 
@@ -2155,13 +2247,15 @@ function drawLCRPGASelector(message) {
 
   var title =
     message.pgaTarget === 0
-      ? 'Current PGA Gain'
-      : 'Voltage PGA Gain';
+      ? 'I-Gain'
+      : 'V-Gain';
 
   drawLCRSelector(
     title,
     presets,
-    currentTarget
+    currentTarget,
+    null,
+    'Exit'
   );
 }
 
@@ -2193,9 +2287,9 @@ function drawLCRSettingsCanvas(message) {
 
   var content = {
     x: 0,
-    y: 48,
+    y: 33,
     w: 320,
-    h: 164
+    h: 179
   };
 
   var footer = {
@@ -2259,7 +2353,7 @@ function drawLCRSettingsCanvas(message) {
   ctx.textAlign = 'left';
 
   ctx.fillText(
-    'Range Mode',
+    'RRef Select Mode',
     row.x + 8,
     row.y + row.h / 2
   );
@@ -2409,6 +2503,16 @@ function updateLCRUIState(message) {
       message.sweepState === 0) {
 
     drawLCRSweepSetupCanvas(message);
+    return;
+  }
+
+  //
+  // Normal Calibration display.
+  //
+  if (message.uiState === 0 &&
+      message.tab === 2) {
+
+    drawLCRCalibrationCanvas();
     return;
   }
 

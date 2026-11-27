@@ -301,7 +301,7 @@ constexpr int X_Y     = 120;
 
 constexpr int16_t LCR_HEADER_HEIGHT_PERCENT = 10;
 constexpr int16_t LCR_BACK_BUTTON_WIDTH_PERCENT = 22;
-constexpr int16_t LCR_TAB_HEIGHT_PERCENT = 10;
+constexpr int16_t LCR_TAB_HEIGHT_PERCENT = 14;
 constexpr int16_t LCR_FOOTER_HEIGHT_PERCENT = 12;
 
 constexpr int16_t LCR_PRIMARY_HEIGHT_PERCENT = 37;
@@ -2403,14 +2403,6 @@ void exitLCRMode()
 void handleLCRInputTouch(uint16_t x, uint16_t y)
 {
   //
-  // Back
-  //
-  if (pointInLCRRect(x, y, lcrLayout.backButton)) {
-    exitLCRMode();
-    return;
-  }
-
-  //
   // Top-level analyzer tabs
   //
   if (pointInLCRRect(x, y, lcrLayout.tabs)) {
@@ -4302,30 +4294,16 @@ void calculateLCRLayout()
   const int16_t screenW = display.width();
   const int16_t screenH = display.height();
 
-  const int16_t headerH = screenH * LCR_HEADER_HEIGHT_PERCENT / 100;
+  // The LCR tabs now occupy the top of the screen directly. The previous
+  // title/Back header was redundant and its space is reclaimed for content.
   const int16_t tabsH = screenH * LCR_TAB_HEIGHT_PERCENT / 100;
   const int16_t footerH = screenH * LCR_FOOTER_HEIGHT_PERCENT / 100;
 
-  const int16_t contentY = headerH + tabsH;
-  const int16_t contentH = screenH - headerH - tabsH - footerH;
-
+  const int16_t contentY = tabsH;
+  const int16_t contentH = screenH - tabsH - footerH;
   const int16_t footerY = screenH - footerH;
 
-  lcrLayout.header = { 0, 0, screenW, headerH };
-
-  // Define the Back-button touch region within the left side of the header.
-  // Keeping this separate from the complete header prevents accidental exits
-  // when the instrument title or unused header space is touched.
-  const int16_t backButtonW = screenW * LCR_BACK_BUTTON_WIDTH_PERCENT / 100;
-
-  lcrLayout.backButton = {
-    lcrLayout.header.x,
-    lcrLayout.header.y,
-    backButtonW,
-    lcrLayout.header.h
-  };
-
-  lcrLayout.tabs = { 0, headerH, screenW, tabsH };
+  lcrLayout.tabs = { 0, 0, screenW, tabsH };
 
   // Divide the analyzer tab bar into four equal touch regions.
   // These rectangles are shared by tab drawing and touch detection so the
@@ -4386,18 +4364,25 @@ void calculateMeasureLayout()
 }
 
 
-// Divide the Sweep Setup content area into five interactive rows.
+// Divide the Sweep Setup content into six interactive rows with vertical
+// padding to separate the controls from the top navigation and footer.
 // The same row rectangles are used for drawing and touch detection so
 // Sweep controls remain aligned on different display resolutions.
 void calculateSweepLayout()
 {
   const LCRRect &content = lcrLayout.content;
 
+  // Leave vertical space between Sweep controls and the top navigation/footer.
+  // This reduces accidental activation of adjacent controls near the edges.
+  const int16_t verticalPadding = 8;
+  const int16_t rowsY = content.y + verticalPadding;
+  const int16_t rowsH = content.h - verticalPadding * 2;
+
   const int16_t rowCount = 6;
-  const int16_t rowH = content.h / rowCount;
+  const int16_t rowH = rowsH / rowCount;
 
   for (int16_t i = 0; i < rowCount; i++) {
-    int16_t y = content.y + i * rowH;
+    int16_t y = rowsY + i * rowH;
 
     int16_t h = (i == rowCount - 1)
       ? content.h - rowH * i
@@ -4785,7 +4770,7 @@ void calculateMoreSelectorLayout()
 {
   calculateSelectorButtonGrid(
     lcrLayout.morePresets,
-    2
+    3
   );
 }
 
@@ -5281,7 +5266,13 @@ void handleLCRMoreSelectorTouch(uint16_t x, uint16_t y)
     return;
   }
 
-  // Close More and return to the Measure screen.
+  // Leave the LCR analyzer and return to the oscilloscope.
+  if (pointInLCRRect(x, y, lcrLayout.morePresets[2])) {
+    exitLCRMode();
+    return;
+  }
+
+  // Exit More and return to the Measure screen.
   if (pointInLCRRect(x, y, lcrLayout.selectorCancel)) {
     returnToLCRMeasureScreen();
     return;
@@ -6697,7 +6688,7 @@ void drawLCRSettings()
     row.x + 8,
     row.y + row.h / 2 - 4
   );
-  display.print("Range Mode");
+  display.print("RRef Select Mode");
 
   const char *labels[] = {
     "Auto",
@@ -6789,9 +6780,8 @@ void drawLCRHeader()
 
 
 
-// Draw the four top-level LCR analyzer tabs.
-// Each tab receives an equal share of the available width, and the active
-// tab is highlighted using the existing GOscillo highlight color.
+// Draw the four top-level LCR analyzer tabs. The selected tab uses the same
+// outlined treatment as selected Settings controls for a clear active state.
 void drawLCRTabs()
 {
   const LCRRect &r = lcrLayout.tabs;
@@ -6804,40 +6794,48 @@ void drawLCRTabs()
   };
 
   const int16_t tabCount = 4;
-  const int16_t tabW = r.w / tabCount;
 
   display.fillRect(r.x, r.y, r.w, r.h, BGCOLOR);
+  display.setTextSize(1);
 
   for (int16_t i = 0; i < tabCount; i++) {
-    int16_t x = r.x + i * tabW;
-
-    // Let the last tab absorb any pixels left over by integer division.
-    int16_t w = (i == tabCount - 1)
-      ? r.w - (tabW * i)
-      : tabW;
-
+    const LCRRect &button = lcrLayout.tabButtons[i];
     bool selected = (i == static_cast<int16_t>(lcrTab));
 
-    uint16_t textColor = selected ? HIGHCOLOR : TXTCOLOR;
+    // Match the selected-option treatment used by Settings Range Mode.
+    uint16_t textColor = selected ? TFT_CYAN : TXTCOLOR;
 
-    display.setTextSize(1);
+    if (selected) {
+      display.drawRect(
+        button.x + 2,
+        button.y + 3,
+        button.w - 4,
+        button.h - 6,
+        TFT_CYAN
+      );
+    }
+
     display.setTextColor(textColor, BGCOLOR);
 
     int16_t textWidth = strlen(tabLabels[i]) * 6;
-    int16_t textX = x + (w - textWidth) / 2;
-    int16_t textY = r.y + (r.h - 8) / 2;
+    int16_t textX = button.x + (button.w - textWidth) / 2;
+    int16_t textY = button.y + (button.h - 8) / 2;
 
     display.setCursor(textX, textY);
     display.print(tabLabels[i]);
 
-    // Vertical separator between adjacent tabs.
     if (i < tabCount - 1) {
-      display.drawFastVLine( x + w - 1, r.y + 3, r.h - 6, GRIDCOLOR);
+      display.drawFastVLine(
+        button.x + button.w - 1,
+        button.y + 3,
+        button.h - 6,
+        GRIDCOLOR
+      );
     }
   }
 
-  // Bottom separator.
-  display.drawFastHLine( r.x, r.y + r.h - 1, r.w, GRIDCOLOR);
+  display.drawFastHLine(r.x, r.y + r.h - 1, r.w, GRIDCOLOR);
+  display.setTextColor(TXTCOLOR, BGCOLOR);
 }
 
 
@@ -7094,21 +7092,38 @@ void drawLCRMoreSelector()
 
   display.print(title);
 
+  char currentLabel[24];
+  char voltageLabel[24];
+
+  // Show the active PGA gains directly in the More menu so their current
+  // settings are visible without opening either gain selector.
+  snprintf(currentLabel, sizeof(currentLabel), "I-Gain: %.0fx",
+           getLCRPGAGainValue(lcrSettings.currentPgaGain));
+
+  snprintf(voltageLabel, sizeof(voltageLabel), "V-Gain: %.0fx",
+           getLCRPGAGainValue(lcrSettings.voltagePgaGain));
+
   drawLCRSelectorButton(
     lcrLayout.morePresets[0],
-    "Current PGA",
+    currentLabel,
     false
   );
 
   drawLCRSelectorButton(
     lcrLayout.morePresets[1],
-    "Voltage PGA",
+    voltageLabel,
+    false
+  );
+
+  drawLCRSelectorButton(
+    lcrLayout.morePresets[2],
+    "Scope",
     false
   );
 
   drawLCRSelectorButton(
     lcrLayout.selectorCancel,
-    "Cancel",
+    "Exit",
     false
   );
 }
@@ -7288,7 +7303,6 @@ void drawLCRScreen()
 {
   display.fillScreen(BGCOLOR);
 
-  drawLCRHeader();
   drawLCRTabs();
 
   switch (lcrTab) {
