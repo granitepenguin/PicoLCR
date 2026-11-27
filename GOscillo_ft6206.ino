@@ -260,10 +260,6 @@ void setup(){
 
   pinMode(CH0DCSW, INPUT_PULLUP);   // CH1 DC/AC
   pinMode(CH1DCSW, INPUT_PULLUP);   // CH2 DC/AC
-  pinMode(UPPIN, INPUT_PULLUP);     // up
-  pinMode(DOWNPIN, INPUT_PULLUP);   // down
-  pinMode(RIGHTPIN, INPUT_PULLUP);  // right
-  pinMode(LEFTPIN, INPUT_PULLUP);   // left
 #if defined(ARDUINO_WAVESHARE_RP2040_ZERO)
   pixels.begin();                   // NeoPixel start
 #else

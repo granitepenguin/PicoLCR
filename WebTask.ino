@@ -3107,9 +3107,11 @@ void handleNotFound(void) {
 void setup1() {
   Serial.begin(115200);
   // Mirror USB diagnostics on UART0 for external capture and debugging.
-  Serial1.setTX(0);
-  Serial1.setRX(1);
+  // Use unused GP28 for the transmit-only debug UART so GP0 remains
+  // dedicated to the production-board PWM output.
+  Serial1.setTX(28);
   Serial1.begin(115200);
+
 //  Serial.printf("CORE0 = %d\n", xPortGetCoreID());
 #ifdef WIFI_ACCESS_POINT
   WiFi.disconnect(true);
