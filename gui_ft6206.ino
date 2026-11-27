@@ -818,13 +818,12 @@ unsigned long vtime;
 void CheckSW() {
   static unsigned long Millis = 0;
   unsigned long ms;
-  byte sw;
 
   ms = millis();
 
 #ifndef NOLCD
   // Poll the capacitive touchscreen independently from the slower
-  // legacy physical-button scan so short taps are not missed.
+  // Scope control update so short taps are not missed.
   static unsigned long touchMillis = 0;
 
   if ((ms - touchMillis) >= 20) {
@@ -837,47 +836,17 @@ void CheckSW() {
     return;
 
   Millis = ms;
+
   if (wrate != 0) {
     updown_rate(wrate);
     wrate = 0;
     saveTimer = 5000;     // set EEPROM save timer to 5 second
   }
 
-#ifndef NOLCD
-#ifdef BUTTON5DIR
-  if (digitalRead(DOWNPIN) == LOW && digitalRead(LEFTPIN) == LOW) {
-    sw = BTN_RESET; // both button press
-  } else if (digitalRead(UPPIN) == LOW && digitalRead(RIGHTPIN) == LOW) {
-    sw = BTN_FULL;  // both button press
-#else
-  if (digitalRead(RIGHTPIN) == LOW && digitalRead(LEFTPIN) == LOW) {
-    sw = BTN_RESET; // both button press
-  } else if (digitalRead(UPPIN) == LOW && digitalRead(DOWNPIN) == LOW) {
-    sw = BTN_FULL;  // both button press
-#endif
-  } else if (digitalRead(DOWNPIN) == LOW) {
-    sw = BTN_DOWN;  // down
-  } else if (digitalRead(RIGHTPIN) == LOW) {
-    sw = BTN_RIGHT; // right
-  } else if (digitalRead(LEFTPIN) == LOW) {
-    sw = BTN_LEFT;  // left
-  } else if (digitalRead(UPPIN) == LOW) {
-    sw = BTN_UP;    // up
-  } else {
-    lastsw = 255;
-    return;
-  }
-  if (sw != lastsw)
-    vtime = ms;
-  saveTimer = 5000;     // set EEPROM save timer to 5 second
-  menu_sw(sw);
-
-  if (instrumentMode == MODE_SCOPE)
-    DrawText();
-
-  //  display.display();
-  lastsw = sw;
-#endif
+  // Physical navigation buttons are no longer installed. Preserve the
+  // previous no-button control flow without reading the LCR PGA GPIOs.
+  lastsw = 255;
+  return;
 }
 
 void updown_ch0range(byte sw) {

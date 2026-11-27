@@ -8,6 +8,10 @@
 //   run without the need to make any more changes for a particular hardware setup!
 //   Note that some sketches are designed for a particular TFT pixel width/height
 
+// PicoLCR uses the FT6206 I2C touchscreen, not TFT_eSPI's SPI touch support.
+// Suppress warnings for intentionally disabled optional library features.
+#define DISABLE_ALL_LIBRARY_WARNINGS
+
 #define USER_SETUP_ID 60
 // ##################################################################################
 //
@@ -130,7 +134,8 @@
 #define TFT_RST  14  // Reset pin (could connect to Arduino RESET pin)
 //#define TFT_BL     // LED back-light
 
-#define TOUCH_CS  9     // Chip select pin (T_CS) of touch screen
+// TOUCH_CS is unused; this build uses the FT6206 I2C capacitive touchscreen.
+// #define TOUCH_CS 9
 
 // ##################################################################################
 //
