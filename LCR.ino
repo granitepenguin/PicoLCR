@@ -182,6 +182,14 @@ const FeedbackPreset feedbackPresets[] = {
 constexpr uint8_t FEEDBACK_PRESET_COUNT =
   sizeof(feedbackPresets) / sizeof(feedbackPresets[0]);
 
+// LCR instrument calibration occupies a dedicated EEPROM region separate
+// from normal user settings. The legacy Scope/settings block begins at
+// EEPROM_START and currently occupies addresses 0-27.
+//
+// Keeping calibration separate prevents ordinary settings changes or resets
+// from modifying instrument-specific calibration data.
+constexpr int LCR_CAL_EEPROM_START = 256;
+
 // ====================================================================
 
 
@@ -195,17 +203,31 @@ constexpr uint8_t FEEDBACK_PRESET_COUNT =
 
 // Force a fixed voltage-PGA gain for analog hardware characterization.
 // Set to 0 for normal automatic V-PGA operation.
-#define LCR_FORCE_V_PGA 0
+#define LCR_FORCE_V_PGA 1
 
 // set LCR measure mode to hold if a FIFO is hit for diagnostics
 #define FIFO_HOLD 0
+
+// Enable application of the instrument's complex calibration correction.
+// With unity calibration data enabled, this remains mathematically
+// transparent and does not alter the measured impedance.
+#define LCR_ENABLE_CALIBRATION 1
+
+// Enable diagnostic output for the calibration system. This definition is
+// kept in LCR.h because calibration diagnostics are used by both LCR.ino and
+// the primary sketch during startup.
+#define LCR_CALIBRATION_DEBUG 1
 
 // Run the one-shot ADC channel-match diagnostic when entering LCR mode.
 // Both ADC measurement inputs must receive the same physical signal.
 #define LCR_RUN_CHANNEL_MATCH_TEST 0
 
+// Run the one-shot voltage-PGA characterization when entering LCR mode.
+// A DUT must be installed normally for this test.
+#define LCR_RUN_PGA_CHARACTERIZATION_TEST 0
+
 #if LCR_FORCE_V_PGA
-constexpr LCRPGAGain LCR_FORCED_V_PGA_GAIN = LCR_PGA_GAIN_101;
+constexpr LCRPGAGain LCR_FORCED_V_PGA_GAIN = LCR_PGA_GAIN_1;
 #endif
 
 // ====================================================================
@@ -2036,6 +2058,182 @@ MeasurementPoint simulatedMeasurement(const MeasurementSettings &settings)
 }
 
 
+// Prototype breadboard frequency-calibration anchors.
+//
+// IMPORTANT:
+// These coefficients characterize the present breadboard implementation only.
+// They must not be treated as universal PicoLCR constants. A production PCB
+// must be independently characterized and supplied with its own calibration
+// dataset.
+//
+// Unity values are used initially so interpolation and lookup can be validated
+// without changing the existing measurement result.
+const LCRFrequencyCalibration lcrFrequencyCalibration[] = {
+  {    100, 1.0f, 0.0f },
+  {   1000, 1.0f, 0.0f },
+  {   5000, 1.0f, 0.0f },
+  {  10000, 1.0f, 0.0f },
+  {  20000, 1.0f, 0.0f },
+  {  50000, 1.0f, 0.0f },
+  { 100000, 1.0f, 0.0f },
+  { 110000, 1.0f, 0.0f }
+};
+
+constexpr uint8_t LCR_FREQUENCY_CALIBRATION_COUNT =
+  sizeof(lcrFrequencyCalibration) /
+  sizeof(lcrFrequencyCalibration[0]);
+
+
+// Check whether persistent storage contains an LCR calibration block that
+// this firmware understands.
+//
+// This validates only the calibration header. It does not load coefficients
+// or enable calibration. Until a valid payload format is defined and stored,
+// an erased or incompatible calibration region is treated as uncalibrated.
+bool hasValidLCRCalibration()
+{
+#ifdef EEPROM_START
+  int p = LCR_CAL_EEPROM_START;
+
+  LCRCalibrationHeader header;
+
+  EEPROM.get(p, header);
+
+  if (header.magic != LCR_CALIBRATION_MAGIC)
+    return false;
+
+  if (header.version != LCR_CALIBRATION_VERSION)
+    return false;
+
+  // No calibration payload format has been defined yet. A nonzero payload
+  // cannot currently be interpreted safely by this firmware.
+  if (header.payloadSize != 0)
+    return false;
+
+  return true;
+#else
+  return false;
+#endif
+}
+
+
+// Return the interpolated frequency-dependent complex correction.
+//
+// Calibration anchors are ordered by increasing frequency. Frequencies between
+// anchors use linear interpolation for both magnitude and phase. Frequencies
+// outside the characterized range use the nearest endpoint rather than
+// extrapolating beyond measured calibration data.
+//
+// This function deals only with frequency-dependent correction. PGA- and
+// Rref-dependent corrections will remain separate so breadboard-specific
+// behavior is not hidden inside the theoretical impedance model.
+LCRComplexCorrection getLCRFrequencyCalibration(uint32_t frequency)
+{
+  if (frequency <= lcrFrequencyCalibration[0].frequency) {
+    return {
+      lcrFrequencyCalibration[0].magnitude,
+      lcrFrequencyCalibration[0].phaseDeg
+    };
+  }
+
+  uint8_t last = LCR_FREQUENCY_CALIBRATION_COUNT - 1;
+
+  if (frequency >= lcrFrequencyCalibration[last].frequency) {
+    return {
+      lcrFrequencyCalibration[last].magnitude,
+      lcrFrequencyCalibration[last].phaseDeg
+    };
+  }
+
+  for (uint8_t i = 0; i < last; i++) {
+    const LCRFrequencyCalibration &low =
+      lcrFrequencyCalibration[i];
+
+    const LCRFrequencyCalibration &high =
+      lcrFrequencyCalibration[i + 1];
+
+    if (frequency < low.frequency ||
+        frequency > high.frequency) {
+      continue;
+    }
+
+    float fraction =
+      static_cast<float>(frequency - low.frequency) /
+      static_cast<float>(high.frequency - low.frequency);
+
+    LCRComplexCorrection correction;
+
+    correction.magnitude =
+      low.magnitude +
+      fraction * (high.magnitude - low.magnitude);
+
+    correction.phaseDeg =
+      low.phaseDeg +
+      fraction * (high.phaseDeg - low.phaseDeg);
+
+    return correction;
+  }
+
+  // The ordered calibration table should make this unreachable. Return unity
+  // rather than altering a measurement if the table is ever malformed.
+  return { 1.0f, 0.0f };
+}
+
+
+// Return the complex calibration correction for the active measurement
+// configuration.
+//
+// Calibration may ultimately depend on frequency, voltage-PGA gain, and
+// feedback/Rref range. The initial implementation deliberately returns a
+// unity correction so the calibration pipeline can be tested without
+// changing any measurement results.
+LCRComplexCorrection getLCRCalibration(
+  uint32_t frequency,
+  LCRPGAGain voltagePgaGain,
+  int8_t feedbackPreset)
+{
+  // Begin with the correction interpolated from the hardware-specific
+  // frequency calibration table.
+  LCRComplexCorrection correction =
+    getLCRFrequencyCalibration(frequency);
+
+  // voltagePgaGain and feedbackPreset are intentionally retained in this
+  // interface. Their independently characterized corrections will be added
+  // here without changing the measurement or calibration architecture.
+  (void)voltagePgaGain;
+  (void)feedbackPreset;
+
+  return correction;
+}
+
+
+
+// Apply one complex calibration correction to a raw DUT impedance.
+//
+// The magnitude correction scales the impedance magnitude, while the phase
+// correction rotates the impedance in the complex R+jX plane. Applying both
+// operations to the complex impedance keeps resistance and reactance
+// consistent with one another.
+//
+// This function does not select calibration coefficients. It only applies
+// the correction supplied by getLCRCalibration().
+LCRPhasor applyLCRCalibration(
+  const LCRPhasor &raw,
+  const LCRComplexCorrection &correction)
+{
+  LCRPhasor calibrated =
+    scaleLCRPhasor(raw, correction.magnitude);
+
+  float phaseRadians =
+    correction.phaseDeg * PI / 180.0f;
+
+  calibrated =
+    rotateLCRPhasor(calibrated, phaseRadians);
+
+  return calibrated;
+}
+
+
 // Perform one physical LCR measurement using the AD9833 excitation source
 // and the dual-channel ADC/DMA/Goertzel impedance backend.
 MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
@@ -2284,6 +2482,41 @@ MeasurementPoint hardwareMeasurement(const MeasurementSettings &settings)
   }
 #endif
 
+  LCRPhasor rawImpedance = impedance;
+
+#if LCR_ENABLE_CALIBRATION
+  int8_t feedbackPreset =
+    getLCRFeedbackPresetIndex(feedbackResistance);
+
+  LCRComplexCorrection correction =
+    getLCRCalibration(
+      settings.frequency,
+      settings.voltagePgaGain,
+      feedbackPreset
+    );
+
+  impedance =
+    applyLCRCalibration(
+      impedance,
+      correction
+    );
+#endif
+
+#if LCR_CALIBRATION_DEBUG
+  Debug.print("LCR CAL raw: |Z|=");
+  Debug.print(magnitudeLCRPhasor(rawImpedance), 3);
+
+  Debug.print(" phase=");
+  Debug.print(phaseLCRPhasor(rawImpedance), 3);
+
+  Debug.print("  corrected: |Z|=");
+  Debug.print(magnitudeLCRPhasor(impedance), 3);
+
+  Debug.print(" phase=");
+  Debug.println(phaseLCRPhasor(impedance), 3);
+#endif
+
+
   measurement.frequency = settings.frequency;
   measurement.resistance = impedance.re;
   measurement.reactance = impedance.im;
@@ -2339,6 +2572,9 @@ void enterLCRMode()
   lcrCaptureFailureDumped = false;
 
   instrumentMode = MODE_LCR;
+  // Persist the user's instrument selection using the existing delayed EEPROM
+  // save mechanism rather than writing flash immediately on every mode change.
+  saveTimer = 5000;
   lcrTab = LCR_TAB_MEASURE;
 
   // The touch that selected LCR on the Scope screen may still be held.
@@ -2360,9 +2596,24 @@ void enterLCRMode()
   initializeLCR();
   initializeLCRCapture();
 
+#if LCR_CALIBRATION_DEBUG
+  // Report the persistent calibration state when the LCR subsystem is
+  // initialized. Calibration belongs to the LCR instrument rather than the
+  // generic Scope startup path.
+  Debug.print("LCR calibration storage: ");
+  Debug.println(
+    hasValidLCRCalibration() ? "valid" : "not calibrated"
+  );
+#endif
+
 #if LCR_RUN_CHANNEL_MATCH_TEST
   // Characterize relative ADC-channel gain and phase before normal LCR use.
   runLCRChannelMatchTest();
+#endif
+
+#if LCR_RUN_PGA_CHARACTERIZATION_TEST
+  // Characterize V-PGA gain and phase behavior with a normal DUT installed.
+  runLCRPGACharacterizationTest();
 #endif
 
   drawLCRScreen();
@@ -2391,6 +2642,10 @@ void exitLCRMode()
   scopeWaitForTouchRelease = true;
 
   instrumentMode = MODE_SCOPE;
+
+  // Persist the user's instrument selection using the existing delayed EEPROM
+  // save mechanism rather than writing flash immediately on every mode change.
+  saveTimer = 5000;
 
   display.fillScreen(BGCOLOR);
   DrawText();
@@ -3690,6 +3945,120 @@ void runLCRChannelMatchTest()
     setLCRGeneratorFrequency(frequency);
     printLCRChannelMatchTest(frequency);
   }
+}
+
+
+// Characterize the voltage-measurement PGA at several representative
+// frequencies. The DUT remains connected normally while only V-PGA gain is
+// changed between captures.
+void runLCRPGACharacterizationTest()
+{
+  static const uint32_t frequencies[] = {
+    1000,
+    10000,
+    50000
+  };
+
+  static const LCRPGAGain gains[] = {
+    LCR_PGA_GAIN_1,
+    LCR_PGA_GAIN_5,
+    LCR_PGA_GAIN_25,
+    LCR_PGA_GAIN_101
+  };
+
+  float feedbackResistance = lcrSettings.feedbackResistance;
+
+  Serial.println();
+  Serial.println("=== LCR V-PGA CHARACTERIZATION ===");
+
+  for (uint8_t f = 0;
+       f < sizeof(frequencies) / sizeof(frequencies[0]);
+       f++) {
+
+    uint32_t frequency = frequencies[f];
+
+    setLCRGeneratorFrequency(frequency);
+
+    Serial.println();
+    Serial.print("FREQ ");
+    Serial.print(frequency);
+    Serial.println(" Hz");
+
+    for (uint8_t g = 0;
+         g < sizeof(gains) / sizeof(gains[0]);
+         g++) {
+
+      LCRPGAGain gain = gains[g];
+
+      selectLCRVoltagePGAGain(gain);
+      delay(2);
+
+      LCRPhasor impedance;
+      LCRCaptureQuality quality;
+
+      bool valid =
+        measureLCRHardwareImpedance(
+          frequency,
+          feedbackResistance,
+          impedance,
+          quality
+        );
+
+      Serial.print("PGA ");
+      Serial.print(getLCRPGAGainValue(gain), 0);
+      Serial.print("x");
+
+      if (!valid) {
+        Serial.println("  CAPTURE_ERR");
+        continue;
+      }
+
+      float magnitude =
+        sqrtf(
+          impedance.re * impedance.re +
+          impedance.im * impedance.im
+        );
+
+      float phase =
+        atan2f(impedance.im, impedance.re) *
+        180.0f / PI;
+
+      Serial.print("  Rref=");
+      Serial.print(feedbackResistance, 2);
+
+      Serial.print("  Iamp=");
+      Serial.print(quality.current.amplitude, 2);
+
+      Serial.print("  Vamp=");
+      Serial.print(quality.voltage.amplitude, 2);
+
+      Serial.print("  Vsat=");
+      Serial.print(
+        quality.voltage.saturated ? "yes" : "no"
+      );
+
+      Serial.print("  Vhead=");
+      Serial.print(
+        quality.voltage.headroomLimited ? "limited" : "safe"
+      );
+
+      Serial.print("  |Z|=");
+      Serial.print(magnitude, 3);
+
+      Serial.print("  phase=");
+      Serial.print(phase, 3);
+
+      Serial.print("  Rs=");
+      Serial.print(impedance.re, 3);
+
+      Serial.print("  Xs=");
+      Serial.println(impedance.im, 3);
+    }
+  }
+
+  Serial.println();
+  Serial.println("=== END LCR V-PGA CHARACTERIZATION ===");
+  Serial.println();
 }
 
 

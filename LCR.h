@@ -18,7 +18,6 @@
 
 #include <Arduino.h>
 
-
 // Describes the validity of a completed LCR measurement.
 enum LCRMeasurementStatus
 {
@@ -685,6 +684,55 @@ struct LCRPhasor
 {
   float re;
   float im;
+};
+
+
+// Represents one complex calibration correction applied to a measured
+// impedance. The magnitude term scales |Z| while phaseDeg rotates the
+// complex impedance in the R+jX plane.
+//
+// Keeping calibration in this form allows one correction to fix both the
+// resistive and reactive components before Rs, Cs, Ls, Rp, Cp, Q, and D
+// are derived from the corrected impedance.
+struct LCRComplexCorrection
+{
+  float magnitude;
+  float phaseDeg;
+};
+
+// Defines one frequency anchor used by the complex calibration system.
+//
+// The magnitude and phase values are empirical corrections for a particular
+// assembled analog implementation. They are not part of the theoretical LCR
+// measurement model and must be regenerated when the analog hardware changes.
+//
+// Intermediate measurement frequencies are corrected by interpolation between
+// adjacent calibration anchors.
+struct LCRFrequencyCalibration
+{
+  uint32_t frequency;
+  float magnitude;
+  float phaseDeg;
+};
+
+// Identifies a valid LCR instrument-calibration block in persistent storage.
+// The version allows future firmware to reject calibration data whose layout
+// is incompatible with the format expected by that firmware.
+constexpr uint32_t LCR_CALIBRATION_MAGIC = 0x4C435243UL; // "LCRC"
+constexpr uint16_t LCR_CALIBRATION_VERSION = 1;
+
+
+// Header stored at the beginning of the persistent LCR calibration region.
+//
+// payloadSize records how many bytes of calibration data follow the header.
+// checksum will allow corrupted calibration data to be rejected rather than
+// silently applying invalid corrections to impedance measurements.
+struct LCRCalibrationHeader
+{
+  uint32_t magic;
+  uint16_t version;
+  uint16_t payloadSize;
+  uint32_t checksum;
 };
 
 

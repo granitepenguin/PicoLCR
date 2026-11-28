@@ -311,6 +311,7 @@ initializeLCRGenerator();
 #else
   set_default();
 #endif
+
   wfft = fft_mode;
   wdds = dds_mode;
 //  DrawGrid();
@@ -324,6 +325,13 @@ initializeLCRGenerator();
   orate = RATE_DMA + 1;                 // old rate befor change
   dmaadc_setup(0);                      // initial setup for DMA adc
   clock_configure_gpin(clk_gpout0, GPIN1, 1000, 1000);  // frequency count on GPIO22
+
+  // Restore the instrument that was active when settings were last saved.
+  // Scope is already initialized by this point. If LCR was the saved mode,
+  // enterLCRMode() performs the normal Scope-to-LCR hardware handoff rather
+  // than bypassing the ADC, DDS, display, or LCR initialization sequence.
+  if (instrumentMode == MODE_LCR)
+    enterLCRMode();
 }
 
 #ifndef NOLCD
@@ -640,6 +648,13 @@ void loop() {
   // Apply browser mode changes on Core 0 before dispatching instrument work.
   processLCRWebModeRequest();
 
+#ifdef EEPROM_START
+  // Process delayed settings saves before dispatching to the active
+  // instrument. LCR mode returns early from loop(), so EEPROM saving must
+  // occur here rather than in the Scope-only portion of the loop.
+  saveEEPROM();
+#endif
+
   if (instrumentMode == MODE_LCR) {
     updateLCR();
     return;
@@ -760,9 +775,6 @@ void loop() {
   if (trig_mode == TRIG_ONE)
     Start = false;
   CheckSW();
-#ifdef EEPROM_START
-  saveEEPROM();                         // save settings to EEPROM if necessary
-#endif
   if (wdds != dds_mode) {
     if (wdds) {
       dds_setup();
@@ -1042,6 +1054,9 @@ void saveEEPROM() {                   // Save the setting value in EEPROM after 
       EEPROM.write(p++, (ifreq >> 8) & 0xff);
       EEPROM.write(p++, (ifreq >> 16) & 0xff);
       EEPROM.write(p++, (ifreq >> 24) & 0xff);
+      // Remember which instrument was active so the next startup returns to the
+      // user's last-used Scope or LCR mode.
+      EEPROM.write(p++, static_cast<byte>(instrumentMode));
       EEPROM.commit();    // actually write EEPROM. Necessary for Raspberry Pi Pico
     }
   }
@@ -1070,6 +1085,9 @@ void set_default() {
   dds_mode = false;
   wave_id = 0;    // sine wave
   ifreq = 23841;  // 238.41Hz
+  // LCR is the preferred startup instrument for new or uninitialized units.
+  // A valid saved settings block overrides this with the user's last-used mode.
+  instrumentMode = MODE_LCR;
 }
 
 extern const byte wave_num;
@@ -1124,7 +1142,18 @@ void loadEEPROM() { // Read setting values from EEPROM (abnormal values will be 
   *((byte *)&ifreq + 2) = EEPROM.read(p++); // ifreq
   *((byte *)&ifreq + 3) = EEPROM.read(p++); // ifreq high
   if (ifreq > 999999L) ++error;
-  if (error > 0)
+  // Restore the last-used instrument mode. Invalid or uninitialized EEPROM
+  // contents are rejected along with the other saved settings.
+  byte savedInstrumentMode = EEPROM.read(p++);
+
+  if (savedInstrumentMode > MODE_LCR) {
+    ++error;
+  } else {
+    instrumentMode =
+      static_cast<InstrumentMode>(savedInstrumentMode);
+  }
+  if (error > 0) {
     set_default();
+  }
 }
 #endif
